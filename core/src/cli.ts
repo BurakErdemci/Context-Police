@@ -29,7 +29,15 @@ function safe(value: string, max = 120): string {
   const cleaned = [...value]
     .map((ch) => {
       const c = ch.codePointAt(0)!;
-      return c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f) ? `\\x${c.toString(16).padStart(2, "0")}` : ch;
+      // C0/C1/DEL'e ek olarak bidi ve görünmez biçim karakterleri: U+202A-E
+      // (yön değiştirme), U+2066-9 (izolat), U+200B-F, U+FEFF. Doğrulama
+      // turunda U+202E ham geçiyordu — terminalde metni tersine çevirebiliyor.
+      const bidi =
+        (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) ||
+        (c >= 0x200b && c <= 0x200f) || c === 0xfeff || c === 0x061c;
+      return c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f) || bidi
+        ? `\\u{${c.toString(16)}}`
+        : ch;
     })
     .join("");
   return cleaned.length > max ? cleaned.slice(0, max) + "…" : cleaned;

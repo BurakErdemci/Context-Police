@@ -6,10 +6,38 @@
 
 import type { Store } from "./store/db.ts";
 import type { DiscoveredProject, DiscoveredSession, TranscriptAdapter, Turn } from "./types.ts";
-import { upsertProject, getCursor, setCursor, markScanned } from "./store/projects.ts";
+import { upsertProject, getCursor, getCursorByInode, setCursor, markScanned } from "./store/projects.ts";
 import { logEvent } from "./store/events.ts";
 import { readIncremental } from "./adapters/claude-code.ts";
 import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
+import { realpath, stat } from "node:fs/promises";
+
+/**
+ * Gözlemcinin fırlattığı hata. Ayrı SINIF, çünkü önceki hâli hatanın üstüne
+ * bir alan yazmaktı ve ilkel değer fırlatan bir gözlemci (throw "x") o alanı
+ * taşıyamıyordu — okuma hatasıyla aynı kefeye giriyordu (doğrulama turu).
+ */
+export class ObserverError extends Error {
+  readonly reason: unknown;
+  constructor(reason: unknown) {
+    super(`gözlemci hata verdi: ${reason instanceof Error ? reason.message : String(reason)}`);
+    this.name = "ObserverError";
+    this.reason = reason;
+  }
+}
+
+/** Deponun kendisi yazamıyorsa tarama devam etmemeli — sessiz sonsuz tekrar olur. */
+export class StoreFailure extends Error {
+  readonly reason: unknown;
+  constructor(reason: unknown) {
+    super(`depo yazılamadı: ${reason instanceof Error ? reason.message : String(reason)}`);
+    this.name = "StoreFailure";
+    this.reason = reason;
+  }
+}
+
+/** Bir taramada proje başına kaydedilecek en fazla farklı bilinmeyen tip. */
+const MAX_UNKNOWN_TYPES_PER_SCAN = 20;
 
 export interface ScanSummary {
   projects: number;
@@ -52,7 +80,22 @@ export async function scanOnce(store: Store, opts: ScanOptions): Promise<ScanSum
 
 async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
   const adapter = opts.adapter;
-  const found: DiscoveredProject[] = await adapter.discover(opts.root);
+
+  // Silme korumaları hâlâ yerinde mi? Ucuz; kaybını fark etmemek pahalı.
+  store.verifyGuards();
+
+  // Keşif de I/O ve o da patlayabiliyor. Oturum başına sınır keşfi kapsamıyordu:
+  // discover() içindeki tek bir ENOENT tüm taramayı iz bırakmadan öldürüyordu.
+  let found: DiscoveredProject[];
+  try {
+    found = await adapter.discover(opts.root);
+  } catch (err) {
+    logEvent(store, {
+      kind: "discovery_failed",
+      detail: { error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) },
+    });
+    throw err;
+  }
 
   const sum: ScanSummary = {
     projects: 0, sessionsTouched: 0, turns: 0, bytesRead: 0, filteredBytes: 0,
@@ -71,6 +114,11 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
       memoryDir: proj.memoryDir,
     });
 
+    if (proj.error) {
+      sum.sessionErrors++;
+      logEvent(store, { projectId, kind: "discovery_failed", detail: { transcriptDir: proj.transcriptDir, error: proj.error } });
+    }
+
     if (proj.unresolved) {
       sum.unresolvedProjects++;
       // Atlanmıyor, raporlanıyor: sessiz düşen proje hiç görünmeyen projedir.
@@ -85,17 +133,20 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
       try {
         await scanSession(store, opts, projectId, session, sum);
       } catch (err) {
-        // Tek bir bozuk oturum tüm taramayı öldürmemeli. Denetimde ölçüldü:
-        // keşif ile okuma arasında silinen bir dosya ENOENT atıyor, sonraki
-        // sağlam projeler hiç işlenmiyor ve depoda hiçbir iz kalmıyordu —
-        // arka planda koşan bir araç için sessiz ölüm en kötü davranış.
+        // Depo yazamıyorsa devam etmek anlamsız: imleç ilerlemeyeceği için her
+        // tarama aynı veriyi yeniden teslim eder. Yutulmaz, yukarı fırlar.
+        if (err instanceof StoreFailure) throw err;
+
+        // Tek bir bozuk oturum ise tüm taramayı öldürmemeli. Ölçüldü: keşif ile
+        // okuma arasında silinen bir dosya ENOENT atıyor, sonraki sağlam
+        // projeler hiç işlenmiyordu — arka plan aracı için sessiz ölüm en kötüsü.
         sum.sessionErrors++;
-        // Gözlemci hatası ile okuma hatası ayrı sınıflar: biri girdi
-        // problemi, diğeri tüketici problemi. Karıştırılırsa M2'de hangi
-        // tarafın bozulduğu görünmez olur.
+        // Gözlemci hatası ile okuma hatası ayrı sınıflar: biri tüketici, diğeri
+        // girdi problemi. Karışırsa M2'de hangi tarafın bozulduğu görünmez olur.
+        const isObserver = err instanceof ObserverError;
         logEvent(store, {
           projectId,
-          kind: (err as { cpObserver?: boolean })?.cpObserver ? "observer_failed" : "session_read_failed",
+          kind: isObserver ? "observer_failed" : "session_read_failed",
           detail: {
             sessionId: session.sessionId,
             error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
@@ -118,7 +169,15 @@ async function scanSession(
   session: DiscoveredSession,
   sum: ScanSummary,
 ): Promise<void> {
-  const cursor = getCursor(store, session.filePath);
+  // Anahtar GERÇEK yol: aynı fiziksel dosyaya iki yoldan ulaşılabiliyordu
+  // (sembolik bağ, sabit bağ) ve aynı akış iki kez teslim ediliyordu.
+  const cursorKey = await realpath(session.filePath).catch(() => session.filePath);
+  let cursor = getCursor(store, cursorKey);
+  if (!cursor) {
+    // Yol bilinmiyor: aynı akış başka bir adla (sabit bağ) kayıtlı olabilir.
+    const ino = await stat(session.filePath).then((st) => String(st.ino)).catch(() => null);
+    if (ino) cursor = getCursorByInode(store, ino);
+  }
   const from = cursor?.byteOffset ?? 0;
 
   // Burada "dosya büyümemişse atla" kısayolu YOK, bilerek. Önceki hâlinde
@@ -137,12 +196,25 @@ async function scanSession(
     });
   }
 
-  // Tip başına tek olay: hem içerik taşımaz hem hiçbir tip sayı sınırına kurban gitmez.
+  // Tip başına tek olay — ama sınırsız değil. Denetimde ölçüldü: 2048 farklı
+  // uydurma tip 2048 kalıcı satır üretiyordu ve events silinemez olduğu için
+  // şişme geri alınamıyordu. Sınır üstü tipler sayı olarak tek satırda özetlenir.
+  let logged = 0;
+  let overflow = 0;
   for (const [lineType, info] of res.unknownTypes) {
+    if (logged >= MAX_UNKNOWN_TYPES_PER_SCAN) { overflow++; continue; }
+    logged++;
     logEvent(store, {
       projectId,
       kind: "unknown_line_type",
       detail: { sessionId: session.sessionId, lineType, count: info.count, shape: info.shape },
+    });
+  }
+  if (overflow > 0) {
+    logEvent(store, {
+      projectId,
+      kind: "unknown_type_overflow",
+      detail: { sessionId: session.sessionId, suppressedTypes: overflow, loggedTypes: logged },
     });
   }
   if (res.counts.malformed > 0) {
@@ -172,16 +244,19 @@ async function scanSession(
       } catch (err) {
         // İmleç yazılmadan yeniden fırlatılıyor: turn kaybolmaz, sonraki
         // taramada yeniden teslim edilir (en-az-bir-kez).
-        Object.assign(err as object, { cpObserver: true });
-        throw err;
+        throw new ObserverError(err);
       }
     }
 
-    setCursor(store, projectId, session.sessionId, {
-      filePath: session.filePath,
-      byteOffset: res.byteOffset,
-      inode: res.inode,
-      mtimeMs: res.mtimeMs,
-    });
+    try {
+      setCursor(store, projectId, session.sessionId, {
+        filePath: cursor?.filePath ?? cursorKey,
+        byteOffset: res.byteOffset,
+        inode: res.inode,
+        mtimeMs: res.mtimeMs,
+      });
+    } catch (err) {
+      throw new StoreFailure(err);
+    }
   }
 }

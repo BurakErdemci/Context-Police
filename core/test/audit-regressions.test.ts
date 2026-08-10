@@ -277,7 +277,7 @@ test("CLI güvenilmeyen değerleri terminale ham basmaz", async () => {
     assert.ok(!out.includes(""), `${name} çıktısına ESC karakteri sızdı`);
     assert.ok(!out.includes(""), `${name} çıktısına BEL karakteri sızdı`);
   }
-  assert.ok(scanOut.includes("\\x1b"), "kontrol karakteri gizlenmeyip görünür hâle getirilmeli");
+  assert.ok(scanOut.includes("\\u{1b}"), "kontrol karakteri gizlenmeyip görünür hâle getirilmeli");
 });
 
 // class: non-atomic-cursor-claim

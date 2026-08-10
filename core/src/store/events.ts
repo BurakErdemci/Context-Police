@@ -11,6 +11,8 @@ export type EventKind =
   | "observer_failed"
   | "session_read_failed"
   | "scan_lock_stolen"
+  | "discovery_failed"
+  | "unknown_type_overflow"
   | "malformed_line"
   | "truncation_detected"
   | "unresolved_project_key"

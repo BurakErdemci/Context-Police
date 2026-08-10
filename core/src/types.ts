@@ -44,6 +44,8 @@ export interface DiscoveredProject {
   /** Dizin anahtarı gerçek bir yola çözülemedi — atlanmaz, raporlanır (M0'daki `ı` vakası). */
   unresolved: boolean;
   sessions: DiscoveredSession[];
+  /** Bu silo okunamadı; diğerleri etkilenmez, sebep olaya yazılır. */
+  error?: string;
 }
 
 export interface TranscriptAdapter {

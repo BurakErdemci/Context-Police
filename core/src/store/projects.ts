@@ -88,6 +88,21 @@ export function setCursor(
   );
 }
 
+/**
+ * Aynı fiziksel dosyaya farklı yollardan ulaşılabiliyor: sembolik bağ realpath
+ * ile çözülüyor ama SABİT BAĞ çözülemiyor — iki gerçek yol, tek inode. Yol
+ * eşleşmezse akışın kimliği olan inode'a bakılıyor (doğrulama turu bulgusu).
+ */
+export function getCursorByInode(store: Store, inode: string): CursorState | null {
+  const row = store.get<{ file_path: string; byte_offset: number; inode: string | null; mtime_ms: number | null }>(
+    "SELECT file_path, byte_offset, inode, mtime_ms FROM cursors WHERE inode = ? ORDER BY byte_offset DESC LIMIT 1",
+    inode,
+  );
+  return row
+    ? { filePath: row.file_path, byteOffset: row.byte_offset, inode: row.inode, mtimeMs: row.mtime_ms }
+    : null;
+}
+
 export function markScanned(store: Store, projectId: number): void {
   store.run("UPDATE projects SET last_scanned_at = ? WHERE id = ?", nowIso(), projectId);
 }
