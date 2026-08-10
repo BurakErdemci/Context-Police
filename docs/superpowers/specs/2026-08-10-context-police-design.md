@@ -38,7 +38,8 @@ Her karar gerekçesiyle; gerekçesi çöken karar yeniden tartışılır, sessiz
 | K8 | Silme yok; yalnız `superseded` | Yanlış işaretin maliyeti sıfır, geri alma tek tık; geri alınan karar oranı = ölçülebilir hata oranı (CLAUDE.md §3.2) |
 | K9 | **Onaysız hiçbir disk yazımı yok, istisnasız** | Hafıza dosyaları yanlışlıkla bozulursa güven biter; `superseded` işareti bile ancak onaydan sonra dosyaya iner |
 | K10 | İki adapter seam'i gün birden tanımlı, birer implementasyon: `TranscriptAdapter` (Claude Code jsonl), `ExecutorAdapter` (Codex headless) | "Seam'i erken tanımla, birini implemente et" — sonradan seam açmak pahalı; şimdi ikinci implementasyon YAGNI |
-| K11 | Gün-0: kod yazmadan önce GaMachine hafızasında retrospektif çürüme ölçümü | Ucuz doğrulama önce: düşük çürüme oranı projeyi ucuza öldürür (iyi sonuç); yüksek oran eşikleri/sinyalleri kalibre eder ve altın test seti üretir |
+| K11 | Gün-0: kod yazmadan önce GaMachine hafızasında retrospektif çürüme ölçümü | Ucuz doğrulama önce: düşük çürüme oranı projeyi ucuza öldürür (iyi sonuç); yüksek oran eşikleri/sinyalleri kalibre eder ve altın test seti üretir. **Koşuldu 2026-08-10: %61 çürüme → GO** (`docs/olcumler/2026-08-10-m0-gamachine-retrospektif.md`); bu spec'in D1-D8 atıfları o rapordan |
+| K12 | Çekirdek stack: Node 24 + TypeScript tip-soyma + `node:sqlite` + `node:test` — sıfır çalışma-zamanı bağımlılığı | Ölçüldü 2026-08-10: üçü de bu makinede çalışıyor. Native modül (better-sqlite3) derleme/prebuild yükü dağıtımda ağır; gömülü sqlite o yükü sıfırlıyor. `node:sqlite` deneysel uyarı veriyor → depo katmanı ince bir arayüzün arkasında, takas tek dosya |
 
 ---
 
@@ -84,14 +85,31 @@ finding {
   content                             -- olgunun markdown gövdesi
   source_ref                          -- imported: dosya yolu; observed: oturum id + turn
   created_at
-  status        active | suspect | superseded
+  status        active | suspect | superseded | born_invalid | unanchored
   superseded_by
   suspicion     0..1 birikimli şüphe skoru
 }
 ```
 
-**anchors** — bulgu başına N kayıt: `file_path | symbol | commit_sha` + çapanın
-alındığı andaki commit.
+`born_invalid` (M0-D2): iddia yazıldığı gün de yanlıştı — var olmayan bir yol,
+yanlış sayı, yanlış konum beyanı. Çürüme değil doğum kusuru; bozan commit aranmaz,
+aramak boşa döner. M0'da 28 notta ~6 örnek çıktı.
+
+`unanchored` (M0-D5): notun kod çapası yok (tercih kaydı, ders). **Nötr durumdur —
+şüphe üretmez.** M0'da en dayanıklı notların bir kısmı bu sınıftaydı; "denetlenemez"
+ile "şüpheli" karıştırılırsa sağlam notlar boşuna kuyruğa düşer.
+
+**anchors** — bulgu başına N kayıt: `file_path | symbol | commit_sha | external_path`
++ çapanın alındığı andaki commit.
+
+Çapa öncelik sırası (M0-D4): **sembol > dosya yolu > satır numarası.** Satır
+numarası çıpası kırılgan ve içerik göstergesi değil — M0'da bir notta 3/3 satır
+çıpası kaymışken içerik %100 ayaktaydı. **Satır kayması tek başına şüphe skorunu
+yükseltmez;** yalnız hakem kartında "çıpa tazelenmeli" notu olarak görünür.
+
+`external_path` (M0-D6): repo dışı çapalar gerçek ve ölçülebilir çıktı
+(`~/.gemini/settings.json`, başka projenin `manifest.json`'ı — M0'da ikisi çürüme
+yakaladı). Şema izin verir; sinyal motorunda kapsama alınması v1 sonrası.
 
 **events** — append-only denetim günlüğü: sinyal, hakem koşusu, onay/ret.
 Hata oranı metriği (reddedilen / toplam hüküm) doğrudan buradan.
@@ -139,11 +157,26 @@ Sinyal katmanı (LLM'siz, her taramada):
 
 - **Anchor kayması:** çapalar git geçmişine karşı —
   `git log --since=<çapa commit'i> -- <dosya>`. Dosya silindi → güçlü; N+ commit →
-  orta; sembol `git grep`'te kayıp → güçlü. Skora eklenir.
-- **Çelişki adaylığı:** ön eleme mekanik (çapa/anahtar kelime kesişimi; aynı
-  dosyaya çapalı iki bulgu adaydır); aday çiftler tek ucuz Codex çağrısıyla
-  sınıflanır. Çelişki onaylanırsa **iki** bulgunun da skoru yükselir.
+  orta; sembol `git grep`'te kayıp → güçlü; satır no kayması → **skora katkı yok**
+  (M0-D4).
+- **DURUM-kalıbı dedektörü (M0-D1, en güçlü ucuz sinyal):** gövdede akış-durumu
+  kalıbı (`DURUM:`, "şu an", "henüz", "sıradaki iş", "commit edilmedi",
+  "pushlanmadı") + çapalarda commit hareketi = **tek başına eşiği aşar.**
+  Gerekçe ölçülmüş: M0'da çürüyen 17 notun 9'u tam olarak bu sınıftı; kalıcı
+  ders/karar notları neredeyse hiç çürümedi.
+- **Çelişki adaylığı — üç yüzey (M0-D3), üçünde de saha örneği var:**
+  1. *Notlar arası:* çapa/anahtar kelime kesişen bulgu çiftleri.
+  2. *Not içi:* aynı notun iki bölümü zıt şey söylüyor.
+  3. *Frontmatter/indeks ↔ gövde:* `description` satırı gövdeyle çelişiyor —
+     **en sinsisi**, çünkü indeksten okuyan ajan yalnız o satırı görür.
+  Ön eleme mekanik; aday çiftler tek ucuz Codex çağrısıyla sınıflanır. Çelişki
+  onaylanırsa **iki** taraf da yükselir.
 - **Yaş tek başına asla sinyal değil**; yalnız yaş × çapa churn'ü oranı katkı verir.
+
+**Denetim ref'i (M0-D7):** sinyaller çalışma ağacına **ve** fetch edilmiş
+`origin/<default>`'a karşı ölçülür. M0'da bozan commit'lerin önemli kısmı yalnız
+origin'deydi (yerel main 12 commit gerideydi) — yalnız çalışma ağacına bakan
+denetçi onları göremezdi. İki ref uyuşmazsa ikisi de rapor edilir.
 
 Hakem — `suspicion` ≥ eşik (başlangıç 0.6, Gün-0 ölçümü kalibre eder):
 
