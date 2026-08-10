@@ -14,5 +14,9 @@
     "test": "node --test --disable-warning=ExperimentalWarning test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "scan": "node --disable-warning=ExperimentalWarning src/cli.ts scan"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.9.3"
   }
 }

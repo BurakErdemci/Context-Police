@@ -236,3 +236,31 @@ Süzme kuralı (ölçüme dayalı): yalnız `type` ∈ {`user`,`assistant`}; iç
 3. İkinci tarama sıfır iş yapıyor (imleç kalıcılığı kanıtlı).
 4. Bilinmeyen satır tipleri sessizce yutulmuyor — `events`'te sayılabiliyor.
 5. `node:sqlite` importu tek dosyada (`grep -rl "node:sqlite" src/` → 1 sonuç).
+
+---
+
+## M1 kapanış ölçümü (10 Ağu 2026)
+
+Gerçek koşum, `~/.claude/projects` (35 silo, 190 oturum):
+
+| Ölçüt | Sonuç |
+|---|---|
+| Testler | 40/40 yeşil; `tsc --noEmit` temiz |
+| Taranan | 376,6 MB → süzülmüş 15,4 MB (**24,5× küçülme**) |
+| Turn | 23.110 |
+| Süre | **1,0 sn** (tam kurulum taraması) |
+| İkinci tarama | yalnız 1 oturum / 6 turn — o da tarama sırasında canlı yazan bu oturum |
+| Bellek | 245 MB'lık tek dosya, 128 MB heap sınırıyla okundu; tepe heap **39 MB** |
+| Bozuk satır | 0 |
+
+**Parser çapraz doğrulaması:** en büyük oturumda 16.092 turn — bu plandaki bağımsız
+ölçüm scriptinin sayısıyla birebir aynı.
+
+**Mekanizma ilk günden kâr etti:** tam taramada, format ölçümünde hiç görülmemiş
+iki satır tipi (`custom-title`, `frame-link`) `unknown` olarak raporlandı. İkisi de
+incelendi, saf üst-veri oldukları görüldü ve bilinen-atla listesine alındı. Sessiz
+yutma olsaydı bu iki tip fark edilmeden geçecekti — spec §3.7'nin ilk sahada
+doğrulanışı.
+
+**M2'ye devredilen not:** en büyük oturum süzüldükten sonra bile ~2M token. 8k'lık
+partilerle ~250 gözlemci çağrısı eder; M2 parti eşiğini bu sayıyla yüzleşerek seçmeli.
