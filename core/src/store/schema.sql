@@ -3,6 +3,11 @@
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+-- Bu satır olmadan append-only sözleşmesi delinebiliyor: SQLite, REPLACE'in
+-- yaptığı örtük silmede DELETE tetikleyicilerini YALNIZ recursive_triggers
+-- açıkken çalıştırıyor. Denetimde ölçüldü — `INSERT OR REPLACE` ile hem
+-- findings.content hem bir events satırı sessizce değiştirilebiliyordu.
+PRAGMA recursive_triggers = ON;
 
 CREATE TABLE IF NOT EXISTS projects (
   id              INTEGER PRIMARY KEY,
@@ -14,16 +19,30 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 -- Transcript dosyası başına artımlı okuma imleci. Dosyanın tamamı asla yeniden
--- okunmaz (spec §3.3). inode saklanıyor çünkü dosyanın yerine yenisi konursa
--- offset anlamını yitirir — kısalma tespiti buna dayanıyor.
+-- okunmaz (spec §3.3). inode ve mtime saklanıyor çünkü dosyanın yerine yenisi
+-- konursa ya da yerinde yeniden yazılırsa offset anlamını yitirir.
+--
+-- Anahtar FİZİKSEL DOSYA YOLU, (proje, oturum) değil. Sebep denetimde çıktı:
+-- proje kimliği transcript'ten okunan cwd'ye bağlı ve sonradan değişebiliyor;
+-- kimlik değişince imleç yetim kalıp aynı bayt aralığı yeniden teslim ediliyordu.
+-- Bayt akışının kimliği dosyanın kendisidir; proje o akışın üst-verisi.
 CREATE TABLE IF NOT EXISTS cursors (
+  file_path    TEXT PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id),
   session_id   TEXT NOT NULL,
-  file_path    TEXT NOT NULL,
   byte_offset  INTEGER NOT NULL DEFAULT 0,
   inode        TEXT,
-  last_seen_at TEXT,
-  PRIMARY KEY (project_id, session_id)
+  mtime_ms     REAL,
+  last_seen_at TEXT
+);
+
+-- Aynı anda iki tarama aynı imleci okuyup aynı aralığı iki kez teslim
+-- edebiliyordu (denetim bulgusu). Tek satırlık kilit; sahibi ölürse
+-- bayatlama süresiyle devralınır.
+CREATE TABLE IF NOT EXISTS scan_lock (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  holder     TEXT NOT NULL,
+  acquired_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS findings (

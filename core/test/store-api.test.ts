@@ -27,28 +27,32 @@ test("aynı yol iki kez upsert → tek satır, aynı id", () => {
 
 test("imleç yazılıp okunuyor; yoksa null", () => {
   const { s, pid } = seed();
-  assert.equal(getCursor(s, pid, "sess-1"), null);
-  setCursor(s, pid, "sess-1", { filePath: "/t/sess-1.jsonl", byteOffset: 120, inode: "42" });
-  assert.deepEqual(getCursor(s, pid, "sess-1"), {
+  assert.equal(getCursor(s, "/t/sess-1.jsonl"), null);
+  setCursor(s, pid, "sess-1", { filePath: "/t/sess-1.jsonl", byteOffset: 120, inode: "42", mtimeMs: 111 });
+  assert.deepEqual(getCursor(s, "/t/sess-1.jsonl"), {
     filePath: "/t/sess-1.jsonl",
     byteOffset: 120,
     inode: "42",
+    mtimeMs: 111,
   });
   s.close();
 });
 
-test("imleç geri gidemez — ama inode değişince sıfırlanabilir", () => {
+test("imleç geri gidemez — ama dosya değişince sıfırlanabilir", () => {
   const { s, pid } = seed();
-  setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 500, inode: "42" });
+  setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 500, inode: "42", mtimeMs: 1 });
 
+  // Dosya hiç değişmemişken geri gitmek sessiz veri tekrarıdır.
   assert.throws(
-    () => setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 10, inode: "42" }),
+    () => setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 10, inode: "42", mtimeMs: 1 }),
     /geri alınamaz/,
   );
 
-  // Dosyanın yerine yenisi konmuş: bilinçli sıfırlama meşru.
-  assert.doesNotThrow(() => setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 0, inode: "99" }));
-  assert.equal(getCursor(s, pid, "sess-1")!.byteOffset, 0);
+  // Yerinde yeniden yazım (mtime değişti, inode aynı): sıfırlama meşru.
+  assert.doesNotThrow(() => setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 5, inode: "42", mtimeMs: 2 }));
+  // Dosyanın yerine yenisi konmuş (inode değişti): sıfırlama meşru.
+  assert.doesNotThrow(() => setCursor(s, pid, "sess-1", { filePath: "/f", byteOffset: 0, inode: "99", mtimeMs: 3 }));
+  assert.equal(getCursor(s, "/f")!.byteOffset, 0);
   s.close();
 });
 

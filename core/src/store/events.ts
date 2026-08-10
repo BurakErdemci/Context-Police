@@ -8,6 +8,9 @@ import { nowIso } from "./db.ts";
  */
 export type EventKind =
   | "unknown_line_type"
+  | "observer_failed"
+  | "session_read_failed"
+  | "scan_lock_stolen"
   | "malformed_line"
   | "truncation_detected"
   | "unresolved_project_key"

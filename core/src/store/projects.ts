@@ -12,6 +12,8 @@ export interface CursorState {
   filePath: string;
   byteOffset: number;
   inode: string | null;
+  /** Yerinde yeniden yazımı görmek için: boyut ve inode aynı kalabiliyor. */
+  mtimeMs: number | null;
 }
 
 /** Aynı yol iki kez kaydedilmez; memory_dir sonradan bulunursa güncellenir. */
@@ -36,13 +38,14 @@ export function upsertProject(store: Store, p: ProjectInput): number {
   ).lastInsertRowid;
 }
 
-export function getCursor(store: Store, projectId: number, sessionId: string): CursorState | null {
-  const row = store.get<{ file_path: string; byte_offset: number; inode: string | null }>(
-    "SELECT file_path, byte_offset, inode FROM cursors WHERE project_id = ? AND session_id = ?",
-    projectId,
-    sessionId,
+export function getCursor(store: Store, filePath: string): CursorState | null {
+  const row = store.get<{ file_path: string; byte_offset: number; inode: string | null; mtime_ms: number | null }>(
+    "SELECT file_path, byte_offset, inode, mtime_ms FROM cursors WHERE file_path = ?",
+    filePath,
   );
-  return row ? { filePath: row.file_path, byteOffset: row.byte_offset, inode: row.inode } : null;
+  return row
+    ? { filePath: row.file_path, byteOffset: row.byte_offset, inode: row.inode, mtimeMs: row.mtime_ms }
+    : null;
 }
 
 /**
@@ -56,25 +59,31 @@ export function setCursor(
   sessionId: string,
   next: CursorState,
 ): void {
-  const prev = getCursor(store, projectId, sessionId);
-  if (prev && next.byteOffset < prev.byteOffset && prev.inode === next.inode) {
+  const prev = getCursor(store, next.filePath);
+  // Geri gitmek yalnız dosya gerçekten değiştiyse meşru: inode ya da mtime
+  // farklıysa eski offset zaten anlamsızdır.
+  const fileChanged = prev !== null && (prev.inode !== next.inode || prev.mtimeMs !== next.mtimeMs);
+  if (prev && next.byteOffset < prev.byteOffset && !fileChanged) {
     throw new Error(
-      `imleç geri alınamaz (session=${sessionId}): ${prev.byteOffset} → ${next.byteOffset}, inode aynı`,
+      `imleç geri alınamaz (${next.filePath}): ${prev.byteOffset} → ${next.byteOffset}, dosya değişmemiş`,
     );
   }
   store.run(
-    `INSERT INTO cursors (project_id, session_id, file_path, byte_offset, inode, last_seen_at)
-     VALUES (?,?,?,?,?,?)
-     ON CONFLICT (project_id, session_id) DO UPDATE SET
-       file_path = excluded.file_path,
+    `INSERT INTO cursors (file_path, project_id, session_id, byte_offset, inode, mtime_ms, last_seen_at)
+     VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT (file_path) DO UPDATE SET
+       project_id = excluded.project_id,
+       session_id = excluded.session_id,
        byte_offset = excluded.byte_offset,
        inode = excluded.inode,
+       mtime_ms = excluded.mtime_ms,
        last_seen_at = excluded.last_seen_at`,
+    next.filePath,
     projectId,
     sessionId,
-    next.filePath,
     next.byteOffset,
     next.inode,
+    next.mtimeMs,
     nowIso(),
   );
 }

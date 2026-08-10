@@ -75,7 +75,7 @@ test("tanınmayan tip unknown döner — sessizce yutulmaz", () => {
 test("bozuk JSON malformed döner, çağıran çökmez", () => {
   const r = parseLine('{"type":"user", bozuk');
   assert.equal(r.kind, "malformed");
-  assert.ok(r.kind === "malformed" && r.sample.length > 0);
+  assert.ok(r.kind === "malformed" && r.bytes > 0);
 });
 
 // --- artımlı okuma ---
@@ -160,7 +160,7 @@ test("sayaçlar: unknown ve malformed raporlanıyor", async () => {
   assert.equal(r.counts.unknown, 1);
   assert.equal(r.counts.malformed, 1);
   assert.equal(r.counts.skipped, 1);
-  assert.equal(r.unknownSamples[0]!.lineType, "yeni-tip");
+  assert.ok(r.unknownTypes.has("yeni-tip"));
 });
 
 // --- keşif ---

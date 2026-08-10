@@ -3,7 +3,7 @@
 // (spec K12). Diğer modüller yalnız aşağıdaki Store arayüzünü görür.
 
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -28,11 +28,32 @@ export function defaultStorePath(): string {
 }
 
 export function openStore(path: string): Store {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  if (path !== ":memory:") {
+    // Depo transcript'lerden türetilmiş içerik barındırıyor; çok kullanıcılı bir
+    // makinede varsayılan umask (022) bunu 0755/0644 bırakıyordu — başka bir
+    // yerel hesap okuyabiliyordu. Denetim bulgusu, ölçülerek doğrulandı.
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(path), 0o700);
+  }
   const db = new DatabaseSync(path);
 
   const schema = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
   db.exec(schema);
+
+  // CREATE TABLE IF NOT EXISTS var olan tabloya sütun eklemez; şema büyüdükçe
+  // eski depolar sessizce eksik kalırdı. Eklenen her sütun buraya bir satır.
+  const cursorCols = new Set(
+    (db.prepare("PRAGMA table_info(cursors)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!cursorCols.has("mtime_ms")) db.exec("ALTER TABLE cursors ADD COLUMN mtime_ms REAL");
+
+  // WAL ve SHM yan dosyaları SQLite tarafından şema uygulanırken yaratılıyor;
+  // izinleri ancak var olduktan sonra sıkılaştırılabilir.
+  if (path !== ":memory:") {
+    for (const p of [path, `${path}-wal`, `${path}-shm`]) {
+      if (existsSync(p)) chmodSync(p, 0o600);
+    }
+  }
 
   let txDepth = 0;
 
@@ -48,22 +69,29 @@ export function openStore(path: string): Store {
       return db.prepare(sql).all(...params) as T[];
     },
     tx<T>(fn: () => T): T {
-      // İç içe çağrılar tek işlem sayılır; SAVEPOINT yerine sayaç yeterli
-      // çünkü çekirdek tek iş parçacıklı ve iç içe geri alma senaryosu yok.
-      if (txDepth++ > 0) {
-        try {
-          return fn();
-        } finally {
-          txDepth--;
-        }
-      }
-      db.exec("BEGIN");
+      // İç içe çağrı SAVEPOINT alır. Önceki hâli yalnız derinlik sayacıydı ve
+      // denetimde kırıldı: dış işlem iç hatayı yakalarsa iç yazımlar commit
+      // ediliyordu (yarım bulgu diske kalıyordu). Sayaç bir işlemi temsil
+      // edebilir ama geri alamaz — geri alma noktası gerekiyor.
+      const depth = txDepth++;
+      const savepoint = `cp_sp_${depth}`;
+      db.exec(depth === 0 ? "BEGIN" : `SAVEPOINT ${savepoint}`);
       try {
         const out = fn();
-        db.exec("COMMIT");
+        // Async geri çağırım sessizce erken commit edilirdi: Promise beklenmeden
+        // COMMIT çalışıp sonra reject olurdu. tx senkron sözleşmelidir; ihlali
+        // sessiz veri bütünlüğü hatası yerine gürültülü hata olmalı.
+        if (out !== null && typeof (out as { then?: unknown })?.then === "function") {
+          // Sahipsiz reddi burada yutuyoruz: aksi hâlde bizim fırlattığımız
+          // TypeError'ın yanında bir de unhandledRejection süreci öldürüyordu.
+          void (out as Promise<unknown>).catch(() => {});
+          throw new TypeError("tx() senkron geri çağırım bekler; async fonksiyon veri bütünlüğünü bozar");
+        }
+        db.exec(depth === 0 ? "COMMIT" : `RELEASE ${savepoint}`);
         return out;
       } catch (err) {
-        db.exec("ROLLBACK");
+        if (depth === 0) db.exec("ROLLBACK");
+        else db.exec(`ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
         throw err;
       } finally {
         txDepth--;

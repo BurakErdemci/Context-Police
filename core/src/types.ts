@@ -16,10 +16,16 @@ export type ParseResult =
   | { kind: "turn"; turn: Turn }
   /** Bilinen ama bulgu taşımayan satır tipi (file-history-snapshot, mode, …). */
   | { kind: "skip"; lineType: string }
-  /** Tanınmayan satır tipi — sessizce yutulmaz, events'e loglanır (spec §3.7). */
-  | { kind: "unknown"; lineType: string }
-  /** JSON olarak ayrıştırılamayan satır. */
-  | { kind: "malformed"; sample: string };
+  /**
+   * Tanınmayan satır tipi — sessizce yutulmaz, events'e loglanır (spec §3.7).
+   * `shape` yalnız üst düzey ANAHTAR adlarıdır, değer taşımaz: format
+   * değişikliğini teşhis etmeye yeter, transcript içeriğini diske taşımaz.
+   * (Denetim bulgusu: ham satır örneği saklanınca oturumdaki bir API anahtarı
+   * silinemez denetim günlüğüne kalıcı olarak düşebiliyordu.)
+   */
+  | { kind: "unknown"; lineType: string; shape: string[] }
+  /** JSON olarak ayrıştırılamayan satır. İçerik değil, yalnız boyut taşınır. */
+  | { kind: "malformed"; bytes: number };
 
 export interface DiscoveredSession {
   sessionId: string;

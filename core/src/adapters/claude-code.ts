@@ -69,16 +69,25 @@ export function parseLine(line: string): ParseResult {
   const trimmed = line.trim();
   if (!trimmed) return { kind: "skip", lineType: "(boş)" };
 
-  let obj: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    obj = JSON.parse(trimmed) as Record<string, unknown>;
+    parsed = JSON.parse(trimmed);
   } catch {
-    return { kind: "malformed", sample: trimmed.slice(0, 200) };
+    return { kind: "malformed", bytes: Buffer.byteLength(trimmed, "utf8") };
   }
+  // JSON.parse("null") null döner ve typeof null === "object"; alan erişimi
+  // atardı. Denetimde ölçüldü: tek bir `null` satırı taramayı kalıcı olarak
+  // kilitliyordu — imleç ilerlemediği için her turda aynı yerde patlıyordu.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "malformed", bytes: Buffer.byteLength(trimmed, "utf8") };
+  }
+  const obj = parsed as Record<string, unknown>;
 
   const type = typeof obj.type === "string" ? obj.type : "(tipsiz)";
   if (type !== "user" && type !== "assistant") {
-    return KNOWN_SKIP.has(type) ? { kind: "skip", lineType: type } : { kind: "unknown", lineType: type };
+    return KNOWN_SKIP.has(type)
+      ? { kind: "skip", lineType: type }
+      : { kind: "unknown", lineType: type, shape: Object.keys(obj).sort() };
   }
 
   const message = obj.message as { content?: unknown } | undefined;
@@ -100,10 +109,17 @@ export interface IncrementalResult {
   /** Yeni imleç — YALNIZ tam satırların sonu. Yarım satır işlenmez. */
   byteOffset: number;
   counts: { skipped: number; unknown: number; malformed: number };
-  unknownSamples: { lineType: string; sample: string }[];
+  /**
+   * TİP BAŞINA tek kayıt — sabit sayıda örnek DEĞİL. Denetimde ölçüldü: ilk 5
+   * örnekle sınırlıyken 6 farklı bilinmeyen tip içeren bir parti 6.'yı sessizce
+   * yutuyordu, ki "bilinmeyen tip asla sessizce yutulmaz" bu modülün sözü.
+   * Tip sayısı sınırlı olduğu için tip başına kayıt doğal olarak sınırlı.
+   */
+  unknownTypes: Map<string, { count: number; shape: string[] }>;
   /** Dosya kısaldı ya da yerine yenisi kondu. */
   truncated: boolean;
   inode: string;
+  mtimeMs: number;
 }
 
 /**
@@ -115,22 +131,33 @@ export async function readIncremental(
   filePath: string,
   fromOffset: number,
   knownInode?: string | null,
+  knownMtimeMs?: number | null,
 ): Promise<IncrementalResult> {
   const st = await stat(filePath);
   const inode = String(st.ino);
+  const mtimeMs = st.mtimeMs;
 
-  // Kısalma tespiti: dosya küçüldüyse ya da inode değiştiyse eski offset
-  // anlamını yitirmiştir — baştan okumak tek doğru davranış.
-  const truncated = st.size < fromOffset || (knownInode != null && knownInode !== inode);
+  // Eski imleç ne zaman anlamını yitirir? Üç işaret, üçü de gerekli:
+  //  1. dosya küçüldü,
+  //  2. inode değişti (yerine yenisi konmuş),
+  //  3. imlecin ötesine hiç veri eklenmemişken dosya DEĞİŞMİŞ (mtime kaydı).
+  // Üçüncüsü olmadan bir açık kalıyordu: aynı boyutta, aynı inode ile yerinde
+  // yeniden yazılan dosya (boyut, inode) ikilisine göre "hiç değişmemiş"
+  // görünüyor ve yeni içerik sessizce kayboluyordu. Denetimde ölçüldü.
+  const replacedInPlace =
+    knownMtimeMs != null && st.size <= fromOffset && mtimeMs !== knownMtimeMs;
+  const truncated =
+    st.size < fromOffset || (knownInode != null && knownInode !== inode) || replacedInPlace;
   const start = truncated ? 0 : fromOffset;
 
   const res: IncrementalResult = {
     turns: [],
     byteOffset: start,
     counts: { skipped: 0, unknown: 0, malformed: 0 },
-    unknownSamples: [],
+    unknownTypes: new Map(),
     truncated,
     inode,
+    mtimeMs,
   };
 
   if (start >= st.size) return res;
@@ -153,8 +180,9 @@ export async function readIncremental(
       else if (parsed.kind === "skip") res.counts.skipped++;
       else if (parsed.kind === "unknown") {
         res.counts.unknown++;
-        if (res.unknownSamples.length < 5)
-          res.unknownSamples.push({ lineType: parsed.lineType, sample: lineBuf.toString("utf8").slice(0, 200) });
+        const prev = res.unknownTypes.get(parsed.lineType);
+        if (prev) prev.count++;
+        else res.unknownTypes.set(parsed.lineType, { count: 1, shape: parsed.shape });
       } else {
         res.counts.malformed++;
       }
