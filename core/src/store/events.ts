@@ -53,7 +53,25 @@ export type EventKind =
    * ilerlemedi. Tarama başına TEK kayıt — oturum başına observer_failed yazmak
    * maliyet sınırını arıza gibi gösteriyordu (M2 borç 4).
    */
-  | "observer_budget_halt";
+  | "observer_budget_halt"
+  /**
+   * Import sessiz yutma yasağının üç yüzü (spec §3.7). Import'ta özellikle
+   * gerekli, çünkü çıktısı bir ÖZET sayısı: "errors: 1" hangi dosyanın neden
+   * okunamadığını söylemez, olay söyler.
+   */
+  /** memory dizini ya da içindeki bir dosya okunamadı — o not import edilmedi. */
+  | "import_read_failed"
+  /**
+   * Diskteki not silinmiş: temsili superseded, ama yerine geçen kayıt YOK.
+   * Silme değil işaretleme olduğu için geri alınabilir (spec §3.2) — dosyanın
+   * yanlışlıkla taşınmış olması restore() ile tek adımda düzeliyor.
+   */
+  | "import_file_deleted"
+  /**
+   * Not MAX_ANCHORS_PER_NOTE tavanını aştı: kırpılan çapalar denetlenmeyecek.
+   * Kırpma sessiz olursa "çapası yok sanılan" bir not denetim dışı kalır.
+   */
+  | "import_anchor_overflow";
 
 export function logEvent(
   store: Store,
