@@ -6,6 +6,8 @@ import { openStore, defaultStorePath, type Store } from "./store/db.ts";
 import { claudeCodeAdapter, readCwd } from "./adapters/claude-code.ts";
 import { register } from "./adapters/transcript.ts";
 import { scanOnce } from "./scan.ts";
+import { auditProject, type AuditSummary } from "./audit.ts";
+import { listActive } from "./store/findings.ts";
 import { listProjects, upsertProject } from "./store/projects.ts";
 import { listEvents, countEvents } from "./store/events.ts";
 import { Observer } from "./observer/observer.ts";
@@ -45,6 +47,10 @@ const COMMANDS: Record<string, OptionSpec> = {
   observe: {
     values: ["project", "session", "dir", "store", "batch-tokens", "model", "effort"],
     flags: ["yes"],
+  },
+  audit: {
+    values: ["project", "path", "memory-dir", "store", "origin-ref"],
+    flags: ["no-fetch", "json"],
   },
   status: { values: ["store"], flags: [] },
 };
@@ -331,6 +337,85 @@ async function observeSingleSession(
   }
 }
 
+async function cmdAudit(): Promise<void> {
+  // K2: Codex sert bağımlılık — audit'in tek LLM kullanımı sınıflama olsa da
+  // kapı aynı. Depo AÇILMADAN önce: yoksa yapacak bir iş yok.
+  const executor = createCodexExecutor({});
+  const det = await executor.detect();
+  if (!det.found) {
+    console.error(`codex bulunamadı: ${det.error ?? "PATH'te yok"}`);
+    console.error("kurulum: npm install -g @openai/codex  (ya da https://developers.openai.com/codex)");
+    process.exit(2);
+  }
+
+  const store = openStore(arg("store") ?? defaultStorePath());
+  // Tarama kilidi observe'daki gerekçenin aynısıyla burada da ZORUNLU: import
+  // "en son canlı temsil"i okuyup yenisini yazıyor, bu okuma-yazma atomik değil.
+  // Aynı anda koşan iki denetim (ya da bir denetim + bir tarama) aynı dosya için
+  // iki canlı kayıt bırakabilir — Görev 4 ölçümü.
+  const holder = `pid:${process.pid}`;
+  try {
+    acquireScanLock(store, holder);
+    try {
+      // İki mod: depodaki projeler (--project süzer) ya da elle kayıt
+      // (--path [+ --memory-dir]); altın set ölçümü pin'li worktree'yi böyle
+      // denetliyor (D-M3-8).
+      let targets: { id: number; path: string; memoryDir: string | null }[];
+      const manualPath = arg("path");
+      if (manualPath !== undefined) {
+        const memoryDir = arg("memory-dir") ?? null;
+        const id = upsertProject(store, {
+          path: manualPath, adapterId: claudeCodeAdapter.id,
+          transcriptDir: manualPath, memoryDir,
+        });
+        // --memory-dir verilmediyse depodaki kayıt kullanılır: upsertProject
+        // null'ı COALESCE ile yutuyor, yani proje bilinen bir hafıza dizinine
+        // sahipken burada null geçmek o dizini SESSİZCE denetim dışı bırakırdı.
+        const stored = listProjects(store).find((p) => p.id === id);
+        targets = [{ id, path: manualPath, memoryDir: memoryDir ?? stored?.memory_dir ?? null }];
+      } else {
+        targets = listProjects(store)
+          .filter((p) => arg("project") === undefined || p.path === arg("project"))
+          .map((p) => ({ id: p.id, path: p.path, memoryDir: p.memory_dir }));
+        if (targets.length === 0) throw new UsageError("denetlenecek proje yok: önce `scan` koşun ya da --path verin");
+      }
+
+      const results: { path: string; id: number; summary: AuditSummary }[] = [];
+      for (const t of targets) {
+        const summary = await auditProject(store, t, {
+          executor, fetch: !flag("no-fetch"), originRef: arg("origin-ref"),
+        });
+        results.push({ path: t.path, id: t.id, summary });
+      }
+
+      if (flag("json")) {
+        console.log(JSON.stringify(results, null, 2));
+      } else {
+        for (const { path, id, summary: s } of results) {
+          console.log(`\n${safe(path)}`);
+          if (s.import) console.log(`  import: +${s.import.added} ~${s.import.replaced} -${s.import.deleted} (değişmeyen ${s.import.unchanged})`);
+          if (!s.gitAvailable) console.log("  ⚠ git yok: çapa sinyali KAPALI, yalnız çelişki koşuyor");
+          console.log(`  denetlenen: ${s.checked}  şüpheli: ${s.suspects}  temize dönen: ${s.cleared}`);
+          // "codex çağrısı" GERÇEK koşum sayısıdır, aday sayısı değil: tek toplu
+          // sınıflama yürütücü tekrarı ya da düzeltme turuyla birden çok koşum
+          // olabiliyor (Görev 9). Bu yüzden hiçbir yerde "tek çağrı" denmiyor.
+          console.log(`  çelişki adayı: ${s.candidates}  onaylanan: ${s.contradictions}  codex çağrısı: ${s.classifyCalls}`);
+          if (s.classifyDropped > 0) console.log(`  ⚠ tavan üstü sınıflanmayan aday: ${s.classifyDropped}`);
+          const st = s.anchorStates;
+          console.log(`  çapa: ok ${st.ok}  kayıp ${st.missing_now}  sembol-kayıp ${st.symbol_lost}  ` +
+            `çalkantılı ${st.churned}  hiç-yok ${st.never_existed}  doğrulanamayan ${st.unverifiable}`);
+          for (const f of listActive(store, id).filter((f) => f.status === "suspect"))
+            console.log(`  🔶 #${f.id} (${f.suspicion.toFixed(2)}) ${safe(f.content.slice(0, 80))}`);
+        }
+      }
+    } finally {
+      releaseScanLock(store, holder);
+    }
+  } finally {
+    store.close();
+  }
+}
+
 function cmdStatus(): void {
   const store = openStore(arg("store") ?? defaultStorePath());
   try {
@@ -360,6 +445,7 @@ try {
     parseArgs(cmd!, spec);
     if (cmd === "scan") await cmdScan();
     else if (cmd === "observe") await cmdObserve();
+    else if (cmd === "audit") await cmdAudit();
     else cmdStatus();
   }
 } catch (err) {
@@ -378,7 +464,12 @@ kullanım:
   context-police observe [--project <yol>] [--session <jsonl>] [--dir <kök>] [--store <db>]
                          [--batch-tokens 500..200000] [--model M]
                          [--effort minimal|low|medium|high] [--yes]
+  context-police audit   [--project <yol>] [--path <repo> [--memory-dir <dizin>]]
+                         [--origin-ref <ref>] [--no-fetch] [--json] [--store <db>]
   context-police status  [--store <db yolu>]
+
+audit: hafıza notlarını içeri alır, çapa kayması ve çelişki sinyallerini koşar,
+  şüphelileri DEPODA işaretler. Hiçbir memory dosyasına yazmaz (K9).
 
 observe maliyeti:
   --yes VERİLMEDİKÇE bir koşum en fazla 20 Codex çağrısı yapar; sınıra gelince

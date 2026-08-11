@@ -86,6 +86,20 @@ export function getAnchors(store: Store, findingId: number): Anchor[] {
     .map((a) => ({ kind: a.kind, value: a.value, takenAtCommit: a.taken_at_commit }));
 }
 
+/**
+ * Sinyal motorunun tekelinde (D-M3-9): yalnız active→suspect. Koşul SQL'de,
+ * çağıranda değil — unanchored (M0-D5) ya da superseded bir kaydı yanlışlıkla
+ * şüpheliye itmek imkânsız olsun.
+ */
+export function markSuspect(store: Store, id: number): void {
+  store.run("UPDATE findings SET status = 'suspect' WHERE id = ? AND status = 'active'", id);
+}
+
+/** Skor eşik altına düştüyse geri dönüş — otomatik, çünkü hiçbir dosyaya inmedi (K9). */
+export function clearSuspect(store: Store, id: number): void {
+  store.run("UPDATE findings SET status = 'active' WHERE id = ? AND status = 'suspect'", id);
+}
+
 /** Ajanın "gerçek" saydığı küme: superseded ve born_invalid buraya girmez. */
 export function listActive(store: Store, projectId: number): Finding[] {
   return store

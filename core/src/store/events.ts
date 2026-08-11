@@ -71,7 +71,42 @@ export type EventKind =
    * Not MAX_ANCHORS_PER_NOTE tavanını aştı: kırpılan çapalar denetlenmeyecek.
    * Kırpma sessiz olursa "çapası yok sanılan" bir not denetim dışı kalır.
    */
-  | "import_anchor_overflow";
+  | "import_anchor_overflow"
+  /**
+   * Denetim olayları (Görev 10). Ortak gerekçe: `audit` özet SAYILAR döndürüyor
+   * ("şüpheli: 3"), ve bir sayı hangi notun neden şüphelendiğini söylemiyor.
+   * Görev 11'in altın set ölçümü not-not eşleştirmeyi bu günlükten yapıyor.
+   */
+  /** Proje git deposu değil (ya da commit'siz): çapa sinyali KAPALI koştu. */
+  | "anchor_signal_disabled"
+  /**
+   * Bir bulgunun skoru hesaplandı. `reasons` skoru ÜRETEN çapaları taşır;
+   * `states` ise çapaların TAMAMININ durum sayımını. İkisi ayrı, çünkü
+   * `unverifiable` ve `never_existed` skor üretmediği için reasons'ta hiç
+   * görünmüyor — oysa M2'nin "%10 uydurma çapa" borcunun ölçümü tam olarak o
+   * iki sayı (Görev 11 tablosu). Sıfır olan durumlar yazılmaz.
+   */
+  | "signal_scored"
+  /** active → suspect geçişi (eşik üstü skor). */
+  | "finding_suspect"
+  /** suspect → active geçişi: skor eşik altına düştü, işaret geri alındı. */
+  | "finding_cleared"
+  /** Sınıflama iki ifadenin çeliştiğini söyledi; İKİ taraf da yükselir (spec §3.4). */
+  | "contradiction_confirmed"
+  /**
+   * Sınıflama sonuç üretemedi (yürütücü hatası ya da iki denemede de geçersiz
+   * JSON). Çelişki sinyali o koşumda YOK sayılır — çapa sinyali koşmaya devam
+   * eder, ama "çelişki bulunmadı" ile "bakılamadı" karışmasın diye kayıt şart.
+   */
+  | "classify_failed"
+  /**
+   * Aday kümesinden bir şeyin ELENDİĞİ iki hâl, tek kind altında ama ayrı
+   * detay anahtarlarıyla: (a) `skippedAnchors` — bir çapa çok fazla notta geçtiği
+   * için çift üretmedi (contradiction.ts MAX_NOTES_PER_ANCHOR), (b) `droppedCandidates`
+   * — aday sayısı sınıflama tavanını aştı (classify.ts MAX_CLASSIFY_ITEMS).
+   * İkisi de "bakılmadı" demek; sessiz kalırsa "çelişki yok" sanılır.
+   */
+  | "classify_overflow";
 
 export function logEvent(
   store: Store,
