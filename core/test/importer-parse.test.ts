@@ -25,6 +25,17 @@ test("extractAnchors: sha / göreli yol / dış yol / backtick sembol ayrımı, 
   assert.equal(dropped, 0);
 });
 
+test("extractAnchors: uuid parçaları sha sanılmaz, düz metindeki gerçek sha çıkar", () => {
+  // Gerçek hafıza notu biçimi (Görev 4 ölçümü): frontmatter'daki oturum kimliği
+  // 6 notun 6'sında sahte sha üretiyordu ve çapasız notu `unanchored` olmaktan
+  // çıkarıp M0-D5 nötrlüğünü siliyordu.
+  const not = "---\noriginSessionId: dfbcaaaf-3368-467c-a28b-15fce5e3e148\n---\n\ncommit kuralı: push yalnız istekle.";
+  assert.deepEqual(extractAnchors(not).anchors, []);
+
+  const duz = extractAnchors("Düzeltme fdfd4fe commit'inde; `de78903` de aynı sınıf.");
+  assert.deepEqual(duz.anchors.filter((a) => a.kind === "commit_sha").map((a) => a.value), ["fdfd4fe", "de78903"]);
+});
+
 test("extractAnchors: tavan aşımı sessiz kırpılmaz, dropped sayılır", () => {
   const text = Array.from({ length: 30 }, (_, i) => `dosya src/mod${i}/dosya${i}.ts burada`).join(" ");
   const { anchors, dropped } = extractAnchors(text);

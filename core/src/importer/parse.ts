@@ -43,7 +43,12 @@ export const MAX_ANCHORS_PER_NOTE = 16;
 const ANCHOR_PRIORITY: readonly Anchor["kind"][] = ["symbol", "file_path", "commit_sha", "external_path"];
 
 // Satır numarası deseni BİLEREK yok (M0-D4): kırılgan ve içerik göstergesi değil.
-const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
+// Tire komşulu hex bir commit sha'sı değil: uuid segmentleri tireyle ayrılır ve
+// `\b` tirede eşleştiği için yetersizdi — gerçek hafıza notlarında ölçüldü (Görev 4),
+// frontmatter'daki originSessionId 6 notun 6'sında iki sahte sha üretiyordu. Zararı
+// aşırı-üretimden büyük: gerçekte çapasız bir not sahte çapayla `unanchored`
+// olmaktan çıkıyor ve M0-D5'in "çapasız not nötrdür" koruması siliniyordu.
+const SHA_RE = /(?<![0-9a-f-])[0-9a-f]{7,40}(?![0-9a-f-])/g;
 const PATH_RE = /(?:~\/|\/)?[\w.-]+(?:\/[\w.-]+)+\.\w{1,8}\b/g;
 const SYMBOL_RE = /`([A-Za-z_$][A-Za-z0-9_$]{3,})(?:\(\))?`/g;
 
