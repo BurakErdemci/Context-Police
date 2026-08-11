@@ -99,6 +99,102 @@ export function budgetExhaustedMessage(calls: number, maxCalls: number | undefin
   );
 }
 
+// ── Denetim (audit) maliyet kapısı ─────────────────────────────────────────
+// Bu dosya artık İKİ komutun maliyet kararlarını taşıyor. Gerekçe: `audit`in
+// kapısı `observe`unkiyle aynı sözleşmeye uymak zorunda ("onaysız hiçbir şey
+// olmamalı") ve iki ayrı kopya kaçınılmaz olarak ayrışıyor — ölçüldü (denetim
+// 2026-08-11): observe'un kapısı üç turda sıkılaştırılırken audit'te hiç kapı
+// yoktu, tek bir argümansız koşum 11-33 ücretli Codex çağrısı yapabiliyordu.
+
+/**
+ * Bir PROJENİN çelişki sınıflamasının harcayabileceği en fazla yürütücü çağrısı.
+ * Sayı classify.ts'ten sayıldı, uydurma değil: (1) ilk çağrı, (2) yürütücü
+ * hatası tekrarı, (3) geçerli çıkış ama bozuk JSON için düzeltme turu. Üçü
+ * ARDIŞIK işleyebiliyor (audit.ts başlık yorumu, Görev 9 şerhinin düzeltmesi).
+ */
+export const WORST_CASE_CALLS_PER_AUDIT = 3;
+
+/**
+ * Denetim tahmini. Aday sayısı koşum ÖNCESİ bilinemez — adaylar import'tan
+ * sonra doğuyor — ama üst sınır YAPISAL: proje başına en fazla TEK toplu
+ * sınıflama partisi var (classify.ts tavanı aşan adayı ikinci partiye değil
+ * `dropped`a yazıyor). Yani "kaç proje" tahmin için yeterli.
+ *
+ * Tahmin karamsar olmak zorunda: ölçüldü (2026-08-11), bu makinede 11 hafıza
+ * dizininin 11'i de aday üretiyor (123 aday) — `frontmatter`ında `description`
+ * olan ya da DURUM kalıbı taşıyan her not TEK BAŞINA aday doğurduğu için
+ * "belki hiç aday çıkmaz" iyimserliği sahaya uymuyor.
+ */
+export function estimateAuditCalls(projects: number): CallEstimate {
+  return { batches: projects, expected: projects, worst: projects * WORST_CASE_CALLS_PER_AUDIT };
+}
+
+/**
+ * Denetimin ön kapısı. observe'unkiyle aynı ölçüt: karar BEKLENEN değil EN KÖTÜ
+ * duruma göre verilir, çünkü onay "en kötü ihtimalle şu kadar harcanacak"ın
+ * onayıdır. Tahmin yine de ekranda gösterilir ki kapı keyfî görünmesin.
+ */
+export function auditCostGate(
+  projects: number,
+  allowCost: boolean,
+): { ok: boolean; est: CallEstimate; reason?: string } {
+  const est = estimateAuditCalls(projects);
+  if (allowCost || est.worst <= DEFAULT_CALL_BUDGET) return { ok: true, est };
+  return {
+    ok: false,
+    est,
+    reason:
+      `maliyet kapısı: ${projects} proje → beklenen ~${est.expected}, en kötü ${est.worst} ` +
+      `Codex çağrısı (proje başına en fazla ${WORST_CASE_CALLS_PER_AUDIT} koşum: ilk çağrı + ` +
+      `yürütücü tekrarı + bozuk-JSON düzeltme turu).\n` +
+      `onaysız üst sınır ${DEFAULT_CALL_BUDGET} çağrı. Onaylıyorsanız --yes ekleyin, ` +
+      `ya da --project / --path ile tek projeye daraltın.`,
+  };
+}
+
+/**
+ * Koşum boyunca PAYLAŞILAN sert tavan. Tahminden ayrı bir katman, çünkü tahmin
+ * yanılabilir (bir proje beklenenden çok kurtarma turu harcar) ama tavan
+ * yanılmaz. Asıl koruma bu; tahmin yalnız kullanıcıya bilgi.
+ */
+export class SpendBudget {
+  spent = 0;
+  /** undefined = sınırsız (--yes verildi). */
+  readonly limit: number | undefined;
+  constructor(limit: number | undefined) {
+    this.limit = limit;
+  }
+
+  /**
+   * Sorulan şey "yerim var mı" değil "EN KÖTÜSÜ sığıyor mu": başlamış bir
+   * sınıflama kurtarma turlarının ortasında kesilemiyor, dolayısıyla tavan
+   * ancak işi başlatmadan önce sorulursa gerçekten tavan olur.
+   */
+  canAfford(worst: number): boolean {
+    return this.limit === undefined || this.spent + worst <= this.limit;
+  }
+
+  spend(calls: number): void {
+    this.spent += calls;
+  }
+}
+
+/**
+ * Bütçe koşumu yarıda kestiğinde söylenecek. observe'un mesajıyla aynı ilke:
+ * yarım iş sessizce rc=0 dönmez — kaç çağrı yapıldığı, kaç projenin denetlendiği
+ * ve nasıl sürdürüleceği yazılı.
+ */
+export function auditBudgetExhaustedMessage(
+  spent: number, done: number, total: number, limit: number | undefined,
+): string {
+  return (
+    `⚠ maliyet bütçesi doldu: ${spent} Codex çağrısı yapıldı (sınır ${limit ?? DEFAULT_CALL_BUDGET}).\n` +
+    `İŞ YARIDA KALDI — ${done}/${total} proje denetlendi, kalanlara HİÇ bakılmadı ` +
+    `(depoda o projelerin skorları eski koşumdan kalmadır, yeni ölçüm değildir).\n` +
+    `Sürdürmek için --yes ekleyin (maliyeti kabul etmiş olursunuz) ya da --project ile tek tek koşun.`
+  );
+}
+
 /**
  * scanOnce yolunda bütçe bitişini imleç ilerlemeden ÖNCE durdurmak için atılır.
  *

@@ -6,7 +6,7 @@ import { openStore, defaultStorePath, type Store } from "./store/db.ts";
 import { claudeCodeAdapter, readCwd } from "./adapters/claude-code.ts";
 import { register } from "./adapters/transcript.ts";
 import { scanOnce } from "./scan.ts";
-import { auditProject, type AuditSummary } from "./audit.ts";
+import { auditProject, OriginRefUnresolved, type AuditSummary } from "./audit.ts";
 import { listActive } from "./store/findings.ts";
 import { listProjects, upsertProject } from "./store/projects.ts";
 import { listEvents, countEvents } from "./store/events.ts";
@@ -16,14 +16,46 @@ import {
   observeGuard, estimateCalls, validateBatchTokens, validateEffort, validateModel,
   callBudget, costGate, budgetExhaustedMessage, budgetGuardedOnTurns,
   readSessionIncremental, recordSessionFreshness,
+  auditCostGate, auditBudgetExhaustedMessage, SpendBudget, WORST_CASE_CALLS_PER_AUDIT,
   type Effort,
 } from "./observe-cmd.ts";
+import { logEvent } from "./store/events.ts";
 import type { Turn } from "./types.ts";
 import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
 import { dropThroughWatermark, type DeliveryRange } from "./observer/batch.ts";
 import { basename, dirname } from "node:path";
 
 register(claudeCodeAdapter);
+
+/**
+ * Düzenli kapanış kancaları. Ölçüldü (denetim 2026-08-11,
+ * probes/audit-kill-leaves-active.sh): Node varsayılanında SIGINT/SIGTERM
+ * `finally` bloklarını KOŞTURMADAN süreci bitiriyor — yani Ctrl-C tarama
+ * kilidini asılı (lock.ts: canlı olmayan sahip bile bir saat bayat sayılmıyor,
+ * yani sonraki denetim bir saat boyunca hiç başlayamaz) ve denetimi yarım
+ * bırakıyordu. Kanca listesi LIFO: en son alınan kaynak ilk bırakılır.
+ */
+const interruptHandlers: ((signal: string) => void)[] = [];
+
+function onInterrupt(fn: (signal: string) => void): () => void {
+  interruptHandlers.push(fn);
+  return () => {
+    const i = interruptHandlers.indexOf(fn);
+    if (i !== -1) interruptHandlers.splice(i, 1);
+  };
+}
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    for (const fn of [...interruptHandlers].reverse()) {
+      // Kapanış yolundaki ikinci hata yutulur: bir kancanın patlaması geri
+      // kalan kaynakların (kilit!) bırakılmasını engellememeli.
+      try { fn(sig); } catch { /* yut */ }
+    }
+    // 128 + sinyal numarası: kabuk sözleşmesi. rc=0 dönmek "iş bitti" derdi.
+    process.exit(sig === "SIGINT" ? 130 : 143);
+  });
+}
 
 /**
  * Kullanım hatası. Ayrı bir tip, çünkü tek çıkış kodu (1) ve MESAJ basılmalı;
@@ -50,7 +82,11 @@ const COMMANDS: Record<string, OptionSpec> = {
   },
   audit: {
     values: ["project", "path", "memory-dir", "store", "origin-ref"],
-    flags: ["no-fetch", "json"],
+    // `--fetch` AÇIK istek: varsayılan artık kapalı (aşağıdaki gerekçe).
+    // `--no-fetch` tanınmaya devam ediyor ama artık bir şeyi değiştirmiyor;
+    // sessizce "bilinmeyen seçenek" hatası vermek, onu betiklerine yazmış olan
+    // kullanıcının koşumunu kırardı — ve kaldırmanın hiçbir güvenlik kazancı yok.
+    flags: ["no-fetch", "fetch", "json", "yes"],
   },
   status: { values: ["store"], flags: [] },
 };
@@ -297,6 +333,12 @@ async function observeSingleSession(
   // Kilit: aynı anda koşan bir scan/observe ile filigran yarışını engeller.
   const holder = `pid:${process.pid}`;
   acquireScanLock(store, holder);
+  // Ctrl-C burada da kilidi asılı bırakıyordu (aynı ölçüm: Node sinyalde
+  // finally'leri koşturmuyor) — audit'in kancasıyla aynı mekanizma.
+  const off = onInterrupt(() => {
+    releaseScanLock(store, holder);
+    store.close();
+  });
   try {
     const projectId = upsertProject(store, {
       path: projPath,
@@ -333,6 +375,7 @@ async function observeSingleSession(
     recordSessionFreshness(store, projectId, sessionId, res);
     return false;
   } finally {
+    off();
     releaseScanLock(store, holder);
   }
 }
@@ -348,14 +391,45 @@ async function cmdAudit(): Promise<void> {
     process.exit(2);
   }
 
+  // Fetch VARSAYILAN KAPALI (denetim: transcript-cwd-fetch). Ölçüldü: denetlenecek
+  // repo transcript'teki `cwd` alanından geliyor, yani güvenilmeyen veriyle
+  // seçiliyor; ve hedef reponun .git/config'indeki `remote.origin.uploadpack`
+  // fetch sırasında keyfî YEREL komut çalıştırıyor (rc=0, marker oluştu).
+  // Zincir gerçekçi: içinde `.git/` olan bir arşiv açılır, orada bir kez ajan
+  // oturumu açılır, sonra tek bir argümansız `audit` o dizinde fetch koşar.
+  // Ağ + kod çalıştırma artık AÇIK istekle gelir.
+  if (flag("fetch") && flag("no-fetch"))
+    throw new UsageError("--fetch ile --no-fetch birlikte verilemez (fetch zaten varsayılan olarak kapalı)");
+  const doFetch = flag("fetch");
+  const yes = flag("yes");
+
   const store = openStore(arg("store") ?? defaultStorePath());
   // Tarama kilidi observe'daki gerekçenin aynısıyla burada da ZORUNLU: import
   // "en son canlı temsil"i okuyup yenisini yazıyor, bu okuma-yazma atomik değil.
   // Aynı anda koşan iki denetim (ya da bir denetim + bir tarama) aynı dosya için
   // iki canlı kayıt bırakabilir — Görev 4 ölçümü.
   const holder = `pid:${process.pid}`;
+  const runId = `${new Date().toISOString()}-${process.pid}`;
+  let current: { id: number; path: string } | null = null;
+  let exitCode = 0;
   try {
     acquireScanLock(store, holder);
+    // Kilit ALINDIKTAN sonra kaydediliyor: kanca ancak bırakacak bir şey varken
+    // anlamlı, ve kilidi almadan bırakmaya çalışmak başkasının kilidini silmez
+    // (releaseScanLock sahip eşleşmesi arıyor) ama gereksiz.
+    const off = onInterrupt((signal) => {
+      // Kesinti DEPODA yazılı kalır: yarım denetim "ölçüldü, temiz çıktı" ile
+      // karışmasın. Olay ÖNCE, kilit sonra — kilit bırakıldıktan sonra yazmak
+      // başka bir koşumun araya girdiği bir pencere açardı.
+      try {
+        logEvent(store, {
+          projectId: current?.id ?? null, kind: "audit_failed",
+          detail: { runId, reason: `signal:${signal}`, path: current?.path ?? null },
+        });
+      } catch { /* yut: kilidi bırakmak daha önemli */ }
+      releaseScanLock(store, holder);
+      store.close();
+    });
     try {
       // İki mod: depodaki projeler (--project süzer) ya da elle kayıt
       // (--path [+ --memory-dir]); altın set ölçümü pin'li worktree'yi böyle
@@ -380,39 +454,103 @@ async function cmdAudit(): Promise<void> {
         if (targets.length === 0) throw new UsageError("denetlenecek proje yok: önce `scan` koşun ya da --path verin");
       }
 
-      const results: { path: string; id: number; summary: AuditSummary }[] = [];
-      for (const t of targets) {
-        const summary = await auditProject(store, t, {
-          executor, fetch: !flag("no-fetch"), originRef: arg("origin-ref"),
-        });
-        results.push({ path: t.path, id: t.id, summary });
-      }
+      // Maliyet kapısı: observe'un kalıbı. Ölçüldü (2026-08-11): audit'te hiç
+      // kapı yoktu ve bu makinede 11 hafıza dizininin 11'i de çelişki adayı
+      // üretiyor (123 aday) — tek bir argümansız `audit` onaysız 11-33 ücretli
+      // Codex çağrısı yapıyordu, her biri ~15k token'a kadar.
+      const maxCalls = callBudget(yes);
+      const budget = new SpendBudget(maxCalls);
+      const gate = auditCostGate(targets.length, yes);
+      console.log(
+        `denetlenecek proje: ${targets.length}  çelişki sınıflaması: ` +
+          `beklenen ~${gate.est.expected}, en kötü ${gate.est.worst} Codex çağrısı`,
+      );
+      console.log(
+        maxCalls === undefined
+          ? "maliyet tavanı: yok (--yes verildi)"
+          : `maliyet tavanı: en fazla ${maxCalls} Codex çağrısı (--yes ile kaldırılır)`,
+      );
 
-      if (flag("json")) {
-        console.log(JSON.stringify(results, null, 2));
+      if (!gate.ok) {
+        // Onay gerekiyor: TEK ücretli çağrı yapılmadan durulur (observe ile aynı
+        // çıkış kodu — 3 "onay gerekiyor", 4 "onayla başladı ama yarıda kaldı").
+        console.error(gate.reason);
+        exitCode = 3;
       } else {
-        for (const { path, id, summary: s } of results) {
-          console.log(`\n${safe(path)}`);
-          if (s.import) console.log(`  import: +${s.import.added} ~${s.import.replaced} -${s.import.deleted} (değişmeyen ${s.import.unchanged})`);
-          if (!s.gitAvailable) console.log("  ⚠ git yok: çapa sinyali KAPALI, yalnız çelişki koşuyor");
-          console.log(`  denetlenen: ${s.checked}  şüpheli: ${s.suspects}  temize dönen: ${s.cleared}`);
-          // "codex çağrısı" GERÇEK koşum sayısıdır, aday sayısı değil: tek toplu
-          // sınıflama yürütücü tekrarı ya da düzeltme turuyla birden çok koşum
-          // olabiliyor (Görev 9). Bu yüzden hiçbir yerde "tek çağrı" denmiyor.
-          console.log(`  çelişki adayı: ${s.candidates}  onaylanan: ${s.contradictions}  codex çağrısı: ${s.classifyCalls}`);
-          if (s.classifyDropped > 0) console.log(`  ⚠ tavan üstü sınıflanmayan aday: ${s.classifyDropped}`);
-          const st = s.anchorStates;
-          console.log(`  çapa: ok ${st.ok}  kayıp ${st.missing_now}  sembol-kayıp ${st.symbol_lost}  ` +
-            `çalkantılı ${st.churned}  hiç-yok ${st.never_existed}  doğrulanamayan ${st.unverifiable}`);
-          for (const f of listActive(store, id).filter((f) => f.status === "suspect"))
-            console.log(`  🔶 #${f.id} (${f.suspicion.toFixed(2)}) ${safe(f.content.slice(0, 80))}`);
+        const results: { path: string; id: number; summary: AuditSummary }[] = [];
+        let halted = false;
+        for (const t of targets) {
+          // Tavan kontrolü proje BAŞLAMADAN: yarım denetlenmiş bir proje, çelişki
+          // sinyali eksik olduğu için notları haksız yere temize çıkarabilirdi
+          // (skor sıfırdan hesaplanıyor — D-M3-3). Ya tamamı ya hiçbiri.
+          if (!budget.canAfford(WORST_CASE_CALLS_PER_AUDIT)) { halted = true; break; }
+          current = { id: t.id, path: t.path };
+          // Fetch açıkken HANGİ repoda koşulacağı basılır: hedefi seçen veri
+          // (transcript `cwd`) güvenilmez, kullanıcı en azından görmüş olmalı.
+          if (doFetch) console.log(`git fetch (--fetch) hedefi: ${safe(t.path)}`);
+          const summary = await auditProject(store, t, {
+            executor, fetch: doFetch, originRef: arg("origin-ref"), runId,
+          });
+          budget.spend(summary.classifyCalls);
+          results.push({ path: t.path, id: t.id, summary });
+        }
+        current = null;
+
+        if (flag("json")) console.log(JSON.stringify(results, null, 2));
+        else printAuditResults(store, results);
+
+        if (halted) {
+          console.error(`\n${auditBudgetExhaustedMessage(budget.spent, results.length, targets.length, maxCalls)}`);
+          exitCode = 4;
         }
       }
     } finally {
+      off();
       releaseScanLock(store, holder);
     }
   } finally {
     store.close();
+  }
+  if (exitCode !== 0) process.exit(exitCode);
+}
+
+/**
+ * İnsan kipi çıktı. Ayrı fonksiyon, çünkü cmdAudit'in akışı (kapı → bütçe →
+ * çıkış kodu) ile raporlama iki ayrı iş.
+ */
+function printAuditResults(
+  store: Store,
+  results: { path: string; id: number; summary: AuditSummary }[],
+): void {
+  for (const { path, id, summary: s } of results) {
+    console.log(`\n${safe(path)}`);
+    if (s.import) {
+      console.log(`  import: +${s.import.added} ~${s.import.replaced} -${s.import.deleted} (değişmeyen ${s.import.unchanged})`);
+      // Ölçüldü (denetim: import-errors-hidden): okunamayan dizin ile boş ama
+      // okunabilir dizin BAYT BAYT aynı çıktıyı veriyordu (`+0 ~0 -0`, rc=0).
+      // Sayılar `--json`da vardı, insan kipinde yoktu — yani hiç hafıza
+      // okunmamış bir denetim "temiz denetim" gibi görünüyordu.
+      if (s.import.errors > 0)
+        console.log(`  ⚠ import okunamayan: ${s.import.errors}  (o notlar HİÇ denetlenmedi — ayrıntı: status)`);
+      if (s.import.rejected > 0)
+        console.log(`  ⚠ import reddedilen girdi: ${s.import.rejected}  (hafıza ağacının dışını gösteriyordu)`);
+    }
+    if (!s.gitAvailable) console.log("  ⚠ git yok: çapa sinyali KAPALI, yalnız çelişki koşuyor");
+    console.log(`  denetlenen: ${s.checked}  şüpheli: ${s.suspects}  temize dönen: ${s.cleared}`);
+    // "codex çağrısı" GERÇEK koşum sayısıdır, aday sayısı değil: tek toplu
+    // sınıflama yürütücü tekrarı ya da düzeltme turuyla birden çok koşum
+    // olabiliyor (Görev 9). Bu yüzden hiçbir yerde "tek çağrı" denmiyor.
+    console.log(`  çelişki adayı: ${s.candidates}  onaylanan: ${s.contradictions}  codex çağrısı: ${s.classifyCalls}`);
+    if (s.classifyDropped > 0) console.log(`  ⚠ tavan üstü sınıflanmayan aday: ${s.classifyDropped}`);
+    const st = s.anchorStates;
+    console.log(`  çapa: ok ${st.ok}  kayıp ${st.missing_now}  sembol-kayıp ${st.symbol_lost}  ` +
+      `çalkantılı ${st.churned}  hiç-yok ${st.never_existed}  doğrulanamayan ${st.unverifiable}`);
+    // "git söyleyemedi" ile "dosya duruyor" ayrı şeyler: ölçüm arızası skora
+    // katkı vermiyor (A dalgası), dolayısıyla burada görünmezse HİÇ görünmez.
+    if (s.measurementFailures > 0)
+      console.log(`  ⚠ ölçüm arızası: ${s.measurementFailures} çapa doğrulanamadı (git cevap veremedi — ayrıntı: status)`);
+    for (const f of listActive(store, id).filter((f) => f.status === "suspect"))
+      console.log(`  🔶 #${f.id} (${f.suspicion.toFixed(2)}) ${safe(f.content.slice(0, 80))}`);
   }
 }
 
@@ -430,6 +568,19 @@ function cmdStatus(): void {
     const findingCount = store.get<{ n: number }>("SELECT COUNT(*) n FROM findings")?.n ?? 0;
     console.log(`bulgu: ${findingCount}  gözlemci partisi: ${countEvents(store, "observer_batch_ok")}, ` +
       `işlenemeyen: ${countEvents(store, "observer_batch_unprocessed")}`);
+    // Import olayları hiç sayılmıyordu: `audit`in özet satırı "+0 ~0 -0" derken
+    // bunun sebebi "hafıza boş" da olabiliyor "dizin okunamadı" da (ölçüldü:
+    // ikisi bayt bayt aynı çıktıydı). Sayılar burada ayrışıyor.
+    console.log(`import: okunamayan ${countEvents(store, "import_read_failed")}, ` +
+      `reddedilen girdi ${countEvents(store, "import_entry_rejected")}, ` +
+      `diskten silinen not ${countEvents(store, "import_file_deleted")}, ` +
+      `çapa taşması ${countEvents(store, "import_anchor_overflow")}`);
+    // başlayan > biten: yarım kalmış denetim var. Bu fark olmadan yarım denetim
+    // "ölçüldü, temiz çıktı"dan ayırt edilemiyordu.
+    console.log(`denetim: başlayan ${countEvents(store, "audit_started")}, ` +
+      `biten ${countEvents(store, "audit_completed")}, ` +
+      `kesilen ${countEvents(store, "audit_failed")}, ` +
+      `ölçüm arızası ${countEvents(store, "anchor_measurement_failed")}`);
   } finally {
     store.close();
   }
@@ -451,7 +602,12 @@ try {
 } catch (err) {
   // Kullanım hatası her komutta aynı: mesaj + rc=1. Diğer hatalar olduğu gibi
   // yukarı çıkar — yığın izi teşhis için gerekli.
-  if (!(err instanceof UsageError)) throw err;
+  //
+  // OriginRefUnresolved de buraya dahil: kaynağı kullanıcının verdiği bir bayrak
+  // değeri, dolayısıyla yığın izi değil MESAJ gerekiyor — ama sessizce devam
+  // etmek yasak (ölçüldü: geçersiz --origin-ref denetimi sessizce yalnız HEAD'e
+  // karşı koşturuyordu ve altın set ölçümü tam o pine dayanıyor).
+  if (!(err instanceof UsageError) && !(err instanceof OriginRefUnresolved)) throw err;
   console.error(err.message);
   process.exit(1);
 }
@@ -465,17 +621,25 @@ kullanım:
                          [--batch-tokens 500..200000] [--model M]
                          [--effort minimal|low|medium|high] [--yes]
   context-police audit   [--project <yol>] [--path <repo> [--memory-dir <dizin>]]
-                         [--origin-ref <ref>] [--no-fetch] [--json] [--store <db>]
+                         [--origin-ref <ref>] [--fetch] [--json] [--yes] [--store <db>]
   context-police status  [--store <db yolu>]
 
 audit: hafıza notlarını içeri alır, çapa kayması ve çelişki sinyallerini koşar,
   şüphelileri DEPODA işaretler. Hiçbir memory dosyasına yazmaz (K9).
+  --fetch VERİLMEDİKÇE hiç ağ işlemi yapılmaz. Varsayılan kapalı, çünkü
+  denetlenecek repo transcript verisinden seçiliyor ve fetch o reponun kendi
+  yapılandırmasındaki komutu çalıştırabiliyor. (--no-fetch hâlâ kabul ediliyor
+  ama artık etkisiz: kapalı zaten varsayılan.)
 
-observe maliyeti:
-  --yes VERİLMEDİKÇE bir koşum en fazla 20 Codex çağrısı yapar; sınıra gelince
-  iş yarıda bırakılır (filigran ilerlemez, veri kaybolmaz) ve çıkış kodu 4 olur.
+maliyet (observe ve audit):
+  --yes VERİLMEDİKÇE bir koşum en fazla 20 Codex çağrısı yapar.
+  observe: sınıra gelince iş yarıda bırakılır (filigran ilerlemez, veri
+  kaybolmaz) ve çıkış kodu 4 olur.
+  audit: koşum ÖNCESİ tahmin basılır (proje başına en kötü 3 çağrı); tahmin
+  tavanı aşıyorsa TEK ücretli çağrı yapılmadan durulur ve çıkış kodu 3 olur.
   --yes bu tavanı kaldırır: harcamayı onaylamış olursunuz.
 
-çıkış kodları: 1 kullanım hatası · 2 codex yok · 3 onay gerekiyor · 4 bütçe doldu`);
+çıkış kodları: 1 kullanım hatası · 2 codex yok · 3 onay gerekiyor · 4 bütçe doldu
+                130/143 SIGINT/SIGTERM ile kesildi (kilit bırakıldı, kesinti depoda yazılı)`);
   process.exit(cmd ? 1 : 0);
 }

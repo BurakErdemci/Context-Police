@@ -80,6 +80,24 @@ export type EventKind =
   /** Proje git deposu değil (ya da commit'siz): çapa sinyali KAPALI koştu. */
   | "anchor_signal_disabled"
   /**
+   * Denetimin yaşam döngüsü — proje başına, `detail.runId` ile. Gerekçe ölçüm:
+   * import bir transaction'da, skorlar çok sonra BAŞKASINDA commit ediliyor;
+   * arada süreç ölürse not `active`/skor 0 kalıyor ve bu "ölçüldü, temiz çıktı"
+   * ile bayt bayt aynı görünüyordu. Node varsayılanı SIGINT/SIGTERM'de `finally`
+   * bloklarını koşturmuyor (rc=130/143), yani Ctrl-C tam bu durumu üretiyor.
+   * `audit_started` var + `audit_completed` yok = yarım denetim, depodan okunur.
+   */
+  | "audit_started"
+  | "audit_completed"
+  /** Denetim istisnayla ya da sinyalle kesildi; `detail.reason` sebebi taşır. */
+  | "audit_failed"
+  /**
+   * Ölçüm arızası olayı tavanı aştı. Bozuk bir repoda not × çapa başına satır
+   * yazılıyor; `events` silinemez olduğu için şişme geri alınamaz (scan.ts
+   * `unknown_type_overflow` ile aynı gerekçe). Taşan sayı burada tek satırda.
+   */
+  | "anchor_measurement_overflow"
+  /**
    * TEK bir çapanın git ölçümü arızalandı (bozuk repo, erişilemez promisor
    * remote, git binary'si yok, zaman aşımı, maxBuffer taşması). Çapa
    * `unverifiable` sayılır, skora katkı vermez.
