@@ -13,7 +13,12 @@ import { DatabaseSync } from "node:sqlite";
 import { openStore } from "../src/store/db.ts";
 import { getWatermark, setWatermark } from "../src/store/watermarks.ts";
 import { parseObserverOutput } from "../src/observer/prompt.ts";
-import { tmpDir } from "./helpers.ts";
+import { dropThroughWatermarkDetailed } from "../src/observer/batch.ts";
+import { Observer } from "../src/observer/observer.ts";
+import { upsertProject } from "../src/store/projects.ts";
+import { countEvents, listEvents } from "../src/store/events.ts";
+import { fakeExecutor, tmpDir } from "./helpers.ts";
+import type { Turn } from "../src/types.ts";
 
 const cliPath = join(import.meta.dirname, "..", "src", "cli.ts");
 
@@ -294,4 +299,113 @@ test("[missing-cli-option-value] meşru yazımlar bozulmadı (aşırı düzeltme
   assert.equal(scan.status, 0, scan.stderr);
   // Komutsuz çağrı hâlâ kullanım metni basıp rc=0 döner.
   assert.equal(runCli([]).status, 0);
+});
+
+// --- class: watermark-duplicate-uuid-loss ---
+//
+// Gerçek akışta ölçülmüş KALICI turn kaybı. Repro (yalnız append, hiçbir satır
+// yeniden sıralanmadan): canlı bir oturum 678. satıra kadar taranır → filigran
+// yazılır → kalan satırlar append edilir → ikinci tarama. Düzeltmeden önce
+// aradaki 157 turn'ün 20'si HİÇBİR gözlemci çağrısında görünmüyordu ve
+// `match: "uuid"` olduğu için uyarı olayı bile yazılmıyordu.
+//
+// Sebep: `--resume`/fork geçmiş bloğu dosyanın SONUNA yeniden append ediyor, o
+// yüzden teslimatta bulunan uuid eşleşmesi YENİ append edilmiş KOPYA olabiliyor;
+// ondan önceki gerçekten yeni turn'ler `slice(i+1)` ile atılıyordu.
+// Ölçüm: 209 oturum / 49.693 uuid'li satırda 3.426 mükerrer uuid satırı.
+
+const wt = (text: string, uuid?: string, timestamp?: string): Turn =>
+  ({ role: "user", text, uuid, timestamp });
+
+test("[watermark-duplicate-uuid-loss] belirsiz uuid eşleşmesinde eleme YOK", () => {
+  const ts = (h: number) => `2026-08-11T${String(h).padStart(2, "0")}:00:00.000Z`;
+
+  // ŞEKİL 1 — repro'nun ta kendisi: teslimatta filigran uuid'i TEK kez geçiyor
+  // ama o satır fork'un yeniden yazdığı ESKİ kopya (damgası eski), önündeki
+  // turn'ler ondan YENİ. Eski kod bunları "işlenmiş" sayıp atıyordu.
+  const forkKopyasi = dropThroughWatermarkDetailed(
+    [wt("gerçekten yeni 1", "n1", ts(10)), wt("gerçekten yeni 2", "n2", ts(11)),
+     wt("fork'un yeniden yazdığı eski satır", "wm", ts(3))],
+    "wm", ts(3),
+  );
+  assert.deepEqual(
+    forkKopyasi.fresh.map((x) => x.text),
+    ["gerçekten yeni 1", "gerçekten yeni 2", "fork'un yeniden yazdığı eski satır"],
+    "eşleşmenin önündeki YENİ turn'ler kalıcı olarak düştü",
+  );
+  assert.equal(forkKopyasi.match, "uuid-ambiguous");
+  assert.equal(forkKopyasi.ambiguity?.reason, "newer-turn-before-match");
+  assert.equal(forkKopyasi.ambiguity?.uuidMatches, 1);
+
+  // ŞEKİL 2 — aynı uuid teslimatta İKİ kez: hangisi "buraya kadarı işlendi"
+  // belli değil. İlkini seçmek aradaki turn'leri, ikincisini seçmek daha da
+  // fazlasını atardı; ölçülen 3.426 mükerrer satır bu şeklin gerçek olduğunu
+  // söylüyor. Tercih: hiçbirini eleme.
+  const mukerrer = dropThroughWatermarkDetailed(
+    [wt("wm kopya A", "wm", ts(1)), wt("arada kalan", "n1", ts(2)), wt("wm kopya B", "wm", ts(1))],
+    "wm", ts(2),
+  );
+  assert.deepEqual(mukerrer.fresh.length, 3, "mükerrer uuid'de eleme yapıldı");
+  assert.equal(mukerrer.match, "uuid-ambiguous");
+  assert.equal(mukerrer.ambiguity?.reason, "duplicate-uuid");
+  assert.equal(mukerrer.ambiguity?.uuidMatches, 2);
+});
+
+test("[watermark-duplicate-uuid-loss] normal tekrar-teslimde eleme HÂLÂ çalışır", () => {
+  // Aşırı düzeltme kapısı: her eşleşmeyi belirsiz saymak mükerrer bulgu
+  // regresyonu (order-sensitive-watermark) olurdu. Tek eşleşme + önü tutarlı
+  // damgalı ise konumsal kesim aynen sürüyor.
+  const ts = (h: number) => `2026-08-11T0${h}:00:00.000Z`;
+  const r = dropThroughWatermarkDetailed(
+    [wt("işlenmiş 1", "u1", ts(1)), wt("işlenmiş 2", "u2", ts(2)), wt("yeni", "u3", ts(3))],
+    "u2", ts(2),
+  );
+  assert.deepEqual(r.fresh.map((x) => x.text), ["yeni"], "tekrar-teslim elenmedi: mükerrer bulgu üretilir");
+  assert.equal(r.match, "uuid");
+  assert.equal(r.ambiguity, undefined);
+
+  // Damgası EŞİT olan önceki turn'ler belirsizlik saymaz — gerçek veride
+  // turn'lerin %11,55'i damgasını bir başkasıyla paylaşıyor, "yeni" ölçütü
+  // KESİN büyüklük.
+  const esitDamga = dropThroughWatermarkDetailed(
+    [wt("a", "u1", ts(2)), wt("b", "u2", ts(2)), wt("yeni", "u3", ts(3))],
+    "u2", ts(2),
+  );
+  assert.deepEqual(esitDamga.fresh.map((x) => x.text), ["yeni"]);
+  assert.equal(esitDamga.match, "uuid");
+
+  // Filigran partinin SONUNDAysa hepsi elenir (en yaygın tekrar-teslim hâli).
+  const hepsi = dropThroughWatermarkDetailed(
+    [wt("a", "u1", ts(1)), wt("b", "u2", ts(2))], "u2", ts(2),
+  );
+  assert.deepEqual(hepsi.fresh, []);
+  assert.equal(hepsi.match, "uuid");
+});
+
+test("[watermark-duplicate-uuid-loss] belirsiz eşleşme görünür olay bırakır", async () => {
+  // Sessiz eleme bulgunun kendisiydi; sessiz ELEMEME de aynı hatanın aynası
+  // olurdu — mükerrer bulgunun sebebi sonradan bulunamazdı.
+  const store = openStore(":memory:");
+  const pid = upsertProject(store, { path: "/p", adapterId: "claude-code", transcriptDir: "/t" });
+  const ts = (h: number) => `2026-08-11T${String(h).padStart(2, "0")}:00:00.000Z`;
+  setWatermark(store, { projectId: pid, sessionId: "s1", lastUuid: "wm", lastTs: ts(3) });
+
+  const exec = fakeExecutor([]);
+  const obs = new Observer({ store, executor: exec });
+  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns: [
+    wt("gerçekten yeni", "n1", ts(10)), wt("fork kopyası", "wm", ts(3)),
+  ]});
+
+  assert.equal(countEvents(store, "watermark_ambiguous_match"), 1, "belirsiz eşleşme sessizce geçti");
+  const detail = JSON.parse(listEvents(store, { kind: "watermark_ambiguous_match" })[0]!.detail!);
+  assert.equal(detail.reason, "newer-turn-before-match");
+  assert.equal(detail.uuidMatches, 1);
+  assert.equal(detail.storedUuid, "wm");
+  assert.equal(detail.turnCount, 2);
+  // Ve asıl mesele: kaybolan turn YOK, modele gitti.
+  assert.equal(exec.calls.length, 1);
+  assert.ok(exec.calls[0]!.prompt.includes("gerçekten yeni"), "yeni turn yine kayboldu");
+  // Yanlış olay tipi yazılmadı: bu "hiç eşleşmedi" değil, "güvenilmedi".
+  assert.equal(countEvents(store, "watermark_match_failed"), 0);
+  store.close();
 });

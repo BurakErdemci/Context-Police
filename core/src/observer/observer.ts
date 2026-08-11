@@ -63,7 +63,9 @@ export class Observer {
   /** scanOnce onTurns'a doğrudan verilir: (ctx) => observer.handleTurns(ctx). */
   async handleTurns(ctx: { projectId: number; sessionId: string; turns: Turn[] }): Promise<void> {
     const wm = getWatermark(this.store, ctx.projectId, ctx.sessionId);
-    const { fresh, match } = dropThroughWatermarkDetailed(ctx.turns, wm?.lastUuid ?? null, wm?.lastTs ?? null);
+    const { fresh, match, ambiguity } = dropThroughWatermarkDetailed(
+      ctx.turns, wm?.lastUuid ?? null, wm?.lastTs ?? null,
+    );
     this.stats.skippedTurns += ctx.turns.length - fresh.length;
     // Filigran VAR ama hiçbir kimlikle eşleşmedi: bu akıştaki her turn "yeni"
     // sayılacak, yani mükerrer bulgu üretilebilir. Sessiz kalırsa mükerrerin
@@ -75,6 +77,20 @@ export class Observer {
         detail: {
           sessionId: ctx.sessionId, storedUuid: wm.lastUuid, storedTs: wm.lastTs ?? null,
           turnCount: ctx.turns.length,
+        },
+      });
+    }
+    // uuid eşleşti ama güvenilmedi: eleme YAPILMADI. Sessiz kalırsa "neden bu
+    // turn'ler ikinci kez işlendi" sorusu cevapsız kalır — ve tersi (sessiz
+    // eleme) tam olarak watermark-duplicate-uuid-loss bulgusuydu.
+    if (match === "uuid-ambiguous" && ambiguity !== undefined) {
+      logEvent(this.store, {
+        projectId: ctx.projectId,
+        kind: "watermark_ambiguous_match",
+        detail: {
+          sessionId: ctx.sessionId, storedUuid: wm?.lastUuid ?? null, storedTs: wm?.lastTs ?? null,
+          turnCount: ctx.turns.length,
+          uuidMatches: ambiguity.uuidMatches, reason: ambiguity.reason,
         },
       });
     }

@@ -33,6 +33,12 @@ export type EventKind =
   | "observer_batch_no_checkpoint"
   /** Saklı filigran akışta hiçbir kimlikle eşleşmedi: mükerrer bulgu riski. */
   | "watermark_match_failed"
+  /**
+   * uuid eşleşti ama TEK ANLAMLI değil (mükerrer uuid ya da eşleşmenin önünde
+   * daha yeni damga): eleme yapılmadı, hepsi taze sayıldı. Mükerrer bulgu riski
+   * bilinçli tercih — alternatifi kalıcı turn kaybıydı (batch.ts'teki ölçüm).
+   */
+  | "watermark_ambiguous_match"
   /** maxCalls bütçesi doldu: kalan partiler İŞLENMEDİ, filigran ilerlemedi. */
   | "observer_budget_exhausted";
 

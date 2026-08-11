@@ -22,11 +22,20 @@ export interface Batch {
  * kılmak zorunda (sessiz "hepsi yeni" varsayımı order-sensitive-watermark
  * bulgusunun kendisiydi).
  */
-export type WatermarkMatch = "no-watermark" | "uuid" | "timestamp" | "none";
+export type WatermarkMatch = "no-watermark" | "uuid" | "timestamp" | "none" | "uuid-ambiguous";
+
+/** uuid eşleşmesine neden güvenilmediği. Olay detayına aynen yazılır. */
+export type AmbiguityReason =
+  /** Filigran uuid'i teslimatta birden çok kez geçiyor: hangisi "buraya kadarı işlendi" belli değil. */
+  | "duplicate-uuid"
+  /** Eşleşmenin ÖNÜNDE, eşleşen turn'den daha YENİ damgalı turn var: önü "geçmiş" görünmüyor. */
+  | "newer-turn-before-match";
 
 export interface DropResult {
   fresh: Turn[];
   match: WatermarkMatch;
+  /** Yalnız `match === "uuid-ambiguous"` iken dolu. */
+  ambiguity?: { uuidMatches: number; reason: AmbiguityReason };
 }
 
 /** Kaba ama deterministik: bayt/4. Amaç bütçe, hassasiyet değil. */
@@ -69,6 +78,35 @@ export function estimateTokens(text: string): number {
  * Zaman damgaları sözlüksel karşılaştırılıyor: kaynak biçim ISO-8601 UTC
  * (`2026-08-11T10:23:45.123Z`) ve bu biçimde sözlüksel sıra = kronolojik sıra.
  * Karma biçim gelirse kesim yanlış olur — o yüzden biçim varsayımı burada yazılı.
+ *
+ * --- uuid eşleşmesi TEK ANLAMLI değilse eleme YOK (watermark-duplicate-uuid-loss)
+ *
+ * Kilit içgörü: tarama modunda teslimat bayt imlecinden İLERİ okunur, yani
+ * teslimattaki her turn tanım gereği işlenmemiştir. Konumsal eleme yalnız TEKRAR
+ * TESLİM için var (gözlemci yazdı ama imleç yazılamadan çökme — en-az-bir-kez
+ * sözleşmesi). Yani filigran uuid'inin teslimatta bulunması "buraya kadarı
+ * işlendi" demek DEĞİL.
+ *
+ * Ölçüldü (11 Ağu 2026, ~/.claude/projects, 209 oturum / 49.693 uuid'li satır):
+ * 3.426 mükerrer uuid satırı, 2.588 farklı uuid; 2.233 çift byte-byte aynı.
+ * Sebep: `--resume`/fork geçmiş bloğu dosyanın SONUNA yeniden append ediliyor.
+ * O zaman teslimatta bulunan tek eşleşme YENİ append edilmiş KOPYA olur ve
+ * `findIndex` + `slice(i+1)` ondan önceki gerçekten yeni turn'leri sessizce atar.
+ * Gerçek akış reprosunda (yalnız append, sıra bozulmadan) 157 turn'ün 20'si hiçbir
+ * gözlemci çağrısında görünmüyordu — kalıcı kayıp, üstelik `match: "uuid"` olduğu
+ * için uyarı olayı bile yazılmıyordu.
+ *
+ * Çare: ele, ancak eşleşme TEK ANLAMLI ise — (a) eşleşme sayısı tam 1, VE
+ * (b) eşleşenden ÖNCE gelen hiçbir turn'ün damgası eşleşenin damgasından YENİ
+ * değil (yani önü gerçekten "geçmiş" görünüyor). Repro'yu kesen koşul (b): fork
+ * kopyası satırı bire bir taşıdığı için damgası ESKİdir, önündeki 157 yeni turn
+ * ise ondan yenidir → belirsiz.
+ *
+ * Aksi hâlde hiçbir şey elenmez ve `match: "uuid-ambiguous"` ile GÖRÜNÜR olur.
+ * Yön yine aynı: mükerrer bulgu geri alınabilir (supersede + restore, spec §3.2),
+ * kayıp turn geri alınamaz. Bedeli de biliniyor — damgası bir öncekinden geri
+ * giden turn'ler (ölçüm: %0,70) koşul (b)'yi düşürüp gereksiz "belirsiz" üretebilir;
+ * bu bilinçli olarak mükerrer tarafına yazılmış bir maliyettir.
  */
 export function dropThroughWatermarkDetailed(
   turns: Turn[],
@@ -78,8 +116,29 @@ export function dropThroughWatermarkDetailed(
   if (lastUuid == null && lastTs == null) return { fresh: turns, match: "no-watermark" };
 
   if (lastUuid != null) {
-    const i = turns.findIndex((t) => t.uuid === lastUuid);
-    if (i !== -1) return { fresh: turns.slice(i + 1), match: "uuid" };
+    // İLK eşleşme değil TÜM eşleşmeler: sayı belirsizliğin birinci ölçütü.
+    const hits: number[] = [];
+    for (const [i, t] of turns.entries()) if (t.uuid === lastUuid) hits.push(i);
+    if (hits.length > 0) {
+      const i = hits[0]!;
+      const matchedTs = turns[i]!.timestamp ?? null;
+      // Damgası olmayan turn karşılaştırmaya girmez: "yeni olduğu ölçülemedi"
+      // ile "yeni" aynı şey değil, ve ölçümde turn'lerin %100'ü damga taşıyor.
+      const newerBefore =
+        matchedTs != null &&
+        turns.slice(0, i).some((t) => t.timestamp != null && t.timestamp > matchedTs);
+      if (hits.length > 1 || newerBefore) {
+        return {
+          fresh: turns,
+          match: "uuid-ambiguous",
+          ambiguity: {
+            uuidMatches: hits.length,
+            reason: hits.length > 1 ? "duplicate-uuid" : "newer-turn-before-match",
+          },
+        };
+      }
+      return { fresh: turns.slice(i + 1), match: "uuid" };
+    }
   }
 
   if (lastTs != null && turns.some((t) => t.timestamp != null)) {
