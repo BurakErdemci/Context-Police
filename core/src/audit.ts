@@ -144,7 +144,16 @@ export async function auditProject(
     anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
   };
 
-  /** Her denetim olayı koşum kimliği taşır — tek yazma yolu bu. */
+  /**
+   * Her denetim olayı koşum kimliği taşır — tek yazma yolu bu.
+   *
+   * Kalan `ev` çağrıları (audit_started/failed/completed, anchor_signal_disabled,
+   * git_fetch_failed, anchor_measurement_failed/overflow, classify_overflow,
+   * classify_failed) bilerek kendi başlarına commit ediliyor: hiçbirinin depoda
+   * bir SONUCU yok, gözlemin kendisi olayın tamamı. "Sonucu anlatan olay o
+   * sonuçla aynı tx'te" kuralı yalnız bir kayıt yazan/superseded eden yollara
+   * uygulanır; audit_started'ın kendi işleminde olması ise zorunlu (aşağıda).
+   */
   const ev = (kind: EventKind, detail: Record<string, unknown>): void =>
     logEvent(store, { projectId: project.id, kind, detail: { runId, ...detail } });
 
@@ -186,6 +195,8 @@ export async function auditProject(
     // çelişki adaylığına aşağıda katılır (çapasız not da çelişebilir).
     const all = listActive(store, project.id);
     const scores = new Map<number, ScoreEntry>();
+    /** Skor yazımıyla AYNI tx'te commit edilecek çelişki olayları (gerekçe altta). */
+    const pendingContradictionEvents: Record<string, unknown>[] = [];
     let measurementEvents = 0;
 
     for (const f of all) {
@@ -265,13 +276,22 @@ export async function auditProject(
               states: cur.states,
             });
           }
-          ev("contradiction_confirmed", { kind: c.kind, aId: c.aId, bId: c.bId, reason: c.reason });
+          // Olay HEMEN yazılmıyor, yazım tx'ine ertelendi. Aynı değişmez kural
+          // (bkz. importer/import.ts): bir sonucu anlatan olay o sonuçla aynı
+          // transaction'da commit edilir ya da hiç edilmez. Buradaki sonuç
+          // yukarıdaki skor — ve o skor çok sonra, BAŞKA bir tx'te yazılıyor.
+          // Arada ölüm: günlük "çelişki onaylandı" derken iki not da `active`
+          // ve skoru 0 kalırdı, yani denetim günlüğü depoyu yanlış anlatırdı.
+          // Erteleme burada mümkün çünkü olayın içeriği zaten elde; importer'da
+          // mümkün değildi (orada sonucu üreten döngü olayı hiç görmüyor).
+          pendingContradictionEvents.push({ kind: c.kind, aId: c.aId, bId: c.bId, reason: c.reason });
         }
       }
     }
 
     // Yazım: skor SIFIRDAN (D-M3-3), geçiş active↔suspect (D-M3-9), her şey olaylı.
     store.tx(() => {
+      for (const c of pendingContradictionEvents) ev("contradiction_confirmed", c);
       for (const f of all) {
         // Skor kaydı olmayan tek küme: hiç çelişkiye girmemiş `unanchored` not.
         // Yukarıdaki skor döngüsü onu atladı (M0-D5: çapa sinyali çapasız nota

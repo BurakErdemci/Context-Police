@@ -112,6 +112,68 @@ test("dizin İÇİNDE kalan symlink import edilir — kısıt yol değil ağaç 
   assert.deepEqual(listActive(store, projectId).map((f) => f.content), ["İÇERDEKİ NOT", "İÇERDEKİ NOT"]);
 });
 
+// Değişmez kural (doğrulama turu, probe: rejected-import-event-not-atomic):
+// bir SONUCU anlatan olay, o sonuçla AYNI transaction'da commit edilir ya da
+// hiç edilmez. Reddetme olayı girdi döngüsünde tek başına autocommit ediliyor,
+// reddedilen yolun eski kaydı ise çok sonra süpürmede superseded oluyordu —
+// arada bir ölüm "reddedildi" yazan bir günlük ve hâlâ `active` bir not
+// bırakıyordu.
+test("reddedilen girdi: olay ve eski kaydın supersede'i ya birlikte ya hiç", async () => {
+  const { root, dir, store, projectId } = nested();
+  const note = join(dir, "note.md");
+  writeFileSync(note, "ÖNCEKİ CANLI NOT");
+  writeFileSync(join(root, "outside.md"), "DIŞARIDAN İÇERİK");
+  await importMemoryDir(store, projectId, dir);
+  assert.equal(listActive(store, projectId).length, 1);
+
+  // Aynı yol artık ağaç dışını gösteriyor: girdi reddedilecek.
+  rmSync(note);
+  symlinkSync(join(root, "outside.md"), note);
+
+  // Supersede yazımını patlat: kırılma noktası tam olarak olay ile sonucun
+  // arasına düşüyor.
+  let injected = false;
+  const bozuk = {
+    ...store,
+    run(sql: string, ...p: Parameters<typeof store.run>[1][]) {
+      if (sql.startsWith("UPDATE findings SET status = 'superseded'")) {
+        injected = true;
+        throw new Error("enjekte edilen supersede hatası");
+      }
+      return store.run(sql, ...p);
+    },
+  };
+  await assert.rejects(() => importMemoryDir(bozuk as typeof store, projectId, dir));
+  assert.ok(injected, "test kendi kırılma noktasına ulaşamadıysa hiçbir şey kanıtlamaz");
+
+  // İkisi de yok: tx geri alındı. "Reddedildi yazılı ama not canlı" hâli
+  // artık üretilemiyor.
+  assert.equal(listEvents(store, { projectId, kind: "import_entry_rejected" }).length, 0);
+  assert.equal(listActive(store, projectId).length, 1);
+});
+
+test("reddedilen girdinin eski kaydı süpürmeyi beklemeden, olayla aynı anda superseded olur", async () => {
+  const { root, dir, store, projectId } = nested();
+  const note = join(dir, "note.md");
+  writeFileSync(note, "ÖNCEKİ CANLI NOT");
+  writeFileSync(join(root, "outside.md"), "DIŞARIDAN İÇERİK");
+  await importMemoryDir(store, projectId, dir);
+  const oldId = listActive(store, projectId)[0]!.id;
+
+  rmSync(note);
+  symlinkSync(join(root, "outside.md"), note);
+  const sum = await importMemoryDir(store, projectId, dir);
+
+  assert.equal(sum.rejected, 1);
+  assert.equal(getFinding(store, oldId)!.status, "superseded");
+  assert.equal(listEvents(store, { projectId, kind: "import_entry_rejected" }).length, 1);
+  const sup = listEvents(store, { projectId, kind: "finding_superseded" });
+  assert.equal(sup.length, 1);
+  assert.equal(JSON.parse(sup[0]!.detail!).reason, "entry_rejected");
+  // Süpürme aynı kaydı İKİNCİ kez ele almaz (zaten superseded).
+  assert.equal(listEvents(store, { projectId, kind: "import_file_deleted" }).length, 0);
+});
+
 test("kırık symlink: kayıt üretmez, süpürme onu 'yok' sayar", async () => {
   const { dir, store, projectId } = nested();
   symlinkSync(join(dir, "yok-olan-hedef.md"), join(dir, "dangling.md"));

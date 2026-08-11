@@ -48,6 +48,9 @@ export async function importMemoryDir(
   } catch (err) {
     // Dizin yoksa/okunamıyorsa ATMA yerine raporla: tek bir projenin hafıza
     // dizininin eksikliği taramanın tamamını düşürmemeli. Sessiz de değil.
+    // Yukarıdaki değişmez kuralın DIŞINDA değil, kapsamı dışında: bu olayın
+    // depoda bir sonucu yok (hiçbir kayıt supersede edilmiyor, hiçbir kayıt
+    // doğmuyor) — anlattığı şeyin kendisi tek başına olayın içeriği.
     sum.errors++;
     logEvent(store, { projectId, kind: "import_read_failed", detail: { dir: memoryDir, error: String(err) } });
     return sum;
@@ -62,6 +65,8 @@ export async function importMemoryDir(
     const path = join(memoryDir, name);
 
     let raw: string;
+    /** Ağaç dışını gösteren symlink'in çözülmüş hedefi; null = reddedilmedi. */
+    let rejectedTarget: string | null = null;
     try {
       // Girdi tipi okumadan ÖNCE: readFile symlink'i sessizce takip eder.
       // Gerekçe güvenlik değil DOĞRULUK — symlink koyabilen aktör aynı baytları
@@ -73,27 +78,75 @@ export async function importMemoryDir(
       const st = await lstat(path);
       if (st.isSymbolicLink()) {
         const target = await realpath(path);
-        if (!inMemoryTree(base, target)) {
-          sum.rejected++;
-          logEvent(store, {
-            projectId, kind: "import_entry_rejected",
-            detail: { file: path, target, reason: "symlink_outside_memory_dir" },
-          });
-          // currentRefs'e girmez: bugün o yolda duran şey kayda aldığımız not
-          // değil. Eski temsil süpürmede superseded olur — silme değil işaretleme
-          // olduğu için yanlışsa tek adımda geri alınır (spec §3.2).
-          continue;
-        }
+        if (!inMemoryTree(base, target)) rejectedTarget = target;
       }
-      raw = await readFile(path, "utf8");
+      // Reddedilen girdi okunmaz: depoya yazılması yasak olan baytları belleğe
+      // almanın da bir faydası yok.
+      raw = rejectedTarget === null ? await readFile(path, "utf8") : "";
     } catch (err) {
       sum.errors++;
       logEvent(store, { projectId, kind: "import_read_failed", detail: { file: path, error: String(err) } });
+      // Tek başına commit ediliyor ve kural bunu KAPSAMIYOR: olayın burada
+      // depoya yazdığı bir sonuç yok. Reddetmeden farkı, reddetmenin KALICI bir
+      // durum olması (symlink orada durdukça her koşumda aynı) — okuma hatası
+      // ise geçici olabilir, o yüzden aşağıdaki ENOENT ayrımıyla yol GÜNCEL
+      // sayılıp hiçbir kayda dokunulmuyor. Dokunulmayan kayıt "aynı tx" borcu
+      // da doğurmaz.
       // ENOENT DIŞI hata dosyanın yokluğunu KANITLAMAZ (EACCES geçici olabilir,
       // EISDIR/EIO yolun dolu olduğunu söyler): yolu güncel say, yoksa tek bir
       // okuma hatası kaydı "silinmiş" diye superseded ederdi. ENOENT ise dosya
       // listeleme ile okuma arasında gerçekten kayboldu → süpürme görsün.
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") currentRefs.add(path);
+      continue;
+    }
+
+    if (rejectedTarget !== null) {
+      // DEĞİŞMEZ KURAL: bir SONUCU anlatan olay, o sonuçla AYNI transaction'da
+      // commit edilir ya da hiç commit edilmez.
+      //
+      // Ölçüldü (probe: rejected-import-event-not-atomic): olay girdi döngüsünde
+      // tek başına autocommit ediliyordu, reddedilen yolun eski kaydının
+      // superseded edilmesi ise ÇOK SONRA, süpürmenin ayrı tx'inde oluyordu.
+      // Arada bir hata/ölüm: append-only günlükte "bu girdi reddedildi" yazıyor
+      // ama reddedilen yolun eski içeriği hâlâ `active` ve denetleniyor — yani
+      // günlük depoyu yanlış anlatıyor.
+      //
+      // İki tasarım vardı; ERTELEME değil HEMEN seçildi: olayı süpürmeye
+      // ertelemek, hiç kaydı olmayan (ilk kez görülen) reddedilmiş bir girdi
+      // için olayı bütünüyle kaybederdi — süpürme yalnız var olan kayıtlar
+      // üzerinde dönüyor. Hemen supersede etmenin sonucu süpürmeninkiyle aynı
+      // (yol currentRefs'e girmiyor, orada da superseded olurdu), ama burada
+      // gerekçesiyle birlikte ve tek parça.
+      //
+      // OKUMA try'ının DIŞINDA olmak ZORUNDA: içerideyken enjekte edilen bir
+      // depo hatası yukarıdaki catch'e düşüp `import_read_failed`'a dönüşüyordu
+      // (bu düzeltmenin ilk hâlinde ölçüldü) — yani depo arızası okuma arızası
+      // gibi raporlanıyor, üstelik yol "güncel" sayılıp yutuluyordu.
+      const stale = store.get<{ id: number }>(
+        `SELECT id FROM findings
+         WHERE project_id = ? AND source = 'imported' AND source_ref = ? AND status != 'superseded'
+         ORDER BY id DESC LIMIT 1`,
+        projectId, path,
+      );
+      store.tx(() => {
+        logEvent(store, {
+          projectId, kind: "import_entry_rejected",
+          detail: { file: path, target: rejectedTarget, reason: "symlink_outside_memory_dir" },
+        });
+        if (stale) {
+          // Yerine geçen yok: içerik reddedildi, yeni bir temsil doğmadı. Silme
+          // değil işaretleme olduğu için yanlışsa tek adımda geri alınır (§3.2).
+          supersede(store, stale.id);
+          logEvent(store, {
+            projectId, kind: "finding_superseded",
+            detail: { oldId: stale.id, newId: null, reason: "entry_rejected", file: name },
+          });
+        }
+      });
+      // Sayaç tx'ten SONRA (aşağıdaki added/replaced ile aynı gerekçe): geri
+      // alınan bir işlem özet sayısına yansımamalı.
+      sum.rejected++;
+      // currentRefs'e girmez: bugün o yolda duran şey kayda aldığımız not değil.
       continue;
     }
     // Okuma başarılı olduktan SONRA: "diskte hâlâ var" iddiası ancak burada doğru.
