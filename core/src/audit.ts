@@ -3,9 +3,11 @@
 //
 // LLM yalnız çelişki sınıflamasında kullanılır. Maliyet muhasebesi tek toplu
 // çağrıyı TEK Codex koşumu saymaz: classify.ts'te yürütücü hatası tekrarı ve
-// bozuk-JSON düzeltme turu aynı sayaca yazıyor, yani bir sınıflama 1–3 gerçek
-// koşum olabilir (Görev 9 raporu, şerh 1). Gerçek sayı `classifyCalls`tadır;
-// başka hiçbir yerde tahmin edilmez.
+// bozuk-JSON düzeltme turu AYNI sayaca yazıyor. Üst sınır 3'tür — çağrı 1
+// yürütücü hatası verir, çağrı 2 koşar ama geçersiz JSON döner, çağrı 3
+// düzeltme turudur. (Görev 9 raporunun "en kötü 2" şerhi eksik saymış: iki
+// kurtarma yolunun ARDIŞIK işleyebildiğini atlıyor.) Gerçek sayı yine de
+// tahmin edilmez, `classifyCalls`tan okunur.
 
 import type { Store } from "./store/db.ts";
 import type { ExecutorAdapter } from "./adapters/executor.ts";
@@ -134,6 +136,8 @@ export async function auditProject(
       sum.contradictions = res.confirmed.length;
       for (const c of res.confirmed) {
         // Çelişki onaylanırsa İKİ taraf da yükselir (spec §3.4) — en az 0.7.
+        // Taraf `unanchored` olsa bile: burada kayıt açılıyor ve yazım döngüsü
+        // onu görüyor. Çapasız notun tek denetlenebilir yolu bu.
         for (const id of [c.aId, c.bId]) {
           if (id === null) continue;
           const cur = scores.get(id) ?? { score: 0, reasons: [], states: {} };
@@ -143,9 +147,6 @@ export async function auditProject(
             states: cur.states,
           });
         }
-        // Olay, yazım döngüsünden BAĞIMSIZ düşer: çelişkinin bir tarafı
-        // unanchored ise skoru yazılmaz (M0-D5) ama bulgu kaybolmaz — sessiz
-        // yutma yasağının bu yoldaki karşılığı bu kayıt.
         logEvent(store, { projectId: project.id, kind: "contradiction_confirmed",
           detail: { kind: c.kind, aId: c.aId, bId: c.bId, reason: c.reason } });
       }
@@ -155,12 +156,18 @@ export async function auditProject(
   // Yazım: skor SIFIRDAN (D-M3-3), geçiş active↔suspect (D-M3-9), her şey olaylı.
   store.tx(() => {
     for (const f of all) {
-      if (f.status === "unanchored") continue;
-      const s = scores.get(f.id) ?? { score: 0, reasons: [], states: {} };
+      // Skor kaydı olmayan tek küme: hiç çelişkiye girmemiş `unanchored` not.
+      // Yukarıdaki skor döngüsü onu atladı (M0-D5: çapa sinyali çapasız nota
+      // dokunmaz) ve çelişki de bir katkı koymadıysa nota HİÇ dokunulmaz —
+      // skor 0 bile yazılmaz, olay bile düşmez. Çelişki bir katkı koyduysa
+      // kayıt vardır ve aşağıdaki yol çapalı notunkiyle aynıdır: nötrlük çapa
+      // sinyaline özgüdür, içsel sinyale değil (mimar kararı, düzeltme turu).
+      const s = scores.get(f.id);
+      if (s === undefined) continue;
       setSuspicion(store, f.id, s.score);
       logEvent(store, { projectId: project.id, kind: "signal_scored",
         detail: { findingId: f.id, score: s.score, reasons: s.reasons, states: s.states } });
-      if (s.score >= SUSPICION_THRESHOLD && f.status === "active") {
+      if (s.score >= SUSPICION_THRESHOLD && (f.status === "active" || f.status === "unanchored")) {
         markSuspect(store, f.id);
         sum.suspects++;
         logEvent(store, { projectId: project.id, kind: "finding_suspect", detail: { findingId: f.id, score: s.score } });

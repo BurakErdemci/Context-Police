@@ -87,17 +87,38 @@ export function getAnchors(store: Store, findingId: number): Anchor[] {
 }
 
 /**
- * Sinyal motorunun tekelinde (D-M3-9): yalnız active→suspect. Koşul SQL'de,
- * çağıranda değil — unanchored (M0-D5) ya da superseded bir kaydı yanlışlıkla
+ * Sinyal motorunun tekelinde (D-M3-9): active VE unanchored → suspect. Koşul
+ * SQL'de, çağıranda değil — superseded ya da born_invalid bir kaydı yanlışlıkla
  * şüpheliye itmek imkânsız olsun.
+ *
+ * `unanchored`ın da geçmesi bilinçli (mimar kararı, Görev 10 düzeltme turu):
+ * M0-D5'in nötrlüğü "çapasız not KOD HAREKETİYLE çürüyemez, çapa sinyali ona
+ * dokunmasın" demektir. Çelişki ise çapadan bağımsız, tamamen İÇSEL bir sinyal
+ * ve spec §3.4 "iki taraftan en az biri yanlış" diyor — yani çelişki,
+ * denetlenemez sayılan notu denetlenebilir kılar.
  */
 export function markSuspect(store: Store, id: number): void {
-  store.run("UPDATE findings SET status = 'suspect' WHERE id = ? AND status = 'active'", id);
+  store.run("UPDATE findings SET status = 'suspect' WHERE id = ? AND status IN ('active','unanchored')", id);
 }
 
-/** Skor eşik altına düştüyse geri dönüş — otomatik, çünkü hiçbir dosyaya inmedi (K9). */
+/**
+ * Skor eşik altına düştüyse geri dönüş — otomatik, çünkü hiçbir dosyaya inmedi (K9).
+ *
+ * Hedef durum ÇAPA VARLIĞINA bakılarak seçilir: çapasız not `unanchored`'a
+ * döner, `active`'e değil. Aksi hâlde çelişkisi çözülen çapasız bir not
+ * `active`te sıkışır ve M0-D5 sınıflaması KALICI olarak kaybolurdu — o notu
+ * hiçbir çapa sinyali denetleyemeyecek olmasına rağmen denetleniyor görünürdü.
+ *
+ * Çapa bilgisi parametreyle DEĞİL depodan alınıyor: tek doğru kaynak depo, ve
+ * çağıranın yanlış bir bayrağı burada sessizce yanlış bir sınıflama yazardı.
+ */
 export function clearSuspect(store: Store, id: number): void {
-  store.run("UPDATE findings SET status = 'active' WHERE id = ? AND status = 'suspect'", id);
+  const n = store.get<{ n: number }>("SELECT COUNT(*) n FROM anchors WHERE finding_id = ?", id)?.n ?? 0;
+  store.run(
+    "UPDATE findings SET status = ? WHERE id = ? AND status = 'suspect'",
+    n > 0 ? "active" : "unanchored",
+    id,
+  );
 }
 
 /** Ajanın "gerçek" saydığı küme: superseded ve born_invalid buraya girmez. */

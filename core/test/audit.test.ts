@@ -138,6 +138,70 @@ test("git olmayan proje: anchor kapalı, çelişki koşar, olay düşer (D-M3-7)
   store.close();
 });
 
+// M0-D5'in nötrlüğü ÇAPA SİNYALİNE özgü: "çapasız not kod hareketiyle çürüyemez".
+// Çelişki çapadan bağımsız, içsel bir sinyal (spec §3.4: iki taraftan en az biri
+// yanlış) — yani denetlenemez sayılan notu denetlenebilir kılıyor. Mimar kararı,
+// Görev 10 düzeltme turu.
+test("çelişki çapasız notu DA yükseltir; çözülünce active'e değil unanchored'a döner", async () => {
+  const { store, project } = setup({
+    // Çapa üretmeyen not: backtick'li sembol, uzantılı yol ve hex dizi yok.
+    "celiskili.md": "---\ndescription: teslim yolu A üzerinden gidiyor\n---\n" +
+      "Ölçüldü: teslim yolu A üzerinden GİTMİYOR, B üzerinden gidiyor.",
+  });
+
+  const onceki = listActive(store, project.id);
+  assert.equal(onceki.length, 0, "önkoşul: depo boş");
+
+  const sum = await auditProject(store, project, {
+    executor: fakeExecutor([{ output: '{"verdicts":[{"index":0,"verdict":"celiski","evidence":"özet gövdeyi yalanlıyor"}]}' }]),
+    fetch: false,
+  });
+  assert.equal(sum.candidates, 1, "frontmatter ↔ gövde yüzeyi");
+  assert.equal(sum.contradictions, 1);
+  assert.equal(sum.checked, 0, "çapa sinyali çapasız nota hiç dokunmadı — nötrlük duruyor");
+
+  const [f1] = listActive(store, project.id);
+  assert.equal(f1!.status, "suspect", "çapasız not çelişkiyle şüpheliye geçmeli");
+  assert.ok(f1!.suspicion >= 0.6);
+
+  // İkinci koşum: çelişki onayı gelmiyor → skor sıfırdan hesaplanıyor ve not
+  // ÇAPASIZ olduğu için `active`e değil `unanchored`a dönüyor. `active` olsaydı
+  // M0-D5 sınıflaması kalıcı kaybolurdu: hiçbir çapa sinyalinin denetleyemediği
+  // bir not "denetleniyor" görünürdü.
+  const sum2 = await auditProject(store, project, {
+    executor: fakeExecutor([{ output: '{"verdicts":[{"index":0,"verdict":"uyumlu","evidence":"aynı şeyi söylüyorlar"}]}' }]),
+    fetch: false,
+  });
+  assert.equal(sum2.contradictions, 0);
+  assert.equal(sum2.cleared, 1);
+  const f2 = getFinding(store, f1!.id)!;
+  assert.equal(f2.status, "unanchored", "çapasız not active'te sıkışmamalı");
+  assert.equal(f2.suspicion, 0);
+  assert.equal(countEvents(store, "finding_suspect"), 1);
+  assert.equal(countEvents(store, "finding_cleared"), 1);
+  store.close();
+});
+
+test("çapası olan not temize dönerken active'e döner (unanchored'a değil)", async () => {
+  const { store, project } = setup({ "n.md": "sade kalıcı not, çapasız değil: `birSembol` anılıyor." });
+  await auditProject(store, project, { executor: fakeExecutor([{ output: '{"verdicts":[]}' }]), fetch: false });
+  const [f1] = listActive(store, project.id);
+  store.run("UPDATE findings SET status = 'suspect', suspicion = 0.9 WHERE id = ?", f1!.id);
+  await auditProject(store, project, { executor: fakeExecutor([{ output: '{"verdicts":[]}' }]), fetch: false });
+  assert.equal(getFinding(store, f1!.id)!.status, "active", "çapa varlığı hedef durumu belirliyor");
+  store.close();
+});
+
+test("hiç çelişkiye girmemiş çapasız nota HİÇ dokunulmaz: skor da olay da yazılmaz", async () => {
+  const { store, project } = setup({ "temiz.md": TEMIZ });
+  await auditProject(store, project, { executor: fakeExecutor([{ output: '{"verdicts":[]}' }]), fetch: false });
+  const [f] = listActive(store, project.id);
+  assert.equal(f!.status, "unanchored");
+  assert.equal(f!.suspicion, 0);
+  assert.equal(countEvents(store, "signal_scored"), 0, "skor kaydı olmayan not olay da üretmez");
+  store.close();
+});
+
 test("sınıflama başarısızlığı yutulmaz: olay düşer, çapa sinyali koşmaya devam eder", async () => {
   const { store, project } = setup({ "curuk.md": CURUK });
   const sum = await auditProject(store, project, {
