@@ -56,6 +56,21 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
   const seen = new Set<string>();
   const all: Anchor[] = [];
   const push = (kind: Anchor["kind"], value: string) => {
+    // Tire ile BAŞLAYAN çapa üretilmez (denetim: imported-flag-anchor).
+    // `--output/tmp/audit.txt` yol şeklinde olduğu için çapa olarak saklanıyordu.
+    // Bugün sömürülebilir DEĞİL — çapayı tüketen üç git çağrısının hepsi ya `--`
+    // ayracı kullanıyor ya değeri `<ref>:` ile birleştiriyor — ama koruma değerde
+    // değil ÇAĞRI YERİNDE olduğu için `--`'sız yeni bir tüketici eklendiği an
+    // bayrak olur. Bu satır o riski üretim yerinde kesen ikinci kapı.
+    //
+    // Normalize DEĞİL, RED: baştaki tireleri kırpmak (`--output/tmp/a.ts` →
+    // `output/tmp/a.ts`) var olmayan bir yolu uydurur ve şansa gerçek bir dosyaya
+    // denk gelirse sahte bir kayma sinyali üretir. Reddin bedeli ise yalnız bir
+    // çapa eksikliği: not en kötü ihtimalle `unanchored` sınıfına düşer (M0-D5,
+    // nötr). Yasak yalnız BAŞ karakterde — `src/my-mod/a-b.ts` ve `/tmp/-x/a.txt`
+    // argv'de bayrak konumuna düşemez, dokunulmaz.
+    if (value.startsWith("-")) return;
+
     // Mükerrer anahtarının ayracı NUL: hiçbir çapa değerinde geçemeyeceği için
     // iki ayrı (kind, value) çiftinin aynı anahtara düşmesi mümkün olmuyor.
     // Kaynağa ham bayt değil kaçış dizisi yazılır — ham kontrol baytı git'i

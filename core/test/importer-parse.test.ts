@@ -63,3 +63,24 @@ test("noteTimestamp: frontmatter modified > created > geri düşüş, geçerli t
   assert.equal(noteTimestamp({ created: "11 Aug 2026 00:00:00 GMT" }, "F"), "2026-08-11T00:00:00.000Z");
   assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00Z" }, "F"), "2026-08-01T10:00:00.000Z");
 });
+
+// Denetim: imported-flag-anchor. `--output/tmp/audit.txt` gibi bir token yol
+// şeklinde olduğu için çapa olarak saklanıyordu. Bugün sömürülebilir DEĞİL —
+// çapayı tüketen git çağrılarının hepsi ya `--` ayracı kullanıyor ya değeri
+// `<ref>:` ile birleştiriyor — ama koruma değerde değil çağrı yerinde olduğu
+// için `--`'sız yeni bir tüketici eklendiği an bayrağa dönüşür.
+test("extractAnchors: tire ile başlayan yol çapası üretilmez", () => {
+  const { anchors } = extractAnchors("not metni: --output/tmp/audit.txt ve -x/y.ts burada");
+  assert.deepEqual(anchors, [], `bayrak şekilli çapa çıktı: ${JSON.stringify(anchors)}`);
+});
+
+test("extractAnchors: meşru yollar tire kuralından etkilenmez", () => {
+  // Tire yasağı yalnız BAŞ karakterde: iç tire (`my-mod`) ve `~/`/`/` önekli
+  // yollar argv'de bayrak konumuna düşemez, dokunulmaz.
+  const { anchors } = extractAnchors(
+    "core/src/scan.ts, docs/x.md, src/my-mod/a-b.ts, ~/.gemini/settings.json, /tmp/-tuhaf/ad.txt",
+  );
+  assert.deepEqual(anchors.map((a) => a.value), [
+    "core/src/scan.ts", "docs/x.md", "src/my-mod/a-b.ts", "~/.gemini/settings.json", "/tmp/-tuhaf/ad.txt",
+  ]);
+});
