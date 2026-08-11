@@ -289,29 +289,98 @@ export async function readIncremental(
   return res;
 }
 
-/** Transcript'in içindeki cwd alanı — proje yolunun tek güvenilir kaynağı. */
+/**
+ * Transcript'in içindeki cwd alanı — proje yolunun tek güvenilir kaynağı.
+ *
+ * readIncremental ile AYNI biriktirme sözleşmesi, aynı sebeple. İlk düzeltme
+ * yalnız readIncremental'i doğrusallaştırmıştı; doğrulama turu aynı karesel
+ * kalıbın burada sürdüğünü ÖLÇTÜ (bulgu: unbounded-line-buffering, ikinci yüzey):
+ * cwd satırından önceki tek satır 8 MiB → 32 MiB büyüdüğünde okuma ~55 ms'den
+ * ~940 ms'ye çıkıyordu — 4 kat girdi, ~17 kat maliyet. Sebep `pending += chunk`
+ * ve her parçada `pending.split("\n")`: n baytlık satır için O(n²).
+ *
+ * İki ek fayda: (1) satır artık TAM Buffer olarak decode ediliyor, yani çok
+ * baytlı UTF-8 karakter 64 KiB parça sınırına denk gelse bile bozulmuyor (eski
+ * hâl her parçayı ayrı ayrı `toString("utf8")` yapıyordu); (2) bayt tavanı.
+ *
+ * BAYT TAVANI NEDEN GEREKLİ: `maxLines` satır SAYISINI sınırlar, satır BOYUNU
+ * değil. Keşif yolu güvenilmeyen/bozuk transcript'e bakıyor ve tek bir 245 MB'lık
+ * satır tavan olmadan bütünüyle belleğe alınırdı. Sınır readIncremental ile aynı
+ * (MAX_LINE_BYTES) — tek bir eşik olsun; aşan satır atlanır, keşif durmaz.
+ */
 export async function readCwd(filePath: string, maxLines = 50): Promise<string | null> {
   const fh = await open(filePath, "r");
   try {
     let seen = 0;
-    let pending = "";
+    // Değişmez: `parts` içindeki hiçbir parça "\n" İÇERMEZ.
+    let parts: Buffer[] = [];
+    let pendingLen = 0;
+    let overlong = false;
     const buf = Buffer.alloc(64 * 1024);
+
+    /** @returns bulunan cwd, yoksa null. */
+    const takeLine = (line: Buffer): string | null => {
+      const text = line.toString("utf8");
+      if (!text.trim()) return null;
+      try {
+        const o = JSON.parse(text) as { cwd?: unknown };
+        if (typeof o.cwd === "string" && o.cwd) return o.cwd;
+      } catch {
+        /* bozuk satır keşfi durdurmaz */
+      }
+      return null;
+    };
+
     while (seen < maxLines) {
       const { bytesRead } = await fh.read(buf, 0, buf.length, null);
       if (bytesRead === 0) break;
-      pending += buf.subarray(0, bytesRead).toString("utf8");
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      for (const line of lines) {
-        if (++seen > maxLines) break;
-        if (!line.trim()) continue;
-        try {
-          const o = JSON.parse(line) as { cwd?: unknown };
-          if (typeof o.cwd === "string" && o.cwd) return o.cwd;
-        } catch {
-          /* bozuk satır keşfi durdurmaz */
+      let chunk = buf.subarray(0, bytesRead);
+
+      let nl: number;
+      while ((nl = chunk.indexOf(0x0a)) !== -1) {
+        const head = chunk.subarray(0, nl);
+        chunk = chunk.subarray(nl + 1);
+        const lineLen = pendingLen + head.length;
+
+        if (!overlong && lineLen <= MAX_LINE_BYTES) {
+          // Tek concat: satır tamamlandığında, tam boyu bilinerek.
+          let lineBuf: Buffer;
+          if (pendingLen === 0) lineBuf = head;
+          else {
+            // `head` kopyalanmadan eklenebilir: concat aynı yinelemede, bir
+            // sonraki fh.read()'ten ÖNCE çalışıyor — `buf` henüz bozulmadı.
+            parts.push(head);
+            lineBuf = Buffer.concat(parts, lineLen);
+          }
+          const cwd = takeLine(lineBuf);
+          if (cwd !== null) return cwd;
+        }
+        parts = [];
+        pendingLen = 0;
+        overlong = false;
+        if (++seen >= maxLines) return null;
+      }
+
+      if (chunk.length > 0) {
+        if (overlong || pendingLen + chunk.length > MAX_LINE_BYTES) {
+          overlong = true;
+          parts = [];                   // biriktirmeyi bırak: bellek sınırlı kalsın
+          pendingLen += chunk.length;   // uzunluğu saymaya devam: tavan doğru uygulansın
+        } else {
+          // subarray `buf`a bakar ve `buf` bir sonraki read'de üzerine yazılır;
+          // saklanacak her parça kopyalanmak zorunda. Kopya parça başına O(k),
+          // toplamda doğrusal — karesel olan eskinin dize birleştirmesiydi.
+          parts.push(Buffer.from(chunk));
+          pendingLen += chunk.length;
         }
       }
+    }
+    // Dosya sonundaki newline'sız kuyruk da bir satır: eski hâl onu hiç
+    // bakmadan atıyordu, yani tek satırlık (newline'sız) transcript'te cwd
+    // bulunamıyordu.
+    if (!overlong && pendingLen > 0 && seen < maxLines) {
+      const cwd = takeLine(Buffer.concat(parts, pendingLen));
+      if (cwd !== null) return cwd;
     }
   } finally {
     await fh.close();

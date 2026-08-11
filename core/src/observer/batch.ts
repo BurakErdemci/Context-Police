@@ -43,8 +43,28 @@ export function estimateTokens(text: string): number {
  * aynı turn'ler ikinci kez bulguya dönüşüyordu.
  *
  * Sıra: (1) uuid dizide bulunursa konumsal kesim — en kesin bilgi; (2) yoksa
- * zaman damgası kesimi: lastTs'ten KÜÇÜK VEYA EŞİT olan turn'ler düşer;
- * (3) ikisi de yoksa hepsi yeni sayılır ama `match: "none"` ile görünür kalır.
+ * zaman damgası kesimi, AMA YALNIZ uuid TAŞIMAYAN turn'lere; (3) ikisi de
+ * yoksa hepsi yeni sayılır ama `match: "none"` ile görünür kalır.
+ *
+ * ZAMAN DAMGASI SIRALAMA ANAHTARI DEĞİL — ölçüldü (11 Ağu 2026, ~/.claude/
+ * projects altında 66 oturum, 19.416 gerçek turn):
+ *   - turn'lerin %11,55'i aynı oturumda başka bir turn'le AYNI damgayı paylaşıyor
+ *   - %0,70'i bir öncekinden GERİ giden damga taşıyor
+ *   - %100'ü hem uuid hem timestamp taşıyor
+ * Bu yüzden damga bir DÜŞÜRME ölçütü olamaz: eski hâl `timestamp > ts` diyerek
+ * eşit damgalı YENİ turn'ü eliyordu ve bu bir istisna değil KURAL olarak
+ * çalışıyordu — normal ileri teslimatta uuid araması zaten tutmaz (yeni parti
+ * eski uuid'i içermez), dolayısıyla her taramada eşit damgalı yeni turn sessizce
+ * ve KALICI olarak düşüyordu (imleç yine de dosya sonuna ilerlediği için).
+ *
+ * Belirsizlikte TEKRAR seçiliyor: mükerrer bulgu geri alınabilir (supersede +
+ * restore var, spec §3.2), kayıp turn geri alınamaz — o turn bir daha hiç
+ * okunmaz. Bu yüzden:
+ *   - uuid'i OLAN turn asla damga yüzünden düşmez (yalnız uuid konum eşleşmesiyle),
+ *   - uuid'i OLMAYAN turn yalnız damgası saklanandan KESİN KÜÇÜKSE düşer (eşit düşmez),
+ *   - damgası hiç olmayan turn hiç düşmez.
+ * Zaman damgasının kalan iki işi aynen duruyor: setWatermark'taki monoton geri
+ * sarma engeli ve uuid'siz parti için checkpoint kimliği (watermarks.ts).
  *
  * Zaman damgaları sözlüksel karşılaştırılıyor: kaynak biçim ISO-8601 UTC
  * (`2026-08-11T10:23:45.123Z`) ve bu biçimde sözlüksel sıra = kronolojik sıra.
@@ -62,11 +82,18 @@ export function dropThroughWatermarkDetailed(
     if (i !== -1) return { fresh: turns.slice(i + 1), match: "uuid" };
   }
 
-  // Zaman damgası taşımayan turn eleme dışı: at-least-once'ta mükerrer bulgu
-  // (geri alınabilir) kayıp bulgudan (geri alınamaz) ucuz.
   if (lastTs != null && turns.some((t) => t.timestamp != null)) {
     const ts = lastTs;
-    return { fresh: turns.filter((t) => t.timestamp == null || t.timestamp > ts), match: "timestamp" };
+    const fresh = turns.filter((t) => t.uuid != null || t.timestamp == null || !(t.timestamp < ts));
+    if (fresh.length < turns.length) return { fresh, match: "timestamp" };
+    // Hiçbir şey elenmedi. İki hâli ayırmak zorundayız, çünkü olayın anlamı buna
+    // bağlı: (a) normal ileri teslimat — gelen turn'lerin hepsi filigrandan yeni,
+    // eleyecek bir şey YOK, olay yazmak gürültü; (b) tekrar-teslim şüphesi —
+    // uuid taşıyan ama damgası filigrandan ESKİ turn var, yani konumsal kesim
+    // tutmadığı hâlde bu turn işlenmiş olabilir. (b) mükerrer bulgu riskidir ve
+    // görünür kalmalı (order-sensitive-watermark'ın öğrettiği ders).
+    const suspectedRedelivery = turns.some((t) => t.uuid != null && t.timestamp != null && t.timestamp < ts);
+    return { fresh, match: suspectedRedelivery ? "none" : "timestamp" };
   }
 
   return { fresh: turns, match: "none" };

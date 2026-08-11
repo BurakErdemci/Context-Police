@@ -41,6 +41,11 @@ export function defaultStorePath(): string {
  * ederdi. Sessiz değil gürültülü bir arıza olması bile tesadüftü.
  */
 function migrate(db: DatabaseSync): void {
+  migrateCursors(db);
+  migrateWatermarks(db);
+}
+
+function migrateCursors(db: DatabaseSync): void {
   const cols = db.prepare("PRAGMA table_info(cursors)").all() as { name: string; pk: number }[];
   if (cols.length === 0) return; // yeni depo: şema zaten güncel
 
@@ -70,6 +75,58 @@ function migrate(db: DatabaseSync): void {
       ALTER TABLE cursors_migrated RENAME TO cursors;
     `);
   }
+}
+
+/**
+ * observer_watermarks M2'de iki kez değişti: `last_ts` sütunu eklendi ve
+ * `last_uuid` NOT NULL'dan nullable'a döndü (uuid taşımayan parti de checkpoint
+ * yazabilsin diye — missing-checkpoint-identity).
+ *
+ * AYNI SINIF İKİNCİ KEZ: M1 denetiminde imleç tablosu için çıktı
+ * (schema-migration-breaks-cursor, o turun en ciddi bulgusuydu), M2 doğrulama
+ * turunda filigran tablosu için çıktı. İki denetimde iki kez çıkması kalıcı bir
+ * örüntü: `CREATE TABLE IF NOT EXISTS` var olan tabloya DOKUNMAZ, dolayısıyla
+ * her tablo değişimi burada ayrıca ele alınmak zorunda. Yeni bir tablo şeması
+ * değiştirildiğinde ilk yazılacak yer bu dosyadır.
+ *
+ * `last_ts` yokluğu tek başına ALTER TABLE ADD COLUMN ile kapanır (cursors.mtime_ms
+ * kalıbı). Ama `last_uuid NOT NULL` kısıtı SQLite'ta ALTER ile kaldırılamaz —
+ * yalnız sütun ekleyen naif düzeltme uuid'siz checkpoint'i hâlâ yazamaz. O yüzden
+ * kısıt varsa tablo yeniden kuruluyor; eski satırlar (hepsi last_uuid dolu)
+ * yeni CHECK'i zaten sağlıyor.
+ */
+function migrateWatermarks(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(observer_watermarks)").all() as {
+    name: string;
+    notnull: number;
+  }[];
+  if (cols.length === 0) return;
+
+  const hasLastTs = cols.some((c) => c.name === "last_ts");
+  const uuidNotNull = cols.some((c) => c.name === "last_uuid" && c.notnull === 1);
+  if (hasLastTs && !uuidNotNull) return; // güncel
+
+  if (!uuidNotNull) {
+    db.exec("ALTER TABLE observer_watermarks ADD COLUMN last_ts TEXT");
+    return;
+  }
+
+  db.exec(`
+    CREATE TABLE observer_watermarks_migrated (
+      project_id  INTEGER NOT NULL REFERENCES projects(id),
+      session_id  TEXT NOT NULL,
+      last_uuid   TEXT,
+      last_ts     TEXT,
+      updated_at  TEXT NOT NULL,
+      PRIMARY KEY (project_id, session_id),
+      CHECK (last_uuid IS NOT NULL OR last_ts IS NOT NULL)
+    );
+    INSERT INTO observer_watermarks_migrated (project_id, session_id, last_uuid, last_ts, updated_at)
+    SELECT project_id, session_id, last_uuid, ${hasLastTs ? "last_ts" : "NULL"}, updated_at
+    FROM observer_watermarks;
+    DROP TABLE observer_watermarks;
+    ALTER TABLE observer_watermarks_migrated RENAME TO observer_watermarks;
+  `);
 }
 
 /**

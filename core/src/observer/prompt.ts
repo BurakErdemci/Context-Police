@@ -38,10 +38,30 @@ const ITEMS_MAX = 24;
 const RAW_MAX = 256_000;
 
 /**
- * Çapa değerinde YASAK karakterler: C0 (satır sonları dahil), DEL + C1,
- * U+061C (ALM), U+200B-F (sıfır genişlik + yön işaretleri), U+2028/29 (satır/
- * paragraf ayırıcı), U+202A-E (bidi gömme/geçersiz kılma), U+2066-9 (bidi
- * izolat), U+FEFF (BOM/ZWNBSP).
+ * Çapa değerinde YASAK karakterler. Tek kaynak burası ve küme bir kod noktası
+ * listesi DEĞİL, Unicode KATEGORİSİ:
+ *
+ *   \p{Cc}  kontrol karakterleri: C0 (satır sonları dahil), DEL, C1
+ *   \p{Cf}  biçim karakterleri: U+00AD (yumuşak tire), U+061C (ALM), U+180E,
+ *           U+200B-F (sıfır genişlik + yön işaretleri), U+202A-E (bidi gömme/
+ *           geçersiz kılma), U+2060-4 (birleştiriciler), U+206A-F (eski biçim
+ *           denetimi), U+2066-9 (bidi izolat), U+FEFF (BOM/ZWNBSP), U+FFF9-B,
+ *           U+E0001 ve U+E0020-7F (tag karakterleri)
+ *   \p{Cs}  yalnız kalan vekil (surrogate): model çıktısındaki \uD800 böyle bir
+ *           değer üretebiliyor, depoya yazılınca kodlama gidiş-dönüşü bozuluyor
+ *   U+2028/29                 satır/paragraf ayırıcı (Zl/Zp — C* değil, ayrıca yazılı)
+ *   U+FE00-0F, U+E0100-E01EF  varyasyon seçiciler (kategori Mn ama görünmez;
+ *                             yol/sembol/SHA değerinde meşru karşılıkları yok)
+ *
+ * NEDEN KATEGORİ, NEDEN ELLE LİSTE DEĞİL: ilk düzeltme elle sayılmış aralıklar
+ * kullanıyordu ve doğrulama turu dört görünmez `Cf` karakterinin (U+00AD, U+180E,
+ * U+2060, U+206A) o listeden kaçtığını ÖLÇTÜ. Elle liste bir sonraki denetimde
+ * yine delinir; kategori delinmez.
+ *
+ * AŞIRI DÜZELTMENİN SINIRI (ölçüldü): normal içerik bu kümede DEĞİL —
+ * "src/çekirdek/görüntü.ts", "日本語/パス.ts", "İĞÜŞÖÇığüşöç", "naïve café"
+ * hepsi geçiyor. Reddedilen küme yalnız GÖRÜNMEZ olanlar; fazla geniş bir küme
+ * meşru çapayı sessizce yutar, o da veri kaybıdır.
  *
  * Gerekçe: aynı sınıf M1'de ÇIKTI sınırında kapatılmıştı (cli.ts safe()); veri
  * sınırında açık kalınca sahte bir çapa (U+202E ile ters çevrilmiş yol) bulguyu
@@ -54,7 +74,7 @@ const RAW_MAX = 256_000;
  */
 const FORBIDDEN_ANCHOR_CHARS =
   // eslint-disable-next-line no-control-regex -- kontrol karakteri aramak İŞİN KENDİSİ
-  /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/;
+  /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
 
 const ANCHOR_KINDS: readonly AnchorKind[] = ["file_path", "symbol", "commit_sha", "external_path"];
 

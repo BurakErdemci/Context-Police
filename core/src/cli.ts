@@ -23,9 +23,31 @@ import { basename, dirname } from "node:path";
 
 register(claudeCodeAdapter);
 
+/**
+ * Kullanım hatası. Ayrı bir tip, çünkü tek çıkış kodu (1) ve MESAJ basılmalı;
+ * çıplak throw yığın izi basıp kullanıcıya bir şey anlatmıyor.
+ */
+class UsageError extends Error {}
+
+/**
+ * `--ad değer` okur. Bayrak HİÇ VERİLMEMİŞ olmakla DEĞERSİZ verilmiş olmak
+ * ayrı iki şey: eski hâl ikisini de `undefined`a indiriyordu, dolayısıyla
+ * `observe --model` (argv sonunda) ya da `observe --model --yes` sessizce
+ * "varsayılan" sayılıyor, komut Codex tespitini başlatıp çok sonraki ilgisiz bir
+ * kapıda duruyordu (bulgu: missing-cli-option-value). Yazım hatası kullanıcıya
+ * yazım hatası olarak dönmeli.
+ *
+ * Değerin `--` ile başlaması eksik operandın en yaygın hâli. Tek tireli değer
+ * reddedilmiyor: negatif sayı gibi meşru kullanımı var, ve `--model -x` zaten
+ * validateModel'in kapısında duruyor.
+ */
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
-  return i !== -1 ? process.argv[i + 1] : undefined;
+  if (i === -1) return undefined;
+  const value = process.argv[i + 1];
+  if (value === undefined || value.startsWith("--"))
+    throw new UsageError(`--${name} bir değer bekliyor`);
+  return value;
 }
 
 const mb = (n: number) => (n / 1048576).toFixed(1) + " MB";
@@ -248,10 +270,20 @@ function cmdStatus(): void {
 }
 
 const cmd = process.argv[2];
-if (cmd === "scan") await cmdScan();
-else if (cmd === "observe") await cmdObserve();
-else if (cmd === "status") cmdStatus();
-else {
+try {
+  if (cmd === "scan") await cmdScan();
+  else if (cmd === "observe") await cmdObserve();
+  else if (cmd === "status") cmdStatus();
+  else usage();
+} catch (err) {
+  // Kullanım hatası her komutta aynı: mesaj + rc=1. Diğer hatalar olduğu gibi
+  // yukarı çıkar — yığın izi teşhis için gerekli.
+  if (!(err instanceof UsageError)) throw err;
+  console.error(err.message);
+  process.exit(1);
+}
+
+function usage(): void {
   console.log(`context-police — AI ajan hafızası denetçisi (çekirdek)
 
 kullanım:
