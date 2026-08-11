@@ -264,8 +264,8 @@ test("CLI güvenilmeyen değerleri terminale ham basmaz", async () => {
   // Satır tipi ve cwd'ye ANSI kaçış dizisi + kontrol karakteri konuyor.
   writeFileSync(
     join(dir, "s.jsonl"),
-    line({ type: "user", cwd: "/tmp/[31mkirmizi", message: { role: "user", content: "x" } }) +
-      line({ type: "tip-[2Jsil" }),
+    line({ type: "user", cwd: "/tmp/\x1b[31mkirmizi\x07", message: { role: "user", content: "x" } }) +
+      line({ type: "tip-\x1b[2Jsil" }),
   );
 
   const storePath = tmpStorePath();
@@ -274,8 +274,8 @@ test("CLI güvenilmeyen değerleri terminale ham basmaz", async () => {
   const statusOut = execFileSync("node", [cli, "status", "--store", storePath], { encoding: "utf8", env });
 
   for (const [name, out] of [["scan", scanOut], ["status", statusOut]] as const) {
-    assert.ok(!out.includes(""), `${name} çıktısına ESC karakteri sızdı`);
-    assert.ok(!out.includes(""), `${name} çıktısına BEL karakteri sızdı`);
+    assert.ok(!out.includes("\x1b"), `${name} çıktısına ESC karakteri sızdı`);
+    assert.ok(!out.includes("\x07"), `${name} çıktısına BEL karakteri sızdı`);
   }
   assert.ok(scanOut.includes("\\u{1b}"), "kontrol karakteri gizlenmeyip görünür hâle getirilmeli");
 });
