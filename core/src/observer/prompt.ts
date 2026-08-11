@@ -38,113 +38,61 @@ const ITEMS_MAX = 24;
 const RAW_MAX = 256_000;
 
 /**
- * Çapa değerinde HER BAĞLAMDA yasak karakterler. Tek kaynak burası ve küme bir
- * kod noktası listesi DEĞİL, Unicode ÖZELLİĞİ:
+ * Çapa değerinde yasak karakterler. Küme kasten DAR: yalnız metni yeniden
+ * yönlendiren ya da terminali kandıran sınıf.
  *
- *   \p{Cc}  kontrol karakterleri: C0 (satır sonları dahil), DEL, C1
- *   \p{Cf}  biçim karakterleri: U+00AD (yumuşak tire), U+061C (ALM), U+180E,
- *           U+200B-F (sıfır genişlik + yön işaretleri), U+202A-E (bidi gömme/
- *           geçersiz kılma), U+2060-4 (birleştiriciler), U+206A-F (eski biçim
- *           denetimi), U+2066-9 (bidi izolat), U+FEFF (BOM/ZWNBSP), U+FFF9-B,
- *           U+E0001 ve U+E0020-7F (tag karakterleri)
- *   \p{Cs}  yalnız kalan vekil (surrogate): model çıktısındaki \uD800 böyle bir
- *           değer üretebiliyor, depoya yazılınca kodlama gidiş-dönüşü bozuluyor
- *   \p{Default_Ignorable_Code_Point}
- *           "hiç çizilmemesi gereken kod noktası"nın Unicode'un KENDİ tanımı:
- *           varyasyon seçiciler (U+FE00-0F, U+180B-D, U+E0100-E01EF), U+034F
- *           (birleştirici grafem birleştirici), U+115F/U+1160/U+3164 (Hangul
- *           doldurucular), U+17B4-5, U+2065, U+FFA0 …
- *   U+2028/29  satır/paragraf ayırıcı (Zl/Zp — yukarıdakilerin hiçbirinde yok)
+ *   U+0000-001F  C0 kontrol karakterleri (satır sonu U+000A ve U+000D dahil)
+ *   U+007F       DEL
+ *   U+0080-009F  C1 kontrol karakterleri
+ *   U+2028/2029  satır ve paragraf ayırıcı
+ *   U+061C, U+200E/200F, U+202A-202E, U+2066-2069
+ *                bidi işaret/gömme/geçersiz kılma/izolat: "a.ts<U+202E>gnp.exe"
+ *                ekranda "a.tsexe.png" görünür — görünenle saklanan ayrışır
+ *   \p{Cs}       yalnız kalan vekil (surrogate). Bu bir GÖRÜNÜRLÜK değil
+ *                iyi-biçimlilik meselesi: UTF-8'e kodlanamaz, depoya yazılınca
+ *                gidiş-dönüş bozulur. Model çıktısındaki kaçak \uD800 böyle bir
+ *                değer üretebiliyor (ölçüldü, M2 1. tur).
  *
- * NEDEN "DEFAULT IGNORABLE", NEDEN ELLE LİSTE DEĞİL: bu küme İKİ kez delindi.
- * 1. tur elle sayılmış aralıklar kullanıyordu, dört `Cf` karakteri (U+00AD,
- * U+180E, U+2060, U+206A) kaçtı; kategoriye geçildi ama KATEGORİ DE YETMEDİ —
- * 2. tur U+034F, U+115F, U+180B ve U+3164'ün `Cc/Cf/Cs` DIŞINDA kalıp görünmez
- * olduğunu ölçtü (probes/invisible-anchor-bypass.sh). "Görünmez"in bizim
- * ürettiğimiz her karşılığı deliniyor; Unicode'un kendi türetilmiş özelliği
- * delinmiyor — ölçüt artık bizde değil standartta.
+ * KABUL EDİLEN — GERİ KALAN HER ŞEY. Emoji, varyasyon seçicisi (U+FE0E/FE0F),
+ * ZWJ, tag karakterleri (U+E0020-E007F), CJK varyasyon dizileri, U+034F, Hangul
+ * doldurucular, U+00AD, U+200B, U+FEFF, Türkçe, boşluk, her iki yol ayıracı,
+ * yol gezinmesi ("../"), mutlak yol, var olmayan dosya.
  *
- * AŞIRI DÜZELTMENİN SINIRI, ve o da ÖLÇÜLDÜ: aynı turda TERS hata da bulundu
- * (probes/emoji-anchor-rejected.sh) — "docs/❤️.md" gibi GERÇEK dosya adları
- * reddediliyordu, çünkü ❤️ = U+2764 + U+FE0F ve varyasyon seçicisi koşulsuz
- * yasaktı. Tek bir çapa yüzünden partinin tamamı reddedilip turn'ler
- * "işlenemedi" diye checkpoint'lendiği için bu doğrudan veri kaybı. Bu yüzden
- * U+FE0E/U+FE0F ve U+200D (ZWJ) kümeden ÇIKARILDI ve aşağıda BAĞLAMA BAKARAK
- * denetleniyor. Ayırt edici ölçüt tek cümle: metni YENİDEN YÖNLENDİREN ya da
- * GÖRÜNMEZ KILAN karakter reddedilir, görünen bir grafemin PARÇASI olan kabul
- * edilir. Normal içerik zaten kümede değil: "src/çekirdek/görüntü.ts",
- * "日本語/パス.ts", "İĞÜŞÖÇığüşöç", "naïve café", "a/b\\c" hepsi geçiyor.
+ * NEDEN BU KADAR DAR — kök tasarım kararı (11 Ağu 2026, üç doğrulama turundan
+ * sonra). Önceki iki sürüm "bu geçerli bir dosya adı mı" sorusunu Unicode'u elle
+ * sınıflandırarak çözmeye çalıştı ve SALINDI: her düzeltme bir yönü kapatıp
+ * diğerini açtı.
+ *   1. tur: elle sayılmış aralıklar → dört Cf karakteri kaçtı (U+00AD, U+180E,
+ *           U+2060, U+206A).
+ *   2. tur: Cc/Cf/Cs kategorisine geçildi → U+034F/U+115F/U+180B/U+3164 yine
+ *           kaçtı; AMA aynı turda TERS hata da ölçüldü: "docs/❤️.md"
+ *           (U+2764 U+FE0F) gibi GERÇEK dosya adları reddediliyordu.
+ *   3. tur: Default_Ignorable + emoji bağlam denetimi eklendi → emoji-tag
+ *           dizileri ("docs/🏴...󠁿.md") ve CJK varyant dizileri ("日本語/葛...ts")
+ *           reddedilirken piktograf-ZWJ-piktograf geçmeye devam etti.
+ * Üç turda da aynı sonuç: elle üretilen "meşru grafem" tanımı deliniyor.
  *
- * Gerekçe: aynı sınıf M1'de ÇIKTI sınırında kapatılmıştı (cli.ts safe()); veri
- * sınırında açık kalınca sahte bir çapa (U+202E ile ters çevrilmiş yol) bulguyu
- * unanchored yerine active yapıyor ve M3/M5 o değeri tüketiyor. Görünenle saklanan
- * ayrışıyorsa çapa çapa değildir.
+ * ÇARE: çapa bir VERİ parçasıdır, burada doğrulanmaz. Var olmayan ya da anlamsız
+ * bir çapa M3'ün sinyal motorunda git'e karşı kendiliğinden düşer. Aşırı
+ * reddetmenin bedeli ise ölçüldü ve tek yönlü: tek bir çapa yüzünden partinin
+ * TAMAMI reddedilip turn'ler "işlenemedi" diye checkpoint'lendiği için doğrudan
+ * veri kaybı (probes/emoji-anchor-rejected.sh).
  *
- * REDDEDİLMEYEN: yol gezinmesi ("../"), mutlak yol, var olmayan dosya. Bunlar
- * veri olarak meşru olabilir (repo dışı çapa şemada var, M0-D6) ve doğrulaması
- * M3'ün işi — burada reddetmek gerçek bulguyu sessizce yutardı.
+ * Geriye kalan "görünmez ama zararsız" meselesi (U+200B, U+034F, ZWJ) bir
+ * GÖRÜNTÜLEME sorunudur, veri sınırı sorunu değil: dashboard (M5) çapayı
+ * gösterirken kaçışlayacak. Yasak küme ise M1'de CLI ÇIKTI sınırında zaten
+ * kapatılmıştı (cli.ts safe()); burada veri sınırında da kapalı tutulması o
+ * kararın eşidir — genişletilmesi değil.
  */
 const FORBIDDEN_ANCHOR_CHARS =
+  // Kaçış dizileriyle yazılıyor: bu karakterlerin kaynakta GÖRÜNMEZ durması
+  // satırı okunamaz ve düzenlenemez kılardı.
   // eslint-disable-next-line no-control-regex -- kontrol karakteri aramak İŞİN KENDİSİ
-  /[[\p{Cc}\p{Cf}\p{Cs}\p{Default_Ignorable_Code_Point}\u2028\u2029]--[\uFE0E\uFE0F\u200D]]/v;
+  /[\u0000-\u001F\u007F-\u009F\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]|\p{Cs}/u;
 
-/** Emoji çekirdeği. Varyasyon seçicisinin ve ZWJ'nin meşruluğu yalnız bunun yanında var. */
-const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
-
-/** Ten tonu modifiye edicileri (U+1F3FB-FF): Extended_Pictographic DEĞİLLER. */
-const EMOJI_MODIFIER = /\p{Emoji_Modifier}/u;
-
-/** U+20E3 COMBINING ENCLOSING KEYCAP — keycap dizisinde U+FE0F rakamdan SONRA gelir. */
-const KEYCAP = "\u20E3";
-const ZWJ = "\u200D";
-const VS16 = "\uFE0F"; // emoji sunumu
-const VS15 = "\uFE0E"; // metin sunumu
-
-const isPictographic = (ch: string | undefined): boolean => ch !== undefined && PICTOGRAPHIC.test(ch);
-
-/**
- * Emoji tabanının ÜSTÜNE binen, tek başına anlamı olmayan karakterler: sunum
- * seçicileri ve ten tonu modifiye edicileri (U+1F3FB-FF). Bunlar taban ile ZWJ
- * arasına girebildiği için "solumda emoji var mı" sorusu onları atlayarak
- * sorulmak zorunda.
- */
-const isEmojiDecorator = (ch: string): boolean =>
-  ch === VS16 || ch === VS15 || EMOJI_MODIFIER.test(ch);
-
-/**
- * Çapa değerinin karakter denetimi; dönen null "temiz", dize ise gösterilecek sebep.
- *
- * İKİ katman, çünkü tek katman iki YÖNDEN de yanlış oldu (yukarıdaki iki prob):
- * (1) bağlamdan bağımsız yasak küme; (2) emoji sunum karakterlerinin BAĞLAM
- * denetimi. U+FE0F yalnız bir emojiden sonra "bunu renkli çiz" demektir; bir
- * harfin arkasında hiçbir görsel karşılığı yoktur, yani orada bulunmasının tek
- * işlevi iki farklı dizeyi aynı göstermektir. ZWJ de aynı: iki emojiyi tek
- * grafeme bağlarsa meşru, iki harfin arasına girerse "src/a<ZWJ>b.ts" ile
- * "src/ab.ts"yi ayırt edilemez yapan bir saldırıdır.
- */
+/** Çapa değerinin karakter denetimi; dönen null "temiz", dize ise gösterilecek sebep. */
 function anchorCharError(value: string): string | null {
-  if (FORBIDDEN_ANCHOR_CHARS.test(value)) return "kontrol/görünmez karakter";
-
-  const cps = [...value];
-  for (let i = 0; i < cps.length; i++) {
-    const ch = cps[i]!;
-    if (ch === ZWJ) {
-      // ZWJ'nin SOLUNDA emoji SÜSLERİ durabiliyor ve taban onların gerisinde
-      // kalıyor: gökkuşağı bayrağı U+1F3F3 U+FE0F U+200D U+1F308, kadın-yazılımcı
-      // ise U+1F469 U+1F3FD U+200D U+1F4BB. Süsler atlanmazsa GERÇEK dosya adı
-      // reddediliyor — ölçüldü, ilk düzeltme ten tonu modifiye edicisinde kaldı.
-      let k = i - 1;
-      while (k >= 0 && isEmojiDecorator(cps[k]!)) k--;
-      if (!isPictographic(cps[k]) || !isPictographic(cps[i + 1]))
-        return "emoji dizisi dışında sıfır genişlikli birleştirici";
-    } else if (ch === VS16 || ch === VS15) {
-      // Tek istisna keycap: orada seçici RAKAMDAN sonra, U+20E3'ten önce gelir.
-      const base = isEmojiDecorator(cps[i - 1] ?? "") ? cps[i - 2] : cps[i - 1];
-      if (!isPictographic(base) && cps[i + 1] !== KEYCAP)
-        return "emoji dışında varyasyon seçicisi";
-    }
-  }
-  return null;
+  return FORBIDDEN_ANCHOR_CHARS.test(value) ? "kontrol/görünmez karakter" : null;
 }
 
 const ANCHOR_KINDS: readonly AnchorKind[] = ["file_path", "symbol", "commit_sha", "external_path"];

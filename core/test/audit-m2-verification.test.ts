@@ -158,18 +158,21 @@ test("[schema-migration-breaks-watermark] eski depo açılır, verisi korunur ve
 const anchorOk = (value: string) =>
   parseObserverOutput(JSON.stringify({ findings: [{ content: "b", anchors: [{ kind: "file_path", value }] }] })).ok;
 
-test("[unsanitized-anchor-value] görünmez Unicode biçim karakterleri çapa değerine geçemez", () => {
-  // İlk düzeltme elle sayılmış aralıklar kullanıyordu; doğrulama turu bu dördünün
-  // listeden kaçtığını ölçtü. Küme artık kategori tabanlı (prompt.ts).
-  for (const cp of [0x00ad, 0x180e, 0x2060, 0x206a]) {
-    const value = `src/a${String.fromCodePoint(cp)}b.ts`;
-    assert.equal(anchorOk(value), false, `U+${cp.toString(16).toUpperCase()} kabul edildi`);
-  }
-  // Önceki turun kapattıkları da kapalı kalmalı (gerileme koruması).
-  for (const cp of [0x0000, 0x001f, 0x007f, 0x009f, 0x061c, 0x200b, 0x200e, 0x2028, 0x2029, 0x202e, 0x2066, 0xfeff]) {
+test("[unsanitized-anchor-value] metni yeniden yönlendiren karakterler çapa değerine geçemez", () => {
+  // 11 Ağu 2026 — testin KAPSAMI daraltıldı, gücü değil. Bu test önce
+  // "görünmez biçim karakterleri" (U+00AD, U+180E, U+2060, U+206A, U+200B,
+  // U+FEFF) üzerineydi; kök tasarım kararıyla o küme VERİ sayılıyor artık,
+  // çünkü "görünmez"in elle üretilen tanımı üç turda da hem delindi hem meşru
+  // dosya adlarını yuttu (gerekçe: src/observer/prompt.ts).
+  //
+  // Bu satırda kalan iddia dar ve değişmedi: kontrol karakterleri, satır
+  // ayırıcılar ve bidi denetimi reddedilir. Kümenin İKİ yönü birden
+  // audit-m2-anchor.test.ts'de sabitlendi.
+  for (const cp of [0x0000, 0x001f, 0x007f, 0x009f, 0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069]) {
     assert.equal(anchorOk(`src/a${String.fromCodePoint(cp)}b.ts`), false, `U+${cp.toString(16)} kabul edildi`);
   }
   // Yalnız kalan vekil: JSON'dan gelebiliyor ve kodlama gidiş-dönüşünü bozuyor.
+  // Bu bir görünürlük değil İYİ-BİÇİMLİLİK meselesi, o yüzden daraltmadan muaf.
   assert.equal(anchorOk("src/a\uD800b.ts"), false);
 });
 

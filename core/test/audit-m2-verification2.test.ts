@@ -196,26 +196,27 @@ const cpName = (cp: number) => "U+" + cp.toString(16).toUpperCase();
 const anchorOutput = (value: string) =>
   JSON.stringify({ findings: [{ content: "x", anchors: [{ kind: "file_path", value }], supersedes: null }] });
 
-test("[invisible-anchor-bypass] default-ignorable kod noktaları çapadan geçemiyor", () => {
-  // Ölçüm (probes/invisible-anchor-bypass.sh): Cc/Cf/Cs kümesi U+034F, U+115F,
-  // U+180B ve U+3164'ü KAÇIRIYORDU — dördü de görünmez, dördü de "src/ab.ts"
-  // görünen ama ondan farklı bir çapa değeri üretiyor. Ölçüt artık Unicode'un
-  // Default_Ignorable_Code_Point özelliği; liste bizim değil.
-  const kacanlar = [0x034f, 0x115f, 0x180b, 0x3164]; // prob'un ölçtüğü dört kaçış
-  const eskiden_kapali = [0x00ad, 0x180e, 0x2060, 0x206a, 0x200b, 0x202e, 0xfeff, 0x2028, 0xe0001];
-  const surrogate = "src/a\ud800b.ts"; // yalnız kalan vekil
-
-  for (const cp of [...kacanlar, ...eskiden_kapali]) {
+test("[invisible-anchor-bypass] bidi ve kontrol karakterleri çapadan geçemiyor", () => {
+  // Bu bulgu 11 Ağu 2026'da KISMEN DEMOTE EDİLDİ ve iddiası daraltıldı.
+  //
+  // Prob'un (probes/invisible-anchor-bypass.sh) ölçtüğü dört kaçış — U+034F,
+  // U+115F, U+180B, U+3164 — artık kasten KABUL EDİLİYOR. Sebep: prob'un
+  // sözleşmesi "görünmez olan reddedilir"di ve o sözleşme üç turda hem delindi
+  // (her yeni tanım bir kaçak bıraktı) hem meşru dosya adlarını yuttu
+  // ("docs/❤️.md"). Kök karar: çapa VERİdir, doğrulaması M3'ün sinyal
+  // motorunun işi; görünmezlik ise M5'in kaçışlama işi. Tam gerekçe
+  // src/observer/prompt.ts'de, kabul yönü audit-m2-anchor.test.ts'de sabit.
+  //
+  // Kalan iddia dar ve hâlâ geçerli: metni YENİDEN YÖNLENDİREN karakter
+  // (bidi) ve kontrol karakteri çapa olamaz — görünenle saklanan ayrışır.
+  const yonlendirenler = [0x202e, 0x2066, 0x2028, 0x061c, 0x200e];
+  for (const cp of yonlendirenler) {
     const r = parseObserverOutput(anchorOutput(`src/a${cpChar(cp)}b.ts`));
-    assert.equal(r.ok, false, `${cpName(cp)} görünmez olduğu hâlde çapa olarak kabul edildi`);
+    assert.equal(r.ok, false, `${cpName(cp)} çapa olarak kabul edildi`);
   }
-  assert.equal(parseObserverOutput(anchorOutput(surrogate)).ok, false, "yalnız vekil kabul edildi");
-
-  // Sıfır genişlikli birleştirici de METİN arasında görünmezdir: emoji dizisi
-  // dışındaki ZWJ meşru değil, homograf üretir.
-  assert.equal(parseObserverOutput(anchorOutput(`src/a${cpChar(0x200d)}b.ts`)).ok, false, "harfler arası ZWJ kabul edildi");
-  // Varyasyon seçicisinin emoji olmayan komşusu da öyle.
-  assert.equal(parseObserverOutput(anchorOutput(`src/a${cpChar(0xfe0f)}b.ts`)).ok, false, "harften sonra VS16 kabul edildi");
+  // Yalnız kalan vekil: görünürlük değil iyi-biçimlilik meselesi (UTF-8'e
+  // kodlanamıyor), o yüzden daraltmadan muaf.
+  assert.equal(parseObserverOutput(anchorOutput("src/a\ud800b.ts")).ok, false, "yalnız vekil kabul edildi");
 });
 
 // --- class: legitimate-anchor-rejection ---

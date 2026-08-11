@@ -156,6 +156,11 @@ test("[unbounded-model-output-amplification] 512 maddelik yanıt tek bir kalıc�
 test("[unsanitized-anchor-value] kontrol / satır sonu / bidi karakterli çapa reddedilir", () => {
   // Kaçış dizileriyle yazılıyor: bu karakterlerin kaynak dosyada GÖRÜNMEZ
   // durması, testin kendisini okunamaz ve düzenlenemez kılardı.
+  //
+  // 11 Ağu 2026: U+200B ve U+FEFF bu listeden ÇIKARILDI — kök tasarım kararıyla
+  // filtre daraltıldı (çapa veri; doğrulaması M3'ün işi). Kalanlar "metni
+  // yeniden yönlendiren / terminali kandıran" dar kümedir ve reddedilmeye devam
+  // eder. Kümenin iki yönü de audit-m2-anchor.test.ts'de sabitlendi.
   const bad: readonly (readonly [string, string])[] = [
     ["satır sonu (U+000A)", "src/a.ts\nsrc/b.ts"],
     ["satır başı (U+000D)", "src/a.ts\rBAŞKA"],
@@ -165,10 +170,8 @@ test("[unsanitized-anchor-value] kontrol / satır sonu / bidi karakterli çapa r
     ["C1 kontrol (U+0085)", "src/a\u0085.ts"],
     ["bidi override (U+202E)", "src/\u202Egnp.exe"],
     ["bidi izolat (U+2066)", "src/\u2066a.ts"],
-    ["sıfır genişlik (U+200B)", "src/\u200Ba.ts"],
     ["yön işareti (U+200E)", "src/\u200Ea.ts"],
     ["ALM (U+061C)", "src/\u061Ca.ts"],
-    ["BOM (U+FEFF)", "src/\uFEFFa.ts"],
     ["satır ayırıcı (U+2028)", "src/a\u2028b.ts"],
     ["paragraf ayırıcı (U+2029)", "src/a\u2029b.ts"],
   ];
