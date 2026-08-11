@@ -24,6 +24,17 @@ test("prompt ölçüm çerçevesi taşır ve alıntıları sınırlar (cyberPoli
   assert.ok(p.length < 5000); // alıntı kırpıldı
 });
 
+// Denetim: classify-reason-unbounded. Gövdeler kırpılıyordu ama reason kırpılmıyordu;
+// ölçüldü: 200.007 karakterlik tek bir yol çapası, gövdeler kısayken 200.449
+// karakterlik prompt üretiyor — her denetimde bellek, stdin ve model bağlamı.
+test("aday gerekçesi de kırpılır: uzun bir çapa promptu şişiremez", () => {
+  const p = buildClassifyPrompt([{
+    index: 0, kind: "cross", aText: "kısa", bText: "kısa", reason: `ortak çapa: ${"a/".repeat(100_000)}x.ts`,
+  }]);
+  assert.ok(p.length < 5000, `prompt sınırsız: ${p.length} karakter`);
+  assert.ok(p.includes("ortak çapa: a/a/")); // teşhis için baş kısım duruyor
+});
+
 test("parseClassifyOutput: düzyazıya sarılı JSON kurtarılır, aralık dışı index atılır", () => {
   const raw = 'Sonuç:\n{"verdicts":[{"index":0,"verdict":"celiski","evidence":"e"},{"index":9,"verdict":"uyumlu","evidence":"e"}]}\nbitti';
   const r = parseClassifyOutput(raw, 1);

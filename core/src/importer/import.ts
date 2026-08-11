@@ -2,8 +2,8 @@
 // depo onun gölgesi + denetim üst-verisi. Değişen dosya = eski temsil superseded
 // + yeni kayıt; dosya UPDATE edilmez (append-only tetikleyicisi zaten engeller).
 
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { join, sep } from "node:path";
 import type { Store } from "../store/db.ts";
 import { nowIso } from "../store/db.ts";
 import { appendFinding, supersede } from "../store/findings.ts";
@@ -17,8 +17,19 @@ export interface ImportSummary {
   replaced: number;
   deleted: number;
   skipped: number;
+  /** Girdi hafıza ağacının dışını gösterdiği için okunmadı (bkz. inMemoryTree). */
+  rejected: number;
   errors: number;
 }
+
+/**
+ * Çözülmüş hedef hafıza ağacının içinde mi? Karşılaştırma tabanı da ÇÖZÜLMÜŞ yol
+ * olmalı: memoryDir'in kendisi symlink bileşeni içerebiliyor (macOS'ta
+ * /var → /private/var) ve çözülmemiş yolla kıyas dizin içi symlink'leri de
+ * reddederdi. Ayraçlı önek: ".../memory-eski" ".../memory"nin içi sayılmasın.
+ */
+const inMemoryTree = (base: string, target: string) =>
+  target === base || target.startsWith(base + sep);
 
 export async function importMemoryDir(
   store: Store,
@@ -26,12 +37,14 @@ export async function importMemoryDir(
   memoryDir: string,
 ): Promise<ImportSummary> {
   const sum: ImportSummary = {
-    files: 0, added: 0, unchanged: 0, replaced: 0, deleted: 0, skipped: 0, errors: 0,
+    files: 0, added: 0, unchanged: 0, replaced: 0, deleted: 0, skipped: 0, rejected: 0, errors: 0,
   };
 
   let names: string[];
+  let base: string;
   try {
     names = await readdir(memoryDir);
+    base = await realpath(memoryDir);
   } catch (err) {
     // Dizin yoksa/okunamıyorsa ATMA yerine raporla: tek bir projenin hafıza
     // dizininin eksikliği taramanın tamamını düşürmemeli. Sessiz de değil.
@@ -47,16 +60,44 @@ export async function importMemoryDir(
     if (name === "MEMORY.md") { sum.skipped++; continue; } // indeks, not değil (D-M3-1)
     sum.files++;
     const path = join(memoryDir, name);
-    currentRefs.add(path);
 
     let raw: string;
     try {
+      // Girdi tipi okumadan ÖNCE: readFile symlink'i sessizce takip eder.
+      // Gerekçe güvenlik değil DOĞRULUK — symlink koyabilen aktör aynı baytları
+      // düz bir .md olarak da yazabilirdi, yeni bir yetenek yok. Kusur şu:
+      // source_ref hafıza dizini içindeki bir yolu gösterirken içerik başka bir
+      // ağaçtan geliyor, ve o notun çapaları YANLIŞ repoya karşı ölçülüyor.
+      // Politika "symlink'i atla" değil "ağaç dışına çıkanı reddet": dizin içinde
+      // kalan bir symlink'in baytları gerçekten o hafızanın içeriği.
+      const st = await lstat(path);
+      if (st.isSymbolicLink()) {
+        const target = await realpath(path);
+        if (!inMemoryTree(base, target)) {
+          sum.rejected++;
+          logEvent(store, {
+            projectId, kind: "import_entry_rejected",
+            detail: { file: path, target, reason: "symlink_outside_memory_dir" },
+          });
+          // currentRefs'e girmez: bugün o yolda duran şey kayda aldığımız not
+          // değil. Eski temsil süpürmede superseded olur — silme değil işaretleme
+          // olduğu için yanlışsa tek adımda geri alınır (spec §3.2).
+          continue;
+        }
+      }
       raw = await readFile(path, "utf8");
     } catch (err) {
       sum.errors++;
       logEvent(store, { projectId, kind: "import_read_failed", detail: { file: path, error: String(err) } });
+      // ENOENT DIŞI hata dosyanın yokluğunu KANITLAMAZ (EACCES geçici olabilir,
+      // EISDIR/EIO yolun dolu olduğunu söyler): yolu güncel say, yoksa tek bir
+      // okuma hatası kaydı "silinmiş" diye superseded ederdi. ENOENT ise dosya
+      // listeleme ile okuma arasında gerçekten kayboldu → süpürme görsün.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") currentRefs.add(path);
       continue;
     }
+    // Okuma başarılı olduktan SONRA: "diskte hâlâ var" iddiası ancak burada doğru.
+    currentRefs.add(path);
 
     // En son canlı temsil: aynı dosyanın superseded olmayan en yeni kaydı.
     const existing = store.get<{ id: number; content: string }>(

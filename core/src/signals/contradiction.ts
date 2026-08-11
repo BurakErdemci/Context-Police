@@ -27,6 +27,17 @@ export interface Candidate {
  *  çift patlaması hem maliyet hem gürültü olur. Atlanan çapa SAYILIR. */
 export const MAX_NOTES_PER_ANCHOR = 4;
 
+/**
+ * Çapa değerinin reason'a giren teşhis etiketi. Çapa uzunluğu sınırsız (ölçüldü:
+ * 200.007 karakterlik bir yol çapası) ve reason iki yere birden akıyor —
+ * sınıflama prompt'u ve denetim olayı (audit.ts: contradiction_confirmed,
+ * signal_scored detayı). Sınır bu yüzden üretim yerinde: kırpma yalnız prompt'ta
+ * olsaydı depo yine 200 bin karakterlik olay detayları taşırdı. Bir çapayı
+ * insanın tanımasına 120 karakter yetiyor; eşleşme kararı zaten tam değerle
+ * verildi, etiket yalnız onu anlatıyor.
+ */
+const MAX_LABEL_CHARS = 120;
+
 export function findCandidates(notes: NoteView[]): { candidates: Candidate[]; skippedAnchors: number } {
   const candidates: Candidate[] = [];
   let skippedAnchors = 0;
@@ -39,7 +50,8 @@ export function findCandidates(notes: NoteView[]): { candidates: Candidate[]; sk
       // çakışmasız iner. Kaynakta ham bayt değil kaçış dizisi — ham NUL dosyayı
       // git'e binary gösterip diff'i körleştiriyor (bu repoda ölçüldü).
       const key = `${a.kind}\u0000${a.value}`;
-      const e = byAnchor.get(key) ?? { label: a.value, ids: [] };
+      const label = a.value.length > MAX_LABEL_CHARS ? a.value.slice(0, MAX_LABEL_CHARS) + "…" : a.value;
+      const e = byAnchor.get(key) ?? { label, ids: [] };
       if (!e.ids.includes(n.findingId)) e.ids.push(n.findingId);
       byAnchor.set(key, e);
     }

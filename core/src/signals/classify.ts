@@ -8,6 +8,15 @@ import { parseNote } from "../importer/parse.ts";
 
 export const MAX_CLASSIFY_ITEMS = 20; // koşum başına; taşan sayı raporlanır
 const EXCERPT_CHARS = 1500;
+/**
+ * Aday gerekçesi ("ortak çapa: <yol>") kanıt değil TEŞHİS: modelin kararı
+ * metinlerden çıkıyor, gerekçeden değil — bu yüzden gövde sınırının çok altında.
+ * Ölçüldü (denetim: classify-reason-unbounded): 200.007 karakterlik tek bir yol
+ * çapası, gövdeler kısayken 200.449 karakterlik prompt üretiyordu. Üretim yerinde
+ * de kırpılıyor (contradiction.ts); buradaki sınır ikinci kapı, çünkü reason
+ * ileride başka bir üreticiden de gelebilir.
+ */
+const REASON_CHARS = 200;
 
 export interface ClassifyItem {
   index: number;
@@ -51,12 +60,12 @@ export const CLASSIFY_OUTPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-const clip = (s: string) => (s.length > EXCERPT_CHARS ? s.slice(0, EXCERPT_CHARS) + "…[kırpıldı]" : s);
+const clip = (s: string, max = EXCERPT_CHARS) => (s.length > max ? s.slice(0, max) + "…[kırpıldı]" : s);
 
 export function buildClassifyPrompt(items: ClassifyItem[]): string {
   const rendered = items.map((it) => {
     if (it.kind === "cross")
-      return `#${it.index} [notlar-arası, ${it.reason}]\nA: «${clip(it.aText)}»\nB: «${clip(it.bText ?? "")}»`;
+      return `#${it.index} [notlar-arası, ${clip(it.reason, REASON_CHARS)}]\nA: «${clip(it.aText)}»\nB: «${clip(it.bText ?? "")}»`;
     if (it.kind === "frontmatter")
       return `#${it.index} [özet-satırı ↔ gövde]\nÖzet: «${clip(it.bText ?? "")}»\nGövde: «${clip(it.aText)}»`;
     return `#${it.index} [not-içi]\nMetin: «${clip(it.aText)}»`;

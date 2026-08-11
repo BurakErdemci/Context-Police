@@ -106,7 +106,14 @@ export type EventKind =
    * — aday sayısı sınıflama tavanını aştı (classify.ts MAX_CLASSIFY_ITEMS).
    * İkisi de "bakılmadı" demek; sessiz kalırsa "çelişki yok" sanılır.
    */
-  | "classify_overflow";
+  | "classify_overflow"
+  /**
+   * Hafıza dizinindeki bir girdi tipi yüzünden OKUNMADI: symlink hafıza ağacının
+   * dışını gösteriyordu. Gerekçe doğruluk — source_ref dizin içi bir yol
+   * gösterirken içerik başka bir ağaçtan gelseydi, o notun çapaları yanlış
+   * repoya karşı ölçülürdü. "errors" değil ayrı sayaç: arıza değil karar.
+   */
+  | "import_entry_rejected";
 
 export function logEvent(
   store: Store,
