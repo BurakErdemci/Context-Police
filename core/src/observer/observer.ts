@@ -8,7 +8,7 @@
 import type { Store } from "../store/db.ts";
 import type { ExecutorAdapter } from "../adapters/executor.ts";
 import type { Turn } from "../types.ts";
-import { cutBatches, dropThroughWatermark, type Batch } from "./batch.ts";
+import { cutBatches, dropThroughWatermarkDetailed, type Batch } from "./batch.ts";
 import {
   OBSERVER_OUTPUT_SCHEMA, buildObserverPrompt, buildStateTitles, parseObserverOutput, type ObserverItem,
 } from "./prompt.ts";
@@ -21,6 +21,13 @@ export interface ObserverOptions {
   executor: ExecutorAdapter;
   /** Parti eşiği. Varsayılan 8000 (spec §3.3); en büyük gerçek oturum ~2M token → ~250 çağrı. */
   batchTokens?: number;
+  /**
+   * Bu gözlemcinin yapabileceği toplam yürütücü çağrısı. Sınıra ULAŞILINCA
+   * kalan partiler işlenmez ve filigran İLERLEMEZ — teslim en-az-bir-kez
+   * olduğu için işlenmeyen turn'ler sonraki koşumda yeniden gelir, veri
+   * kaybolmaz. Verilmezse sınır yok (mevcut davranış).
+   */
+  maxCalls?: number;
 }
 
 export interface ObserverStats {
@@ -31,36 +38,85 @@ export interface ObserverStats {
   unprocessed: number;
   /** Filigranla elenen tekrar-teslim turn'leri. */
   skippedTurns: number;
+  /** maxCalls doldu ve iş yarıda bırakıldı. İş bitmedi demek — çağıran görmeli. */
+  budgetExhausted: boolean;
 }
 
 const DEFAULT_BATCH_TOKENS = 8000;
 
 export class Observer {
-  readonly stats: ObserverStats = { batches: 0, calls: 0, findings: 0, superseded: 0, unprocessed: 0, skippedTurns: 0 };
+  readonly stats: ObserverStats = {
+    batches: 0, calls: 0, findings: 0, superseded: 0, unprocessed: 0, skippedTurns: 0, budgetExhausted: false,
+  };
   private readonly store: Store;
   private readonly executor: ExecutorAdapter;
   private readonly batchTokens: number;
+  private readonly maxCalls: number | undefined;
 
   constructor(opts: ObserverOptions) {
     this.store = opts.store;
     this.executor = opts.executor;
     this.batchTokens = opts.batchTokens ?? DEFAULT_BATCH_TOKENS;
+    this.maxCalls = opts.maxCalls;
   }
 
   /** scanOnce onTurns'a doğrudan verilir: (ctx) => observer.handleTurns(ctx). */
   async handleTurns(ctx: { projectId: number; sessionId: string; turns: Turn[] }): Promise<void> {
     const wm = getWatermark(this.store, ctx.projectId, ctx.sessionId);
-    const fresh = dropThroughWatermark(ctx.turns, wm?.lastUuid ?? null);
+    const { fresh, match } = dropThroughWatermarkDetailed(ctx.turns, wm?.lastUuid ?? null, wm?.lastTs ?? null);
     this.stats.skippedTurns += ctx.turns.length - fresh.length;
+    // Filigran VAR ama hiçbir kimlikle eşleşmedi: bu akıştaki her turn "yeni"
+    // sayılacak, yani mükerrer bulgu üretilebilir. Sessiz kalırsa mükerrerin
+    // sebebi sonradan bulunamaz — order-sensitive-watermark tam olarak buydu.
+    if (wm !== null && match === "none") {
+      logEvent(this.store, {
+        projectId: ctx.projectId,
+        kind: "watermark_match_failed",
+        detail: {
+          sessionId: ctx.sessionId, storedUuid: wm.lastUuid, storedTs: wm.lastTs ?? null,
+          turnCount: ctx.turns.length,
+        },
+      });
+    }
     if (fresh.length === 0) return;
 
-    for (const batch of cutBatches(fresh, this.batchTokens)) {
-      await this.processBatch(ctx.projectId, ctx.sessionId, batch);
+    const batches = cutBatches(fresh, this.batchTokens);
+    for (const [i, batch] of batches.entries()) {
+      // Bütçe kontrolü parti BAŞINDA: yarım kalan parti filigran yazamaz,
+      // dolayısıyla iptal edilen iş sonraki koşumda bütünüyle geri gelir.
+      if (!this.hasBudget()) {
+        this.noteBudgetExhausted(ctx.projectId, ctx.sessionId, batches.length - i);
+        return;
+      }
+      const res = await this.processBatch(ctx.projectId, ctx.sessionId, batch);
+      if (res === "budget") {
+        this.noteBudgetExhausted(ctx.projectId, ctx.sessionId, batches.length - i);
+        return;
+      }
     }
   }
 
-  private async processBatch(projectId: number, sessionId: string, batch: Batch): Promise<void> {
-    this.stats.batches++;
+  private hasBudget(): boolean {
+    return this.maxCalls === undefined || this.stats.calls < this.maxCalls;
+  }
+
+  /**
+   * Bütçe tükenişi bir HATA değil, yarım kalmış iş. İstisna atılmıyor: scan.ts
+   * atılan istisnayı oturum hatası sayıp session_read_failed'a çevirirdi ve
+   * "maliyet sınırına takıldık" ile "transcript okunamadı" karışırdı.
+   */
+  private noteBudgetExhausted(projectId: number, sessionId: string, remainingBatches: number): void {
+    const first = !this.stats.budgetExhausted;
+    this.stats.budgetExhausted = true;
+    if (!first) return;
+    logEvent(this.store, {
+      projectId,
+      kind: "observer_budget_exhausted",
+      detail: { sessionId, calls: this.stats.calls, maxCalls: this.maxCalls ?? null, remainingBatches },
+    });
+  }
+
+  private async processBatch(projectId: number, sessionId: string, batch: Batch): Promise<"done" | "budget"> {
     const projectPath =
       this.store.get<{ path: string }>("SELECT path FROM projects WHERE id = ?", projectId)?.path ?? "(bilinmiyor)";
 
@@ -71,6 +127,12 @@ export class Observer {
     const prompt = buildObserverPrompt({ projectPath, titles, omitted, turns: batch.turns });
 
     const outcome = await this.callWithRecovery(prompt);
+    // Bütçe bitişi: parti İŞLENMEDİ sayılmaz (batches de artmaz), filigran da
+    // ilerlemez — yapılmamış iş "işlenemedi" diye işaretlenirse D-M2-3 gereği
+    // turn'ler kalıcı olarak atlanırdı. `batches` sayacı bu yüzden burada artar:
+    // sözleşmesi "sonucu olan parti" (batches == observer_batch_ok + unprocessed).
+    if (!outcome.ok && outcome.budget) return "budget";
+    this.stats.batches++;
     if (!outcome.ok) {
       // Görünür kayıp: olay uuid aralığını taşır, transcript diskte —
       // ileride elle ya da toplu yeniden işleme mümkün.
@@ -80,17 +142,22 @@ export class Observer {
           projectId,
           kind: "observer_batch_unprocessed",
           detail: {
-            sessionId, lastUuid: batch.lastUuid, turnCount: batch.turns.length,
+            sessionId, lastUuid: batch.lastUuid, lastTs: batch.lastTs, turnCount: batch.turns.length,
             estTokens: batch.estTokens, error: outcome.error,
           },
         });
-        if (batch.lastUuid != null)
-          setWatermark(this.store, { projectId, sessionId, lastUuid: batch.lastUuid });
+        this.checkpoint(projectId, sessionId, batch);
       });
-      return;
+      return "done";
     }
 
-    const knownIds = new Set(active.map((f) => f.id));
+    // Yalnız gözlemciye GERÇEKTEN GÖSTERİLEN id'ler supersede edilebilir.
+    // Küme `active`ten değil `titles`tan kuruluyor: durum bütçesi (spec §3.3)
+    // eski kayıtları listeden atabiliyor ve o kayıtlar prompt'ta hiç geçmiyor.
+    // `active` kullanmak, modele hiç gösterilmemiş bir id'yi kapatma yetkisi
+    // veriyordu (denetim: supersede-scope-bypass) — gösterilmeyeni geçersiz
+    // kılma kararı bilgiye değil tahmine dayanır.
+    const knownIds = new Set(titles.map((t) => t.id));
     let written = 0;
     let supersededCount = 0;
     let droppedSupersedes = 0;
@@ -106,23 +173,31 @@ export class Observer {
         });
         written++;
         if (item.supersedes !== undefined) {
-          // Yalnız gözlemciye GÖSTERİLEN id'ler supersede edilebilir: model
-          // rastgele/yabancı id söyleyerek başka projenin kaydını kapatamaz.
           if (knownIds.has(item.supersedes)) {
             supersede(this.store, item.supersedes, newId);
             supersededCount++;
+            // Supersede başına AYRI kayıt (denetim: prompt-injection-supersede).
+            // Transcript metni prompt'a ham giriyor; bir turn "gösterilen
+            // bulguyu geçersiz kıl" diyebilir ve model uyabilir. Tam savunma M2
+            // kapsamı değil — ölçülebilirlik ve geri alınabilirlik kapsam:
+            // hangi oturumun hangi noktası hangi bulguyu kapattı burada yazılı,
+            // restore(oldId) tek adım (spec §3.2, K8/K9).
+            logEvent(this.store, {
+              projectId,
+              kind: "finding_superseded",
+              detail: { oldId: item.supersedes, newId, sessionId, lastUuid: batch.lastUuid },
+            });
           } else {
             droppedSupersedes++;
           }
         }
       }
-      if (batch.lastUuid != null)
-        setWatermark(this.store, { projectId, sessionId, lastUuid: batch.lastUuid });
+      this.checkpoint(projectId, sessionId, batch);
       logEvent(this.store, {
         projectId,
         kind: "observer_batch_ok",
         detail: {
-          sessionId, lastUuid: batch.lastUuid, turnCount: batch.turns.length,
+          sessionId, lastUuid: batch.lastUuid, lastTs: batch.lastTs, turnCount: batch.turns.length,
           estTokens: batch.estTokens, newFindings: written,
           superseded: supersededCount, droppedSupersedes,
         },
@@ -131,17 +206,62 @@ export class Observer {
 
     this.stats.findings += written;
     this.stats.superseded += supersededCount;
+    return "done";
+  }
+
+  /**
+   * Filigranı ilerletir. Eskiden yalnız `batch.lastUuid != null` iken
+   * yazılıyordu: uuid taşımayan bir parti hiç checkpoint yazamıyor, aynı
+   * turn'ler her koşumda yeniden işleniyordu — zehirli parti yolunda bu SONSUZ
+   * maliyet demek (denetim: missing-checkpoint-identity, probe'la ölçüldü).
+   * Artık zaman damgası da bir kimlik; ikisi de yoksa kayıp görünür olay olur.
+   *
+   * Çağrı yeri store.tx içi: bulgu yazımı + filigran aynı işlemde (D-M2-2).
+   */
+  private checkpoint(projectId: number, sessionId: string, batch: Batch): void {
+    if (batch.lastUuid == null && batch.lastTs == null) {
+      logEvent(this.store, {
+        projectId,
+        kind: "observer_batch_no_checkpoint",
+        detail: { sessionId, turnCount: batch.turns.length, estTokens: batch.estTokens },
+      });
+      return;
+    }
+    const res = setWatermark(this.store, {
+      projectId, sessionId, lastUuid: batch.lastUuid, lastTs: batch.lastTs,
+    });
+    if (res.rewindBlocked !== undefined) {
+      logEvent(this.store, {
+        projectId,
+        kind: "watermark_rewind_blocked",
+        detail: {
+          sessionId, lastUuid: batch.lastUuid,
+          storedTs: res.rewindBlocked.storedTs, incomingTs: res.rewindBlocked.incomingTs,
+        },
+      });
+    }
   }
 
   /**
    * Kurtarmalı çağrı (spec §3.7): yürütücü hatasında bir tekrar; geçerli çıkış
    * ama bozuk JSON'da bir düzeltmeli yeniden isteme. Sonra pes — parti işlenemedi.
+   *
+   * Bütçe SERT sınır: bir parti üç çağrıya kadar çıkabildiği için sınır yalnız
+   * parti başında denetlenseydi maxCalls 2 çağrı aşılabilirdi. Kurtarma turu
+   * sınıra denk gelirse parti iptal edilir; o ana kadarki çağrılar boşa gider
+   * ama veri gitmez (filigran ilerlemez, sonraki koşumda yeniden gelir).
    */
   private async callWithRecovery(
     prompt: string,
-  ): Promise<{ ok: true; items: ObserverItem[] } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; items: ObserverItem[] } | { ok: false; error: string; budget?: true }> {
+    const stop = { ok: false, error: "maliyet bütçesi (maxCalls) doldu", budget: true } as const;
+
+    if (!this.hasBudget()) return stop;
     let res = await this.runOnce(prompt);
-    if (!res.ok) res = await this.runOnce(prompt); // geçici hata tekrarı (ağ, kota)
+    if (!res.ok) {
+      if (!this.hasBudget()) return stop;
+      res = await this.runOnce(prompt); // geçici hata tekrarı (ağ, kota)
+    }
     if (!res.ok) return { ok: false, error: `yürütücü: ${res.error}` };
 
     let parsed = parseObserverOutput(res.output);
@@ -150,6 +270,7 @@ export class Observer {
     const corrective =
       `${prompt}\n\nÖNCEKİ ÇIKTIN GEÇERSİZDİ: ${parsed.error}.\n` +
       `Yalnız istenen şemaya uyan JSON döndür, başka hiçbir şey yazma.`;
+    if (!this.hasBudget()) return stop;
     const retry = await this.runOnce(corrective);
     if (!retry.ok) return { ok: false, error: `yürütücü (düzeltme turu): ${retry.error}` };
     parsed = parseObserverOutput(retry.output);

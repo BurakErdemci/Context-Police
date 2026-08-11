@@ -23,6 +23,39 @@ const ANCHOR_VALUE_MAX = 512;
 const ANCHORS_MAX = 16;
 const STATE_BUDGET_CHARS = 10_000; // ~2.5k token (spec §3.3: durum ~2-3k)
 
+/**
+ * Tek model yanıtının yazabileceği KALICI bulgu sayısı. Üst sınırsızken bir
+ * yanıt 512 kayıt basabiliyordu (denetim: unbounded-model-output-amplification)
+ * — append-only depoda bu geri alınması pahalı bir gürültü seli.
+ * Ölçüm: ilk gerçek koşumda parti başına 6,3 bulgu çıktı; 24 fazlasıyla geniş.
+ */
+const ITEMS_MAX = 24;
+
+/**
+ * Ham yanıtın karakter üst sınırı. Sınır madde sayısından ÖNCE gerekiyor:
+ * JSON.parse'a 50 MB'lık bir dize verilmesi tek başına bir maliyet.
+ */
+const RAW_MAX = 256_000;
+
+/**
+ * Çapa değerinde YASAK karakterler: C0 (satır sonları dahil), DEL + C1,
+ * U+061C (ALM), U+200B-F (sıfır genişlik + yön işaretleri), U+2028/29 (satır/
+ * paragraf ayırıcı), U+202A-E (bidi gömme/geçersiz kılma), U+2066-9 (bidi
+ * izolat), U+FEFF (BOM/ZWNBSP).
+ *
+ * Gerekçe: aynı sınıf M1'de ÇIKTI sınırında kapatılmıştı (cli.ts safe()); veri
+ * sınırında açık kalınca sahte bir çapa (U+202E ile ters çevrilmiş yol) bulguyu
+ * unanchored yerine active yapıyor ve M3/M5 o değeri tüketiyor. Görünenle saklanan
+ * ayrışıyorsa çapa çapa değildir.
+ *
+ * REDDEDİLMEYEN: yol gezinmesi ("../"), mutlak yol, var olmayan dosya. Bunlar
+ * veri olarak meşru olabilir (repo dışı çapa şemada var, M0-D6) ve doğrulaması
+ * M3'ün işi — burada reddetmek gerçek bulguyu sessizce yutardı.
+ */
+const FORBIDDEN_ANCHOR_CHARS =
+  // eslint-disable-next-line no-control-regex -- kontrol karakteri aramak İŞİN KENDİSİ
+  /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/;
+
 const ANCHOR_KINDS: readonly AnchorKind[] = ["file_path", "symbol", "commit_sha", "external_path"];
 
 export function titleOf(content: string): string {
@@ -150,6 +183,10 @@ ${transcript}`;
 export function parseObserverOutput(
   raw: string,
 ): { ok: true; items: ObserverItem[] } | { ok: false; error: string } {
+  // Sınır ayrıştırmadan ÖNCE: dev bir dizeyi JSON.parse'a vermek tek başına
+  // bir maliyet. Aşan yanıt mevcut hata yolundan geçer (spec §3.7: bir düzeltme
+  // turu + "işlenemedi" işareti), sessizce kırpılmaz.
+  if (raw.length > RAW_MAX) return { ok: false, error: `ham çıktı ${raw.length} > ${RAW_MAX} karakter` };
   let text = raw.trim();
   const fence = text.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/);
   if (fence) text = fence[1]!.trim();
@@ -183,6 +220,8 @@ export function parseObserverOutput(
     return { ok: false, error: "üst düzey nesne değil" };
   const findings = (parsed as { findings?: unknown }).findings;
   if (!Array.isArray(findings)) return { ok: false, error: "findings dizi değil" };
+  if (findings.length > ITEMS_MAX)
+    return { ok: false, error: `${findings.length} madde > ${ITEMS_MAX} (tek yanıt bu kadar kalıcı kayıt yazamaz)` };
 
   const items: ObserverItem[] = [];
   for (const [i, f] of findings.entries()) {
@@ -204,6 +243,8 @@ export function parseObserverOutput(
         return { ok: false, error: `madde ${i} çapa ${j}: geçersiz tür ${JSON.stringify(kind)}` };
       if (typeof value !== "string" || value.trim().length === 0 || value.length > ANCHOR_VALUE_MAX)
         return { ok: false, error: `madde ${i} çapa ${j}: geçersiz değer` };
+      if (FORBIDDEN_ANCHOR_CHARS.test(value))
+        return { ok: false, error: `madde ${i} çapa ${j}: çapa değerinde kontrol/görünmez karakter` };
       validAnchors.push({ kind: kind as AnchorKind, value });
     }
 

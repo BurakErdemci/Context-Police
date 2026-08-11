@@ -7,7 +7,26 @@ export interface Batch {
   turns: Turn[];
   /** Partideki uuid taşıyan SON turn — filigran bu değere ilerler. */
   lastUuid: string | null;
+  /**
+   * Partideki EN BÜYÜK timestamp. uuid'siz partide filigranın tek kimliği bu
+   * (denetim: missing-checkpoint-identity) — uuid taşımayan parti checkpoint
+   * yazamayınca sonsuz yeniden deneme oluyordu.
+   */
+  lastTs: string | null;
   estTokens: number;
+}
+
+/**
+ * Filigran eşleşmesinin HANGİ kimlikle kurulduğu. `none` tekrar-teslimin
+ * elenemediğini söyler: mükerrer bulgu riski oradadır ve çağıran bunu görünür
+ * kılmak zorunda (sessiz "hepsi yeni" varsayımı order-sensitive-watermark
+ * bulgusunun kendisiydi).
+ */
+export type WatermarkMatch = "no-watermark" | "uuid" | "timestamp" | "none";
+
+export interface DropResult {
+  fresh: Turn[];
+  match: WatermarkMatch;
 }
 
 /** Kaba ama deterministik: bayt/4. Amaç bütçe, hassasiyet değil. */
@@ -16,14 +35,50 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * Filigrana kadar olan turn'leri düşürür (D-M2-2). Filigran uuid'i akışta
- * bulunamazsa hiçbir şey düşürülmez: normal durumda imleç zaten filigranla
- * hizalıdır ve gelen her turn yenidir; bulamamak tekrar-teslim DEĞİL demektir.
+ * Filigrana kadar olan turn'leri düşürür (D-M2-2), İKİ kimlikle.
+ *
+ * Eski hâl yalnız uuid'e ve KONUMA bakıyordu: uuid dizide yoksa "hepsi yeni"
+ * denip her şey yeniden işleniyordu (denetim: order-sensitive-watermark).
+ * Arıza probe'la üredi — daha kısa/eski bir teslimat filigranı geri sarıyor,
+ * aynı turn'ler ikinci kez bulguya dönüşüyordu.
+ *
+ * Sıra: (1) uuid dizide bulunursa konumsal kesim — en kesin bilgi; (2) yoksa
+ * zaman damgası kesimi: lastTs'ten KÜÇÜK VEYA EŞİT olan turn'ler düşer;
+ * (3) ikisi de yoksa hepsi yeni sayılır ama `match: "none"` ile görünür kalır.
+ *
+ * Zaman damgaları sözlüksel karşılaştırılıyor: kaynak biçim ISO-8601 UTC
+ * (`2026-08-11T10:23:45.123Z`) ve bu biçimde sözlüksel sıra = kronolojik sıra.
+ * Karma biçim gelirse kesim yanlış olur — o yüzden biçim varsayımı burada yazılı.
  */
-export function dropThroughWatermark(turns: Turn[], lastUuid: string | null): Turn[] {
-  if (lastUuid == null) return turns;
-  const i = turns.findIndex((t) => t.uuid === lastUuid);
-  return i === -1 ? turns : turns.slice(i + 1);
+export function dropThroughWatermarkDetailed(
+  turns: Turn[],
+  lastUuid: string | null,
+  lastTs: string | null = null,
+): DropResult {
+  if (lastUuid == null && lastTs == null) return { fresh: turns, match: "no-watermark" };
+
+  if (lastUuid != null) {
+    const i = turns.findIndex((t) => t.uuid === lastUuid);
+    if (i !== -1) return { fresh: turns.slice(i + 1), match: "uuid" };
+  }
+
+  // Zaman damgası taşımayan turn eleme dışı: at-least-once'ta mükerrer bulgu
+  // (geri alınabilir) kayıp bulgudan (geri alınamaz) ucuz.
+  if (lastTs != null && turns.some((t) => t.timestamp != null)) {
+    const ts = lastTs;
+    return { fresh: turns.filter((t) => t.timestamp == null || t.timestamp > ts), match: "timestamp" };
+  }
+
+  return { fresh: turns, match: "none" };
+}
+
+/** İnce sarmalayıcı: yalnız turn listesi isteyen çağıranlar için (cli.ts inspect). */
+export function dropThroughWatermark(
+  turns: Turn[],
+  lastUuid: string | null,
+  lastTs: string | null = null,
+): Turn[] {
+  return dropThroughWatermarkDetailed(turns, lastUuid, lastTs).fresh;
 }
 
 /**
@@ -39,7 +94,11 @@ export function cutBatches(turns: Turn[], maxTokens: number): Batch[] {
   const close = () => {
     if (current.length === 0) return;
     const lastUuid = [...current].reverse().find((t) => t.uuid != null)?.uuid ?? null;
-    batches.push({ turns: current, lastUuid, estTokens: tokens });
+    // SON değil EN BÜYÜK: transcript satır sırası zaman sırasıyla birebir
+    // olmayabiliyor (paralel araç yanıtları), filigran ise geri gitmemeli.
+    let lastTs: string | null = null;
+    for (const t of current) if (t.timestamp != null && (lastTs === null || t.timestamp > lastTs)) lastTs = t.timestamp;
+    batches.push({ turns: current, lastUuid, lastTs, estTokens: tokens });
     current = [];
     tokens = 0;
   };

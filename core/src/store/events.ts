@@ -18,7 +18,23 @@ export type EventKind =
   | "unresolved_project_key"
   | "scan_completed"
   | "observer_batch_ok"
-  | "observer_batch_unprocessed";
+  | "observer_batch_unprocessed"
+  /**
+   * Her supersede için bir kayıt. Gerekçe (denetim: prompt-injection-supersede):
+   * transcript metni prompt'a ham giriyor ve bir turn "gösterilen bulguyu
+   * geçersiz kıl" diyebilir. Tam savunma M2 kapsamı değil; ölçülebilirlik ve
+   * geri alınabilirlik ise kapsam — yanlış supersede burada görünür, restore()
+   * ile tek adımda döner (spec §3.2: aracın kendi hata oranı bedava birikir).
+   */
+  | "finding_superseded"
+  /** Filigran geri sarma denemesi engellendi (order-sensitive-watermark). */
+  | "watermark_rewind_blocked"
+  /** Parti ne uuid ne timestamp taşıyor: ilerleme kaydedilemedi, kayıp görünür. */
+  | "observer_batch_no_checkpoint"
+  /** Saklı filigran akışta hiçbir kimlikle eşleşmedi: mükerrer bulgu riski. */
+  | "watermark_match_failed"
+  /** maxCalls bütçesi doldu: kalan partiler İŞLENMEDİ, filigran ilerlemedi. */
+  | "observer_budget_exhausted";
 
 export function logEvent(
   store: Store,

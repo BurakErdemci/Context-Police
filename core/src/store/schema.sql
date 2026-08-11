@@ -41,12 +41,22 @@ CREATE TABLE IF NOT EXISTS cursors (
 -- "nereye kadar gözlemlendi"yi tutar. Teslim en-az-bir-kez olduğu için ikisi
 -- ayrışabilir; filigran bulgularla aynı tx'te ilerleyerek mükerrer üretimi keser.
 -- Turn içeriği burada YOK — transcript zaten diskte, depoda turn tablosu olmaz.
+--
+-- Filigranın İKİ kimliği var (denetim: order-sensitive-watermark +
+-- missing-checkpoint-identity). last_uuid konumsal ve KESİN ama kırılgan:
+-- akışta bulunamazsa hiçbir şey elenmiyordu, ve uuid taşımayan parti hiç
+-- checkpoint yazamadığı için sonsuz yeniden denemeye giriyordu. last_ts ikinci
+-- kimlik: uuid tutmadığında kesim buradan yapılır, geri sarma buradan engellenir.
+-- İkisi de NULL olabilir değil — biri olmadan checkpoint yazılmaz (çağıran
+-- tarafta "observer_batch_no_checkpoint" olayına düşer).
 CREATE TABLE IF NOT EXISTS observer_watermarks (
   project_id  INTEGER NOT NULL REFERENCES projects(id),
   session_id  TEXT NOT NULL,
-  last_uuid   TEXT NOT NULL,
+  last_uuid   TEXT,
+  last_ts     TEXT,
   updated_at  TEXT NOT NULL,
-  PRIMARY KEY (project_id, session_id)
+  PRIMARY KEY (project_id, session_id),
+  CHECK (last_uuid IS NOT NULL OR last_ts IS NOT NULL)
 );
 
 -- Aynı anda iki tarama aynı imleci okuyup aynı aralığı iki kez teslim
