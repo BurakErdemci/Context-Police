@@ -9,6 +9,7 @@ import {
 } from "../src/signals/git.ts";
 
 let repo: string;
+let clone: string;
 let firstSha: string;
 
 before(() => {
@@ -28,6 +29,12 @@ before(() => {
   git("add", "-A"); git("commit", "-qm", "ikinci");
   rmSync(join(repo, "src", "b.ts"));
   git("add", "-A"); git("commit", "-qm", "b silindi");
+
+  // Origin'li fixture: YEREL klon (dosya yolu, ağ yok). Görev 11'in altın set
+  // ölçümü tamamen originRef yoluna dayanıyor; origin'siz repoda o yol yalnız
+  // null dalıyla koşar, yani hiç ölçülmemiş olur.
+  clone = realpathSync(tmpDir("cp-git-clone-"));
+  execFileSync("git", ["clone", "-q", repo, clone], { encoding: "utf8" });
 });
 
 test("openGit: repo tanınır, git olmayan dizinde null", async () => {
@@ -55,4 +62,40 @@ test("sembol sinyalleri: kayıp sembol geçmişte aranır; sha varlığı", asyn
   assert.equal(await symbolEverExisted(ctx, "hayaletSembol"), false); // → unverifiable
   assert.equal(await commitExists(ctx, firstSha), true);
   assert.equal(await commitExists(ctx, "deadbeef"), false);
+});
+
+test("originRef: origin'li klonda aday listesinden ilk geçerli olan seçilir", async () => {
+  const ctx = (await openGit(clone, { fetch: false }))!;
+  assert.ok(ctx);
+  assert.notEqual(ctx.originRef, null); // origin'siz repodaki null dalının karşıtı
+  // Aday sırası origin/HEAD > origin/main > origin/master. Yerel klon
+  // refs/remotes/origin/HEAD'i kurar (ölçüldü: -> refs/remotes/origin/main),
+  // dolayısıyla ilk aday kazanır. Sıra bozulursa bu satır kırmızı verir.
+  assert.equal(ctx.originRef, "origin/HEAD");
+  // İsim çözülmüş olması yetmez; ref'in gerçekten commit'e bağlandığını göster.
+  assert.equal(await commitExists(ctx, ctx.originRef!), true);
+  assert.equal(await fileExistsAt(ctx, ctx.originRef!, "src/a.ts"), true);
+});
+
+test("originRef: ölçüm pin'i her adaydan önce gelir ve pin'li ref sorgulanabilir", async () => {
+  // D-M3-8: altın set origin'in BUGÜNKÜ ucuna değil ölçüm günkü ucuna denetlenir.
+  const ctx = (await openGit(clone, { fetch: false, originRef: firstSha }))!;
+  assert.equal(ctx.originRef, firstSha); // aday listesi hiç denenmedi
+
+  // Pin'li ref üzerinden sorgu — ölçümün yapacağı şeyin aynısı.
+  assert.equal(await fileExistsAt(ctx, ctx.originRef!, "src/a.ts"), true);
+  // Pin'in zamanı gerçekten geri sardığının kanıtı: eskiSembol ilk commit'te
+  // duruyor, HEAD'de yok. İki cevabın FARKLI olması pin'in sahiden iş gördüğünü
+  // gösterir — aynı olsalardı test pin'i ölçmüş olmazdı.
+  assert.equal(await symbolExists(ctx, firstSha, "eskiSembol"), true);
+  assert.equal(await symbolExists(ctx, "HEAD", "eskiSembol"), false);
+});
+
+test("originRef: geçersiz pin aday listesine DÜŞMEZ, null döner", async () => {
+  const ctx = (await openGit(clone, { fetch: false, originRef: "deadbeef" }))!;
+  assert.ok(ctx);
+  // Pin verilmişse tek aday odur. Sessizce origin/HEAD'e düşmek daha beter
+  // olurdu: ölçüm pin'li sanılırken aslında bugünkü uca karşı koşardı ve
+  // altın set sonucu sessizce yanlış çıkardı. null = "denetlenecek uzak uç yok".
+  assert.equal(ctx.originRef, null);
 });
