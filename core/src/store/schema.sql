@@ -1,12 +1,23 @@
 -- Context Police deposu. Spec §3.2 + M0 geri beslemeleri.
 -- Bu dosya idempotent uygulanır: her açılışta koşar, var olanı bozmaz.
 
-PRAGMA journal_mode = WAL;
+-- journal_mode BURADA DEĞİL, db.ts'te (enableWal): WAL'a geçiş busy_timeout'u
+-- dinlemiyor, başka bir bağlantı bağlıyken anında SQLITE_BUSY dönüyor (ölçüldü).
+-- Bu dosyanın içinde kalsaydı tek bir eşzamanlı yazıcı, şemanın TAMAMININ
+-- uygulanmasını engellerdi.
 PRAGMA foreign_keys = ON;
--- Bu satır olmadan append-only sözleşmesi delinebiliyor: SQLite, REPLACE'in
--- yaptığı örtük silmede DELETE tetikleyicilerini YALNIZ recursive_triggers
--- açıkken çalıştırıyor. Denetimde ölçüldü — `INSERT OR REPLACE` ile hem
--- findings.content hem bir events satırı sessizce değiştirilebiliyordu.
+-- SQLite, REPLACE'in yaptığı örtük silmede DELETE tetikleyicilerini YALNIZ
+-- recursive_triggers açıkken çalıştırıyor. Denetimde ölçüldü — bu satır olmadan
+-- `INSERT OR REPLACE` ile hem findings.content hem bir events satırı sessizce
+-- değiştirilebiliyordu.
+--
+-- KAPSAM UYARISI (ölçüldü: external-replace-bypasses-append-only): pragma
+-- BAĞLANTI-YERELDİR. Buradaki satır yalnız bu dosyayı çalıştıran bağlantıyı,
+-- yani openStore()'un açtığı bağlantıyı bağlar. Depoyu varsayılanlarla açan
+-- BAŞKA bir süreç (sqlite3 CLI dahil) bu pragmayı görmez. O yüzden asıl koruma
+-- aşağıdaki ..._no_replace tetikleyicileridir: onlar bağlantı ayarından
+-- bağımsız çalışır. Pragma yine de duruyor, çünkü DELETE tetikleyicisinin
+-- REPLACE yolunda çalışması hâlâ istenen davranış.
 PRAGMA recursive_triggers = ON;
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -138,4 +149,29 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete
 BEFORE DELETE ON events
 BEGIN
   SELECT RAISE(ABORT, 'events denetim gunlugu: silinemez');
+END;
+
+-- Yukarıdaki DELETE korumaları REPLACE yolunda yalnız recursive_triggers AÇIKKEN
+-- ateşleniyor ve o pragma bağlantı-yerel; depoyu dışarıdan varsayılanlarla açan
+-- bir yazıcı `INSERT OR REPLACE` ile satırı yerinde yeniden yazabiliyordu
+-- (ölçüldü). Aşağıdaki iki tetikleyici aynı deliği bağlantı ayarından BAĞIMSIZ
+-- kapatıyor: REPLACE'in örtük silmesi BEFORE INSERT'ten SONRA olduğu için, o an
+-- eski satır hâlâ oradadır ve çakışma görülebilir.
+--
+-- Ölçüldü (node 24.10 / SQLite): rowid verilMEYEN bir INSERT'te NEW.id BEFORE
+-- INSERT tetikleyicisinde -1 oluyor (NULL değil). id'ler daima pozitif
+-- atandığından koşul yalnız GERÇEK bir çakışmada ateşlenir; normal ekleme
+-- etkilenmez (testle sabitlendi).
+CREATE TRIGGER IF NOT EXISTS findings_no_replace
+BEFORE INSERT ON findings
+WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM findings WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'findings append-only: var olan id uzerine INSERT OR REPLACE yasak');
+END;
+
+CREATE TRIGGER IF NOT EXISTS events_no_replace
+BEFORE INSERT ON events
+WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM events WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'events denetim gunlugu: var olan id uzerine INSERT OR REPLACE yasak');
 END;

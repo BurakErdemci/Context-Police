@@ -6,6 +6,7 @@
 //   prompt stdin'den ("-") — büyük partilerde ARG_MAX derdi yok (D-M2-5)
 
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,6 +67,89 @@ function killProcessGroup(pid: number | undefined): void {
   }
 }
 
+/*
+ * --- Sinyal temizliği ---------------------------------------------------
+ *
+ * Bulgu (probes/executor-parent-kill-leaks.sh): temizlik yalnız `finally`ye ve
+ * zamanlayıcıya bağlıydı. Node varsayılanında SIGINT/SIGTERM süreci doğrudan
+ * sonlandırıyor — `finally` KOŞMUYOR — ve geride detached bir çocuk süreç grubu
+ * (codex + torunları) ile bir cp-codex-* dizini kalıyordu.
+ *
+ * ÇÖZÜLEMEYEN kısım: SIGKILL. Orada hiçbir kullanıcı kodu çalışmaz, dolayısıyla
+ * ne süreç grubu öldürülebilir ne dizin silinebilir; POSIX'te üst süreç ölünce
+ * çocuğu öldüren bir mekanizma da yok (Linux'un PR_SET_PDEATHSIG'i Node'dan
+ * erişilebilir değil). SIGKILL sonrası artıklar bilerek kabul ediliyor.
+ *
+ * Kayıt DEFTERİ modül seviyesinde: aynı süreçte birden çok run()/detect() aynı
+ * anda koşabilir ve sinyal geldiğinde hepsinin kaynağı temizlenmeli.
+ */
+const liveTempDirs = new Set<string>();
+const liveGroups = new Set<number>();
+
+/** Sinyal işleyicisi senkron olmak zorunda: süreç kapanmadan önce bitmeli. */
+function cleanupNow(): void {
+  for (const pid of liveGroups) killProcessGroup(pid);
+  liveGroups.clear();
+  for (const dir of liveTempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* silinemiyorsa yapacak bir şey yok; kapanışı geciktirmenin anlamı yok */
+    }
+  }
+  liveTempDirs.clear();
+}
+
+const FATAL_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+
+function onFatalSignal(sig: NodeJS.Signals): void {
+  cleanupNow();
+  uninstallSignalHandlers();
+  // Bir dinleyici EKLEMEK Node'un varsayılan sonlandırmasını iptal ediyor.
+  // cli.ts kendi işleyicisini eklerse kapanış kararı onundur (Node çoklu
+  // dinleyiciye izin veriyor, çakışma yok); kimse kalmadıysa varsayılanı geri
+  // getiriyoruz, yoksa Ctrl-C süreci asardı.
+  if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+}
+
+const signalHandlers = new Map<NodeJS.Signals, () => void>();
+
+function installSignalHandlers(): void {
+  if (signalHandlers.size > 0) return;
+  for (const sig of FATAL_SIGNALS) {
+    const h = () => onFatalSignal(sig);
+    signalHandlers.set(sig, h);
+    // prepend: başka bir sahip (cli.ts) kendi işleyicisinde process.exit()
+    // çağırırsa sıradaki dinleyiciler HİÇ koşmaz. Bizimki senkron ve
+    // milisaniyelik; önde koşarsa kimsenin kapanış kararına engel olmaz.
+    process.prependListener(sig, h);
+  }
+}
+
+/** Temizlenecek kaynak kalmadıysa dinleyiciyi bırak: kütüphane, sürecin sinyal
+ *  davranışına gereğinden uzun süre karışmamalı (ve testler dinleyici sızdırmaz). */
+function uninstallSignalHandlers(): void {
+  for (const [sig, h] of signalHandlers) process.removeListener(sig, h);
+  signalHandlers.clear();
+}
+
+function trackTempDir(dir: string): void {
+  liveTempDirs.add(dir);
+  installSignalHandlers();
+}
+
+function trackGroup(pid: number | undefined): void {
+  if (pid == null) return;
+  liveGroups.add(pid);
+  installSignalHandlers();
+}
+
+function untrack(kind: "dir" | "group", value: string | number | undefined): void {
+  if (kind === "dir") liveTempDirs.delete(value as string);
+  else if (value != null) liveGroups.delete(value as number);
+  if (liveTempDirs.size === 0 && liveGroups.size === 0) uninstallSignalHandlers();
+}
+
 /** Saf: komut satırını üretir. Ayrı fonksiyon, çünkü sözleşme testle sabitleniyor. */
 export function buildExecArgs(
   req: ExecutorRequest,
@@ -94,12 +178,14 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
         // detached: timeout'ta torunlarla birlikte öldürebilmek için (bkz.
         // killProcessGroup). unref() YOK — çıktıyı bekliyoruz.
         const child = spawn(binary, ["--version"], { stdio: ["ignore", "pipe", "ignore"], detached: true });
+        trackGroup(child.pid);
         let out = "";
         let settled = false;
         const finish = (r: ExecutorDetection) => {
           if (settled) return; // timeout ile close yarışabilir; ilk sonuç kazanır
           settled = true;
           clearTimeout(timer);
+          untrack("group", child.pid);
           resolve(r);
         };
         const timer = setTimeout(() => {
@@ -121,6 +207,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
       // Geçici dosyalar çağrı başına izole dizinde; finally'de silinir —
       // temizlik isteğe bağlı değil (çalışma sözleşmesi §3).
       const tmp = await mkdtemp(join(tmpdir(), "cp-codex-"));
+      trackTempDir(tmp); // sinyalle kapanışta da silinsin (bkz. sinyal temizliği)
       try {
         const outPath = join(tmp, "son-mesaj.txt");
         let schemaPath: string | null = null;
@@ -144,6 +231,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           // ÇAĞIRMIYORUZ — çıktı dosyasını beklediğimiz için süreci event
           // loop'ta tutmak zorundayız; unref edilirse Node çocuk bitmeden çıkabilir.
           const child = spawn(binary, args, { stdio: ["pipe", "ignore", "pipe"], detached: true });
+          trackGroup(child.pid);
           let stderr = "";
           let timedOut = false;
           // Prompt teslimi izleniyor. Bulgu (undetected-stdin-delivery-failure):
@@ -163,10 +251,12 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           });
           child.on("error", (err) => {
             clearTimeout(timer);
+            untrack("group", child.pid);
             resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed });
           });
           child.on("close", (code) => {
             clearTimeout(timer);
+            untrack("group", child.pid);
             resolve({ code, stderr, timedOut, stdinError, stdinFlushed });
           });
           child.stdin.on("error", (err: NodeJS.ErrnoException) => {
@@ -200,6 +290,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           return { ok: false, output: "", error: "codex son mesaj dosyasını boş bıraktı", durationMs };
         return { ok: true, output, durationMs };
       } finally {
+        untrack("dir", tmp);
         await rm(tmp, { recursive: true, force: true });
       }
     },

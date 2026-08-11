@@ -3,7 +3,7 @@
 // (spec K12). Diğer modüller yalnız aşağıdaki Store arayüzünü görür.
 
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, chmodSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -247,7 +247,15 @@ function ensureGuards(db: DatabaseSync, schema: string): void {
     (db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all() as { name: string }[])
       .map((t) => t.name),
   );
-  const required = ["findings_content_immutable", "findings_no_delete", "events_no_delete"];
+  const required = [
+    "findings_content_immutable",
+    "findings_no_delete",
+    "events_no_delete",
+    // REPLACE korumaları da bu listede: eksiklikleri, DELETE korumaları yerinde
+    // olduğu hâlde dışarıdan yerinde yeniden yazmayı mümkün kılıyor (schema.sql).
+    "findings_no_replace",
+    "events_no_replace",
+  ];
   if (required.every((t) => present.has(t))) return;
   db.exec(schema); // CREATE TRIGGER IF NOT EXISTS — eksikleri geri koyar
 }
@@ -269,15 +277,125 @@ function assertDataStatement(sql: string): void {
   }
 }
 
-export function openStore(path: string): Store {
-  if (path !== ":memory:") {
+/**
+ * Yazma kilidi için bekleme bütçesi. Denetimde ölçüldü
+ * (probes/startup-does-not-wait-for-writer.sh): busy timeout olmadan, 300 ms
+ * süren başka bir yazıcı varken `status` bile `database is locked` ile ANINDA
+ * düşüyordu — oysa kilit çok kısa sürede bırakılıyor.
+ *
+ * 5 sn seçildi çünkü bizim tuttuğumuz yazma işlemleri (şema, göç, bir tarama
+ * turunun tx'i) milisaniyeler mertebesinde; 5 sn bunların iki üç katı pay
+ * bırakıyor ama gerçekten asılmış bir yazıcıda komutu süresiz bekletmiyor.
+ * Sonsuz bekleme bilerek seçilmedi: kilit sahibi çökmüşse kullanıcı hatayı
+ * görmeli, sessizce asılmamalı.
+ */
+const BUSY_TIMEOUT_MS = 5_000;
+
+/** SQLITE_BUSY. Yalnız bu kod yeniden denemeyi hak ediyor; gerisi gerçek hata. */
+const SQLITE_BUSY = 5;
+
+/** WAL yeniden deneme adımı: kilit ortalama milisaniyeler sürüyor, sık yoklamak ucuz. */
+const WAL_RETRY_MS = 25;
+
+/** Aynı gevşek dizin için süreç başına tek uyarı; tekrar gürültü olur. */
+const warnedDirs = new Set<string>();
+
+/**
+ * Depo dizinini hazırlar. İzin sıkılaştırması YALNIZ bizim yarattığımız dizine
+ * uygulanır.
+ *
+ * Denetim bulgusu (probes/store-parent-chmod.sh): koşulsuz
+ * `chmodSync(dirname(path), 0o700)` var olan ve bize ait olmayan bir dizini de
+ * 0700'e çekiyordu — `--store store.db` yazan biri çalışma dizininin izinlerini
+ * değiştiriyordu ve her komut (status dahil) bu yoldan geçiyor. Bir aracın
+ * kendi deposunu korumaya hakkı var, kullanıcının dizinini yeniden yapılandırmaya yok.
+ */
+function prepareStoreDir(path: string): void {
+  const dir = dirname(path);
+  // recursive mkdir, yarattığı EN ÜST dizini döndürür; hiçbir şey yaratmadıysa
+  // undefined — "bu dizin bizim mi" sorusunun ek bir stat gerektirmeyen cevabı.
+  const created = mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (created !== undefined) {
     // Depo transcript'lerden türetilmiş içerik barındırıyor; çok kullanıcılı bir
-    // makinede varsayılan umask (022) bunu 0755/0644 bırakıyordu — başka bir
-    // yerel hesap okuyabiliyordu. Denetim bulgusu, ölçülerek doğrulandı.
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    chmodSync(dirname(path), 0o700);
+    // makinede varsayılan umask (022) bunu 0755 bırakabiliyordu (denetim bulgusu).
+    // mkdir modu umask ile kırpıldığı için yaratılan dizinde chmod şart.
+    chmodSync(dir, 0o700);
+    return;
   }
+  // Var olan dizin: değiştirmiyoruz ama sessiz de kalmıyoruz — kullanıcı
+  // deponun başkalarınca okunabilir bir yerde durduğunu bilmeli. Deponun kendi
+  // dosyaları yine 0600.
+  if (warnedDirs.has(dir)) return;
+  const mode = statSync(dir).mode & 0o777;
+  if ((mode & 0o077) !== 0) {
+    warnedDirs.add(dir);
+    console.warn(
+      `uyarı: depo dizini ${dir} başkalarına açık (mod ${mode.toString(8)}); ` +
+        "izinleri değiştirilmedi — depo dosyaları yine de 0600.",
+    );
+  }
+}
+
+/** Bağımlılıksız senkron uyku. Açılış yolu senkron; zamanlayıcı kullanamıyoruz. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * WAL'a geçiş. AYRI ele alınıyor çünkü `PRAGMA journal_mode` busy_timeout'u
+ * DİNLEMİYOR: ölçüldü — başka bir bağlantı yazma kilidi tutarken journal_mode
+ * değişimi 0 ms'de SQLITE_BUSY dönerken, aynı anda bir CREATE TABLE 574 ms
+ * bekleyip başarıyla tamamlanıyor. Bekleme bu yüzden elle yapılıyor.
+ *
+ * Başarısızlık ÖLÜMCÜL DEĞİL: WAL bir eşzamanlılık tercihi, veri sözleşmesi
+ * değil — rollback journal ile de doğru çalışıyoruz ve sonraki açılış modu
+ * yine yükseltmeyi dener. Depoyu bu yüzden açamamak, düzeltmeye çalıştığımız
+ * "eşzamanlı yazıcı varken komut düşüyor" arızasının aynısı olurdu.
+ */
+function enableWal(db: DatabaseSync): boolean {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      return true;
+    } catch (err) {
+      const busy = (err as { errcode?: number }).errcode === SQLITE_BUSY;
+      if (!busy || Date.now() >= deadline) return false;
+      sleepSync(WAL_RETRY_MS);
+    }
+  }
+}
+
+/**
+ * `PRAGMA recursive_triggers` gerçekten açık mı? Pragma BAĞLANTI-YEREL olduğu
+ * için schema.sql'deki satır yalnız BU bağlantıyı bağlıyor; sessizce varsaymak
+ * append-only sözleşmesinin dayandığı zemini ölçülmemiş bırakırdı (denetim
+ * bulgusu: external-replace-bypasses-append-only). Kapalıysa açmayı dener,
+ * yine kapalıysa depoyu açmayı reddeder — koruması olmayan bir depoya yazmak,
+ * korunduğunu sanarak yazmaktan iyidir.
+ */
+function assertRecursiveTriggers(db: DatabaseSync): void {
+  const read = () => Number((db.prepare("PRAGMA recursive_triggers").get() as { recursive_triggers: number } | undefined)?.recursive_triggers);
+  if (read() === 1) return;
+  db.exec("PRAGMA recursive_triggers = ON");
+  if (read() !== 1) {
+    throw new Error("PRAGMA recursive_triggers açılamadı: append-only koruması bu bağlantıda garanti edilemez");
+  }
+}
+
+export function openStore(path: string): Store {
+  if (path !== ":memory:") prepareStoreDir(path);
   const db = new DatabaseSync(path);
+  // İLK ifade: bundan sonraki her şey (şema, göç, kurtarma) yazma kilidi
+  // isteyebilir ve eşzamanlı bir yazıcıya takılabilir. Pragma'nın kendisi kilit
+  // almaz, dolayısıyla burada güvenle koşar. Yapıcının `timeout` seçeneği yerine
+  // pragma: ölçülen sürümde (node 24.10) ikisi de çalışıyor, pragma sürümden
+  // bağımsız.
+  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  if (!enableWal(db)) {
+    // Sessiz düşüş yok: WAL'sız çalışmak doğru ama daha az eşzamanlı.
+    console.warn(`uyarı: ${path} WAL kipine alınamadı (başka bir yazıcı bağlı); rollback journal ile devam ediliyor.`);
+  }
 
   // Şemadan ÖNCE: yarıda kesilmiş bir göçün ara tablosu ortadaysa schema.sql
   // hedefi boş yeniden yaratıp veriyi yetim bırakıyor (gerekçe: fonksiyonun
@@ -289,6 +407,7 @@ export function openStore(path: string): Store {
 
   migrate(db);
   ensureGuards(db, schema);
+  assertRecursiveTriggers(db);
 
   // WAL ve SHM yan dosyaları SQLite tarafından şema uygulanırken yaratılıyor;
   // izinleri ancak var olduktan sonra sıkılaştırılabilir.

@@ -1,8 +1,10 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { registerExecutor, getExecutor } from "../src/adapters/executor.ts";
 import { createCodexExecutor, buildExecArgs } from "../src/adapters/codex.ts";
 import { fakeExecutor } from "./helpers.ts";
@@ -107,6 +109,79 @@ test("CodexExecutor: zaman aşımı süreci öldürür ve ok=false döner", asyn
   const res = await exec.run({ prompt: "x" });
   assert.equal(res.ok, false);
   assert.match(res.error!, /zaman aşımı/);
+});
+
+// class: executor-parent-kill-leaks
+// Üst süreç SIGTERM/SIGINT alınca `finally` KOŞMUYOR (Node varsayılanı süreci
+// doğrudan sonlandırıyor): detached çocuk süreç grubu ve cp-codex-* geçici
+// dizini diskte kalıyordu. SIGKILL onarılamaz — orada hiçbir kod koşmaz — ama
+// bu iki sinyal onarılabilir ve ölçülen sızıntı buradan geliyordu.
+test("CodexExecutor: SIGTERM'de geçici dizin ve çocuk süreç grubu temizlenir", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-signal-"));
+  fakeBinDirs.push(dir);
+  const marker = join(dir, "cocuk.durum");
+  const bin = join(dir, "codex");
+  // Sahte binary kendi PID'sini ve -o ile verilen geçici dizini bildirir, sonra
+  // asılı kalır: temizliğin gerçekten koştuğunu dışarıdan ölçebilelim diye.
+  writeFileSync(
+    bin,
+    `#!/bin/sh
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+printf '%s\\n%s\\n' "$$" "$(dirname "$out")" > "$FAKE_MARKER"
+sleep 60`,
+  );
+  chmodSync(bin, 0o755);
+
+  const codexUrl = pathToFileURL(join(import.meta.dirname, "../src/adapters/codex.ts")).href;
+  const child = spawn(
+    process.execPath,
+    [
+      "--disable-warning=ExperimentalWarning",
+      "--experimental-strip-types",
+      "--input-type=module",
+      "-e",
+      `const { createCodexExecutor } = await import(${JSON.stringify(codexUrl)});
+       await createCodexExecutor({ binary: process.env.FAKE_BINARY, timeoutMs: 60000 }).run({ prompt: "sinyal testi" });`,
+    ],
+    { env: { ...process.env, FAKE_BINARY: bin, FAKE_MARKER: marker }, stdio: ["ignore", "ignore", "inherit"] },
+  );
+  t.after(() => child.kill("SIGKILL"));
+
+  const bekle = async (kosul: () => boolean, ms: number, ne: string) => {
+    const son = Date.now() + ms;
+    while (Date.now() < son) {
+      if (kosul()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(ne);
+  };
+  const okunanMarker = () =>
+    existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : [];
+
+  await bekle(() => okunanMarker().length >= 2, 5000, "sahte yürütücü çocuğu hiç başlamadı");
+  const [torunPid, gecici] = okunanMarker();
+  assert.ok(existsSync(gecici!), "geçici dizin ölçümden önce yok");
+
+  child.kill("SIGTERM");
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("üst süreç SIGTERM sonrası kapanmadı")), 5000);
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+
+  const torunOldu = () => {
+    try {
+      process.kill(Number(torunPid), 0);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  await bekle(torunOldu, 3000, "çocuk süreç grubu SIGTERM sonrası yaşamaya devam etti");
+  assert.equal(existsSync(gecici!), false, "cp-codex-* geçici dizini diskte kaldı");
 });
 
 test("CodexExecutor: binary yoksa detect bulunamadı der, run ok=false döner", async () => {

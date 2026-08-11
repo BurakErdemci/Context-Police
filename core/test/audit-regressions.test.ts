@@ -121,11 +121,15 @@ test("INSERT OR REPLACE append-only sözleşmesini delemez", () => {
         "INSERT OR REPLACE INTO findings (id, project_id, source, content, created_at) VALUES (?,?,?,?,?)",
         fid, pid, "observed", "ELE GEÇİRİLDİ", "2026-08-10T00:00:00.000Z",
       ),
-    /silinemez/,
+    // İki koruma da bu yolu kapatıyor ve hangisinin önce ateşlediği bir uygulama
+    // ayrıntısı: recursive_triggers açıkken ..._no_delete ("silinemez"),
+    // BEFORE INSERT çakışma koruması ise her bağlantıda ("yasak"). İddia
+    // reddedilmesi; mesajın hangi korumadan geldiği değil.
+    /silinemez|yasak/,
   );
   assert.throws(
     () => store.run("INSERT OR REPLACE INTO events (id, at, kind) VALUES (?,?,?)", eid, "2026-08-10T00:00:00.000Z", "sahte"),
-    /silinemez/,
+    /silinemez|yasak/,
   );
   assert.equal(store.get<{ content: string }>("SELECT content FROM findings WHERE id=?", fid)!.content, "özgün");
   store.close();

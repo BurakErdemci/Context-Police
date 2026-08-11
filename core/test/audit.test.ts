@@ -269,8 +269,9 @@ test("[cli] audit tarama kilidini alır, bırakır; kilit doluyken başlamaz", (
   // birden çok gerçek koşum olabiliyor (Görev 9 şerhi).
   assert.ok(!/tek çağrı/i.test(ilk.stdout));
 
-  // İkinci koşum ancak birincisi kilidi BIRAKTIYSA başlayabilir: sahibi ölmüş
-  // bir kilit bile bir saat boyunca bayat sayılmıyor (lock.ts STALE_MS).
+  // İkinci koşum birincinin kilidi bıraktığını varsayar. (Bırakmasaydı bile
+  // sahibi ölmüş bir kilit artık HEMEN devralınıyor — lock.ts'teki devralma
+  // kuralı: ölü sahip VEYA STALE_MS'ten eski.)
   const ikinci = run();
   assert.equal(ikinci.status, 0, `${ikinci.stdout}\n${ikinci.stderr}`);
   assert.match(ikinci.stdout, /import: \+0 ~0 -0 \(değişmeyen 2\)/, "değişmemiş not yeniden eklenmemeli");
