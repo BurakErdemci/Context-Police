@@ -75,9 +75,16 @@ export const OBSERVER_OUTPUT_SCHEMA = {
               additionalProperties: false,
             },
           },
-          supersedes: { type: "number" },
+          // ["number","null"] + required: OpenAI strict structured-output modu
+          // `required`ın properties'teki HER anahtarı içermesini şart koşuyor.
+          // İlk gerçek koşumda ölçüldü (11 Ağu 2026): `supersedes` required
+          // listesinde olmayınca API 6/6 partiyi `invalid_json_schema` (400) ile
+          // reddetti — gözlemci tek bulgu üretemedi. Opsiyonelliği taşıyan şey
+          // artık `null`; parseObserverOutput null'ı zaten "geçersiz kılınan yok"
+          // sayıyor.
+          supersedes: { type: ["number", "null"] },
         },
-        required: ["content", "anchors"],
+        required: ["content", "anchors", "supersedes"],
         additionalProperties: false,
       },
     },
