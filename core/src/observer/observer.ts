@@ -8,12 +8,12 @@
 import type { Store } from "../store/db.ts";
 import type { ExecutorAdapter } from "../adapters/executor.ts";
 import type { Turn } from "../types.ts";
-import { cutBatches, dropThroughWatermarkDetailed, type Batch } from "./batch.ts";
+import { cutBatches, dropThroughWatermarkDetailed, type Batch, type DeliveryRange } from "./batch.ts";
 import {
   OBSERVER_OUTPUT_SCHEMA, buildObserverPrompt, buildStateTitles, parseObserverOutput, type ObserverItem,
 } from "./prompt.ts";
 import { appendFinding, listActive, supersede } from "../store/findings.ts";
-import { getWatermark, setWatermark } from "../store/watermarks.ts";
+import { getWatermark, setWatermark, resetWatermarkOffset } from "../store/watermarks.ts";
 import { logEvent } from "../store/events.ts";
 
 export interface ObserverOptions {
@@ -60,56 +60,85 @@ export class Observer {
     this.maxCalls = opts.maxCalls;
   }
 
-  /** scanOnce onTurns'a doğrudan verilir: (ctx) => observer.handleTurns(ctx). */
-  async handleTurns(ctx: { projectId: number; sessionId: string; turns: Turn[] }): Promise<void> {
-    const wm = getWatermark(this.store, ctx.projectId, ctx.sessionId);
-    const { fresh, match, ambiguity } = dropThroughWatermarkDetailed(
-      ctx.turns, wm?.lastUuid ?? null, wm?.lastTs ?? null,
-    );
-    this.stats.skippedTurns += ctx.turns.length - fresh.length;
-    // Filigran VAR ama hiçbir kimlikle eşleşmedi: bu akıştaki her turn "yeni"
-    // sayılacak, yani mükerrer bulgu üretilebilir. Sessiz kalırsa mükerrerin
-    // sebebi sonradan bulunamaz — order-sensitive-watermark tam olarak buydu.
-    if (wm !== null && match === "none") {
-      logEvent(this.store, {
-        projectId: ctx.projectId,
-        kind: "watermark_match_failed",
-        detail: {
-          sessionId: ctx.sessionId, storedUuid: wm.lastUuid, storedTs: wm.lastTs ?? null,
-          turnCount: ctx.turns.length,
-        },
-      });
-    }
-    // uuid eşleşti ama güvenilmedi: eleme YAPILMADI. Sessiz kalırsa "neden bu
-    // turn'ler ikinci kez işlendi" sorusu cevapsız kalır — ve tersi (sessiz
-    // eleme) tam olarak watermark-duplicate-uuid-loss bulgusuydu.
-    if (match === "uuid-ambiguous" && ambiguity !== undefined) {
-      logEvent(this.store, {
-        projectId: ctx.projectId,
-        kind: "watermark_ambiguous_match",
-        detail: {
-          sessionId: ctx.sessionId, storedUuid: wm?.lastUuid ?? null, storedTs: wm?.lastTs ?? null,
-          turnCount: ctx.turns.length,
-          uuidMatches: ambiguity.uuidMatches, reason: ambiguity.reason,
-        },
-      });
-    }
-    if (fresh.length === 0) return;
+  /**
+   * scanOnce onTurns'a doğrudan verilir: (ctx) => observer.handleTurns(ctx).
+   *
+   * `range` teslimatın bayt aralığı. Verilmezse (kütüphane olarak doğrudan
+   * çağrı) kimlik teslimatın içerik özetinden kurulur; ikisi de konumsaldır,
+   * ikisi de tek tek turn kimliğine BAKMAZ (batch.ts'teki gerekçe).
+   */
+  async handleTurns(ctx: {
+    projectId: number; sessionId: string; turns: Turn[]; range?: DeliveryRange;
+  }): Promise<void> {
+    const range = ctx.range ?? null;
 
-    const batches = cutBatches(fresh, this.batchTokens);
+    // Kısalma/yerine koyma: saklanan ofset artık başka bir dosyanın ofseti.
+    // KARARDAN ÖNCE sıfırlanmak zorunda, yoksa monoton ilerleme kuralı onu
+    // korur ve yeni dosyanın tamamı "işlenmiş" sayılır.
+    if (range?.truncated === true) {
+      const cleared = resetWatermarkOffset(this.store, ctx.projectId, ctx.sessionId);
+      if (cleared) {
+        logEvent(this.store, {
+          projectId: ctx.projectId,
+          kind: "watermark_offset_reset",
+          detail: { sessionId: ctx.sessionId, newRange: { from: range.from, to: range.to } },
+        });
+      }
+    }
+
+    const wm = getWatermark(this.store, ctx.projectId, ctx.sessionId);
+    const decision = dropThroughWatermarkDetailed(ctx.turns, wm, range);
+    this.stats.skippedTurns += decision.dropped;
+
+    if (decision.fresh.length === 0) {
+      // Bir iş yok ama ofset geride kalmış olabilir: teslimatın tamamı kimlikle
+      // elendiğinde (son parti yazıldı, teslimat sonu yazılamadan çökme) ofseti
+      // burada kapatmazsak aynı aralık sonsuza dek "yarım" görünürdü.
+      this.finishDelivery(ctx.projectId, ctx.sessionId, decision.key, ctx.turns.length, range);
+      return;
+    }
+
+    const batches = cutBatches(decision.fresh, this.batchTokens);
+    // Teslimatın kaçıncı turn'üne kadar gelindiği: elenen ön ek + işlenen
+    // partiler. Filigran bu sayıyı saklar, yarıda kalan iş buradan devam eder.
+    let processed = decision.dropped;
     for (const [i, batch] of batches.entries()) {
-      // Bütçe kontrolü parti BAŞINDA: yarım kalan parti filigran yazamaz,
+      // Bütçe kontrolü parti BAŞINDA: yarım kalan parti checkpoint yazamaz,
       // dolayısıyla iptal edilen iş sonraki koşumda bütünüyle geri gelir.
       if (!this.hasBudget()) {
         this.noteBudgetExhausted(ctx.projectId, ctx.sessionId, batches.length - i);
         return;
       }
-      const res = await this.processBatch(ctx.projectId, ctx.sessionId, batch);
+      const res = await this.processBatch(ctx.projectId, ctx.sessionId, batch, decision.key, processed + batch.turns.length);
       if (res === "budget") {
         this.noteBudgetExhausted(ctx.projectId, ctx.sessionId, batches.length - i);
         return;
       }
+      processed += batch.turns.length;
     }
+
+    this.finishDelivery(ctx.projectId, ctx.sessionId, decision.key, processed, range);
+  }
+
+  /**
+   * Teslimatın TAMAMI işlendi: ofset ancak burada ilerler.
+   *
+   * Neden parti başına değil: turn'lerin tek tek bayt ofsetleri elimizde yok,
+   * dolayısıyla "ilk iki parti işlendi" bir ofsete çevrilemez. Yarım teslimatta
+   * ofseti ilerletmek işlenmemiş turn'leri işlenmiş ilan ederdi — kalıcı kayıp.
+   * Yarım işin ilerlemesi bunun yerine teslimat kimliği + turn sayısıyla
+   * saklanıyor (parti checkpoint'i), ki bütçe sınırıyla koşan uzun bir oturum
+   * her koşumda biraz daha ilerlesin.
+   */
+  private finishDelivery(
+    projectId: number, sessionId: string, key: string, turnCount: number, range: DeliveryRange | null,
+  ): void {
+    setWatermark(this.store, {
+      projectId, sessionId,
+      byteOffset: range?.to ?? null,
+      deliveryKey: key,
+      deliveryTurns: turnCount,
+    });
   }
 
   private hasBudget(): boolean {
@@ -132,7 +161,9 @@ export class Observer {
     });
   }
 
-  private async processBatch(projectId: number, sessionId: string, batch: Batch): Promise<"done" | "budget"> {
+  private async processBatch(
+    projectId: number, sessionId: string, batch: Batch, deliveryKey: string, processedTurns: number,
+  ): Promise<"done" | "budget"> {
     const projectPath =
       this.store.get<{ path: string }>("SELECT path FROM projects WHERE id = ?", projectId)?.path ?? "(bilinmiyor)";
 
@@ -162,7 +193,7 @@ export class Observer {
             estTokens: batch.estTokens, error: outcome.error,
           },
         });
-        this.checkpoint(projectId, sessionId, batch);
+        this.checkpoint(projectId, sessionId, batch, deliveryKey, processedTurns);
       });
       return "done";
     }
@@ -208,7 +239,7 @@ export class Observer {
           }
         }
       }
-      this.checkpoint(projectId, sessionId, batch);
+      this.checkpoint(projectId, sessionId, batch, deliveryKey, processedTurns);
       logEvent(this.store, {
         projectId,
         kind: "observer_batch_ok",
@@ -226,25 +257,24 @@ export class Observer {
   }
 
   /**
-   * Filigranı ilerletir. Eskiden yalnız `batch.lastUuid != null` iken
-   * yazılıyordu: uuid taşımayan bir parti hiç checkpoint yazamıyor, aynı
-   * turn'ler her koşumda yeniden işleniyordu — zehirli parti yolunda bu SONSUZ
-   * maliyet demek (denetim: missing-checkpoint-identity, probe'la ölçüldü).
-   * Artık zaman damgası da bir kimlik; ikisi de yoksa kayıp görünür olay olur.
+   * Parti checkpoint'i: teslimatın kaç turn'lük ön ekinin işlendiğini yazar.
+   *
+   * Eskiden checkpoint partinin uuid/damgasına muhtaçtı ve ikisi de yoksa hiç
+   * yazılamıyordu — o parti her koşumda yeniden işleniyor, zehirli parti
+   * yolunda SONSUZ maliyet üretiyordu (denetim: missing-checkpoint-identity).
+   * O arıza sınıfı artık YAPISAL OLARAK yok: kimlik teslimatın kendisinde,
+   * her partinin yazacak bir ilerlemesi var. uuid/damga hâlâ yazılıyor ama
+   * yalnız teşhis olarak — hangi turn'e kadar gelindiği okunabilsin diye.
    *
    * Çağrı yeri store.tx içi: bulgu yazımı + filigran aynı işlemde (D-M2-2).
    */
-  private checkpoint(projectId: number, sessionId: string, batch: Batch): void {
-    if (batch.lastUuid == null && batch.lastTs == null) {
-      logEvent(this.store, {
-        projectId,
-        kind: "observer_batch_no_checkpoint",
-        detail: { sessionId, turnCount: batch.turns.length, estTokens: batch.estTokens },
-      });
-      return;
-    }
+  private checkpoint(
+    projectId: number, sessionId: string, batch: Batch, deliveryKey: string, processedTurns: number,
+  ): void {
     const res = setWatermark(this.store, {
-      projectId, sessionId, lastUuid: batch.lastUuid, lastTs: batch.lastTs,
+      projectId, sessionId,
+      deliveryKey, deliveryTurns: processedTurns,
+      lastUuid: batch.lastUuid, lastTs: batch.lastTs,
     });
     if (res.rewindBlocked !== undefined) {
       logEvent(this.store, {

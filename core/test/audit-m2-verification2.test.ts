@@ -13,7 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import { openStore } from "../src/store/db.ts";
 import { getWatermark, setWatermark } from "../src/store/watermarks.ts";
 import { parseObserverOutput } from "../src/observer/prompt.ts";
-import { dropThroughWatermarkDetailed } from "../src/observer/batch.ts";
+import { dropThroughWatermarkDetailed, deliveryKey } from "../src/observer/batch.ts";
 import { Observer } from "../src/observer/observer.ts";
 import { upsertProject } from "../src/store/projects.ts";
 import { countEvents, listEvents } from "../src/store/events.ts";
@@ -318,74 +318,67 @@ test("[missing-cli-option-value] meşru yazımlar bozulmadı (aşırı düzeltme
 const wt = (text: string, uuid?: string, timestamp?: string): Turn =>
   ({ role: "user", text, uuid, timestamp });
 
-test("[watermark-duplicate-uuid-loss] belirsiz uuid eşleşmesinde eleme YOK", () => {
+// SÖZLEŞME DEĞİŞTİ (kök tasarım A, 11 Ağu 2026). Bu üç test "uuid eşleşmesi tek
+// anlamlı mı" sorusunun cevabını sabitliyordu. O soru artık SORULMUYOR: karar
+// bayt aralığından veriliyor, uuid karar yoluna hiç girmiyor. Testler kaldırılmadı
+// çünkü ÖLÇÜLEN ARIZA (fork kopyası + mükerrer uuid → kalıcı turn kaybı) hâlâ
+// gerçek girdi şekli; yeni sözleşmede o şeklin hiçbir etkisi olmadığı sabitleniyor.
+const konum = (byteOffset: number | null, key: string | null = null, turns: number | null = null) =>
+  ({ byteOffset, deliveryKey: key, deliveryTurns: turns });
+
+test("[watermark-duplicate-uuid-loss] mükerrer/fork uuid'i kararı ETKİLEMEZ", () => {
   const ts = (h: number) => `2026-08-11T${String(h).padStart(2, "0")}:00:00.000Z`;
+  const range = { from: 1000, to: 2000, truncated: false };
 
   // ŞEKİL 1 — repro'nun ta kendisi: teslimatta filigran uuid'i TEK kez geçiyor
-  // ama o satır fork'un yeniden yazdığı ESKİ kopya (damgası eski), önündeki
-  // turn'ler ondan YENİ. Eski kod bunları "işlenmiş" sayıp atıyordu.
+  // ama o satır fork'un yeniden yazdığı ESKİ kopya. Eski kod bunları "işlenmiş"
+  // sayıp atıyordu; şimdi aralık ilerlediği için hepsi taze.
   const forkKopyasi = dropThroughWatermarkDetailed(
     [wt("gerçekten yeni 1", "n1", ts(10)), wt("gerçekten yeni 2", "n2", ts(11)),
      wt("fork'un yeniden yazdığı eski satır", "wm", ts(3))],
-    "wm", ts(3),
+    konum(1000), range,
   );
   assert.deepEqual(
     forkKopyasi.fresh.map((x) => x.text),
     ["gerçekten yeni 1", "gerçekten yeni 2", "fork'un yeniden yazdığı eski satır"],
     "eşleşmenin önündeki YENİ turn'ler kalıcı olarak düştü",
   );
-  assert.equal(forkKopyasi.match, "uuid-ambiguous");
-  assert.equal(forkKopyasi.ambiguity?.reason, "newer-turn-before-match");
-  assert.equal(forkKopyasi.ambiguity?.uuidMatches, 1);
+  assert.equal(forkKopyasi.match, "fresh", "belirsizlik dalı hâlâ hayatta");
 
-  // ŞEKİL 2 — aynı uuid teslimatta İKİ kez: hangisi "buraya kadarı işlendi"
-  // belli değil. İlkini seçmek aradaki turn'leri, ikincisini seçmek daha da
-  // fazlasını atardı; ölçülen 3.426 mükerrer satır bu şeklin gerçek olduğunu
-  // söylüyor. Tercih: hiçbirini eleme.
+  // ŞEKİL 2 — aynı uuid teslimatta İKİ kez (ölçüm: 209 oturumda 3.426 satır).
+  // Eskiden özel bir "belirsiz" hâline düşüyordu; artık ayırt edilecek bir şey yok.
   const mukerrer = dropThroughWatermarkDetailed(
     [wt("wm kopya A", "wm", ts(1)), wt("arada kalan", "n1", ts(2)), wt("wm kopya B", "wm", ts(1))],
-    "wm", ts(2),
+    konum(1000), range,
   );
-  assert.deepEqual(mukerrer.fresh.length, 3, "mükerrer uuid'de eleme yapıldı");
-  assert.equal(mukerrer.match, "uuid-ambiguous");
-  assert.equal(mukerrer.ambiguity?.reason, "duplicate-uuid");
-  assert.equal(mukerrer.ambiguity?.uuidMatches, 2);
+  assert.equal(mukerrer.fresh.length, 3, "mükerrer uuid'de eleme yapıldı");
+  assert.equal(mukerrer.match, "fresh");
 });
 
 test("[watermark-duplicate-uuid-loss] normal tekrar-teslimde eleme HÂLÂ çalışır", () => {
-  // Aşırı düzeltme kapısı: her eşleşmeyi belirsiz saymak mükerrer bulgu
-  // regresyonu (order-sensitive-watermark) olurdu. Tek eşleşme + önü tutarlı
-  // damgalı ise konumsal kesim aynen sürüyor.
+  // Aşırı düzeltme kapısı: hiçbir şeyi elememek mükerrer bulgu regresyonu
+  // (order-sensitive-watermark) olurdu. Aynı aralığın tekrar teslimi eleniyor.
   const ts = (h: number) => `2026-08-11T0${h}:00:00.000Z`;
-  const r = dropThroughWatermarkDetailed(
-    [wt("işlenmiş 1", "u1", ts(1)), wt("işlenmiş 2", "u2", ts(2)), wt("yeni", "u3", ts(3))],
-    "u2", ts(2),
-  );
-  assert.deepEqual(r.fresh.map((x) => x.text), ["yeni"], "tekrar-teslim elenmedi: mükerrer bulgu üretilir");
-  assert.equal(r.match, "uuid");
-  assert.equal(r.ambiguity, undefined);
+  const turns = [wt("işlenmiş 1", "u1", ts(1)), wt("işlenmiş 2", "u2", ts(2)), wt("yeni", "u3", ts(3))];
+  const range = { from: 0, to: 900, truncated: false };
 
-  // Damgası EŞİT olan önceki turn'ler belirsizlik saymaz — gerçek veride
-  // turn'lerin %11,55'i damgasını bir başkasıyla paylaşıyor, "yeni" ölçütü
-  // KESİN büyüklük.
-  const esitDamga = dropThroughWatermarkDetailed(
-    [wt("a", "u1", ts(2)), wt("b", "u2", ts(2)), wt("yeni", "u3", ts(3))],
-    "u2", ts(2),
-  );
-  assert.deepEqual(esitDamga.fresh.map((x) => x.text), ["yeni"]);
-  assert.equal(esitDamga.match, "uuid");
-
-  // Filigran partinin SONUNDAysa hepsi elenir (en yaygın tekrar-teslim hâli).
-  const hepsi = dropThroughWatermarkDetailed(
-    [wt("a", "u1", ts(1)), wt("b", "u2", ts(2))], "u2", ts(2),
-  );
+  // (a) Aralığın tamamı filigranın altında: hepsi elenir (en yaygın tekrar-teslim hâli).
+  const hepsi = dropThroughWatermarkDetailed(turns, konum(900), range);
   assert.deepEqual(hepsi.fresh, []);
-  assert.equal(hepsi.match, "uuid");
+  assert.equal(hepsi.match, "already-processed");
+
+  // (b) Aynı teslimat yarım kalmıştı: işlenmiş ön ek elenir, kuyruk işlenir.
+  const key = deliveryKey(turns, range);
+  const yarim = dropThroughWatermarkDetailed(turns, konum(null, key, 2), range);
+  assert.deepEqual(yarim.fresh.map((x) => x.text), ["yeni"]);
+  assert.equal(yarim.match, "resumed");
+  assert.equal(yarim.dropped, 2);
 });
 
-test("[watermark-duplicate-uuid-loss] belirsiz eşleşme görünür olay bırakır", async () => {
-  // Sessiz eleme bulgunun kendisiydi; sessiz ELEMEME de aynı hatanın aynası
-  // olurdu — mükerrer bulgunun sebebi sonradan bulunamazdı.
+test("[watermark-duplicate-uuid-loss] gözlemci yolunda da eleme yok, turn kaybolmuyor", async () => {
+  // Eski hâlde bu teslimat "belirsiz eşleşme" olayı yazıyordu; olay, elemenin
+  // NEDEN yapılmadığını açıklamak içindi. Konumsal kararda açıklanacak bir
+  // istisna yok — ölçülen asıl mesele (turn modele gitti mi) aynen sabit.
   const store = openStore(":memory:");
   const pid = upsertProject(store, { path: "/p", adapterId: "claude-code", transcriptDir: "/t" });
   const ts = (h: number) => `2026-08-11T${String(h).padStart(2, "0")}:00:00.000Z`;
@@ -393,20 +386,15 @@ test("[watermark-duplicate-uuid-loss] belirsiz eşleşme görünür olay bırak�
 
   const exec = fakeExecutor([]);
   const obs = new Observer({ store, executor: exec });
-  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns: [
-    wt("gerçekten yeni", "n1", ts(10)), wt("fork kopyası", "wm", ts(3)),
-  ]});
+  await obs.handleTurns({
+    projectId: pid, sessionId: "s1",
+    turns: [wt("gerçekten yeni", "n1", ts(10)), wt("fork kopyası", "wm", ts(3))],
+    range: { from: 500, to: 900, truncated: false },
+  });
 
-  assert.equal(countEvents(store, "watermark_ambiguous_match"), 1, "belirsiz eşleşme sessizce geçti");
-  const detail = JSON.parse(listEvents(store, { kind: "watermark_ambiguous_match" })[0]!.detail!);
-  assert.equal(detail.reason, "newer-turn-before-match");
-  assert.equal(detail.uuidMatches, 1);
-  assert.equal(detail.storedUuid, "wm");
-  assert.equal(detail.turnCount, 2);
-  // Ve asıl mesele: kaybolan turn YOK, modele gitti.
   assert.equal(exec.calls.length, 1);
   assert.ok(exec.calls[0]!.prompt.includes("gerçekten yeni"), "yeni turn yine kayboldu");
-  // Yanlış olay tipi yazılmadı: bu "hiç eşleşmedi" değil, "güvenilmedi".
-  assert.equal(countEvents(store, "watermark_match_failed"), 0);
+  assert.equal(obs.stats.skippedTurns, 0, "fork kopyası yüzünden eleme yapıldı");
+  assert.equal(getWatermark(store, pid, "s1")!.byteOffset, 900, "teslimat sonu ofseti yazılmadı");
   store.close();
 });

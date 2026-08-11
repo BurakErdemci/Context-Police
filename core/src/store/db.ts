@@ -165,53 +165,51 @@ function migrateCursors(db: DatabaseSync): void {
 }
 
 /**
- * observer_watermarks M2'de iki kez değişti: `last_ts` sütunu eklendi ve
- * `last_uuid` NOT NULL'dan nullable'a döndü (uuid taşımayan parti de checkpoint
- * yazabilsin diye — missing-checkpoint-identity).
+ * observer_watermarks M2'de ÜÇ kez değişti: `last_ts` eklendi, `last_uuid`
+ * NOT NULL'dan nullable'a döndü, ve nihayet kimlik bütünüyle konumsala geçti
+ * (byte_offset / delivery_key / delivery_turns eklendi, "biri dolu olmalı"
+ * CHECK kısıtı kalktı).
  *
- * AYNI SINIF ÜÇÜNCÜ KEZ: M1 denetiminde imleç tablosu için çıktı
+ * AYNI SINIF DÖRDÜNCÜ KEZ: M1 denetiminde imleç tablosu için çıktı
  * (schema-migration-breaks-cursor, o turun en ciddi bulgusuydu), M2 doğrulama
- * turunda filigran tablosu için, 2. doğrulama turunda ise göç adımlarının
- * atomik olmaması olarak çıktı. Üç denetimde üç kez çıkması kalıcı bir örüntü:
+ * turunda filigran tablosu için, 2. doğrulama turunda göç adımlarının atomik
+ * olmaması olarak, şimdi de kök tasarım değişikliğiyle. Kalıcı örüntü:
  * `CREATE TABLE IF NOT EXISTS` var olan tabloya DOKUNMAZ, dolayısıyla her tablo
- * değişimi burada ayrıca ele alınmak zorunda. Yeni bir tablo şeması
- * değiştirildiğinde ilk yazılacak yer bu dosyadır — ve yeniden kurma kalıbı
- * kopyalanmaz, `rebuildTable` çağrılır.
+ * değişimi burada ayrıca ele alınmak zorunda ve YENİ depoda çalışması kanıt
+ * değildir — doğrulama var olan bir depo dosyası üzerinde yapılır.
  *
- * `last_ts` yokluğu tek başına ALTER TABLE ADD COLUMN ile kapanır (cursors.mtime_ms
- * kalıbı). Ama `last_uuid NOT NULL` kısıtı SQLite'ta ALTER ile kaldırılamaz —
- * yalnız sütun ekleyen naif düzeltme uuid'siz checkpoint'i hâlâ yazamaz. O yüzden
- * kısıt varsa tablo yeniden kuruluyor; eski satırlar (hepsi last_uuid dolu)
- * yeni CHECK'i zaten sağlıyor.
+ * Sütun eklemek tek başına ALTER ile mümkün olurdu, ama CHECK kısıtı SQLite'ta
+ * ALTER ile KALDIRILAMAZ: eski kısıt uuid'siz ve damgasız (yalnız ofsetli)
+ * checkpoint'i reddeder, yani göç "başarılı" görünürken filigran yazılamaz
+ * hâle gelirdi. O yüzden tablo yeniden kuruluyor — kalıp kopyalanmaz,
+ * `rebuildTable` çağrılır.
  */
 function migrateWatermarks(db: DatabaseSync): void {
   const cols = db.prepare("PRAGMA table_info(observer_watermarks)").all() as {
     name: string;
     notnull: number;
   }[];
-  if (cols.length === 0) return;
+  if (cols.length === 0) return; // yeni depo: şema zaten güncel
+  if (cols.some((c) => c.name === "byte_offset")) return; // güncel
 
+  // Eski depolar iki kuşak olabilir: last_ts'li ve last_ts'siz. Eksik sütunu
+  // SELECT'te NULL ile dolduruyoruz, yoksa kopyalama SQL hatasıyla düşer.
   const hasLastTs = cols.some((c) => c.name === "last_ts");
-  const uuidNotNull = cols.some((c) => c.name === "last_uuid" && c.notnull === 1);
-  if (hasLastTs && !uuidNotNull) return; // güncel
-
-  if (!uuidNotNull) {
-    db.exec("ALTER TABLE observer_watermarks ADD COLUMN last_ts TEXT");
-    return;
-  }
 
   rebuildTable(db, "observer_watermarks", (tmp) => `
     CREATE TABLE ${tmp} (
-      project_id  INTEGER NOT NULL REFERENCES projects(id),
-      session_id  TEXT NOT NULL,
-      last_uuid   TEXT,
-      last_ts     TEXT,
-      updated_at  TEXT NOT NULL,
-      PRIMARY KEY (project_id, session_id),
-      CHECK (last_uuid IS NOT NULL OR last_ts IS NOT NULL)
+      project_id     INTEGER NOT NULL REFERENCES projects(id),
+      session_id     TEXT NOT NULL,
+      byte_offset    INTEGER,
+      delivery_key   TEXT,
+      delivery_turns INTEGER,
+      last_uuid      TEXT,
+      last_ts        TEXT,
+      updated_at     TEXT NOT NULL,
+      PRIMARY KEY (project_id, session_id)
     );
-    INSERT INTO ${tmp} (project_id, session_id, last_uuid, last_ts, updated_at)
-    SELECT project_id, session_id, last_uuid, ${hasLastTs ? "last_ts" : "NULL"}, updated_at
+    INSERT INTO ${tmp} (project_id, session_id, byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, updated_at)
+    SELECT project_id, session_id, NULL, NULL, NULL, last_uuid, ${hasLastTs ? "last_ts" : "NULL"}, updated_at
     FROM observer_watermarks;
   `);
 }

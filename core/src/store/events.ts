@@ -27,18 +27,18 @@ export type EventKind =
    * ile tek adımda döner (spec §3.2: aracın kendi hata oranı bedava birikir).
    */
   | "finding_superseded"
-  /** Filigran geri sarma denemesi engellendi (order-sensitive-watermark). */
-  | "watermark_rewind_blocked"
-  /** Parti ne uuid ne timestamp taşıyor: ilerleme kaydedilemedi, kayıp görünür. */
-  | "observer_batch_no_checkpoint"
-  /** Saklı filigran akışta hiçbir kimlikle eşleşmedi: mükerrer bulgu riski. */
-  | "watermark_match_failed"
   /**
-   * uuid eşleşti ama TEK ANLAMLI değil (mükerrer uuid ya da eşleşmenin önünde
-   * daha yeni damga): eleme yapılmadı, hepsi taze sayıldı. Mükerrer bulgu riski
-   * bilinçli tercih — alternatifi kalıcı turn kaybıydı (batch.ts'teki ölçüm).
+   * Teşhis damgasının geri sarma denemesi engellendi (order-sensitive-watermark).
+   * Kök tasarım değişikliğinden sonra kararı ETKİLEMEZ (eleme konumsal); teslimat
+   * sırasının bozulduğunu gösteren tek ucuz sinyal olduğu için yazılmaya devam.
    */
-  | "watermark_ambiguous_match"
+  | "watermark_rewind_blocked"
+  /**
+   * Transcript kısaldı/yerine yenisi kondu: saklanan bayt ofseti başka bir
+   * dosyanın ofseti olduğu için sıfırlandı. Bu teslimatta eleme yapılmaz —
+   * mükerrer bulgu mümkün, ve sebebi burada yazılı.
+   */
+  | "watermark_offset_reset"
   /** maxCalls bütçesi doldu: kalan partiler İŞLENMEDİ, filigran ilerlemedi. */
   | "observer_budget_exhausted";
 

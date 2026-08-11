@@ -79,34 +79,50 @@ test("[timestamp-watermark-turn-loss] eşit ya da geri tarihli YENİ turn tarama
   store.close();
 });
 
-test("[timestamp-watermark-turn-loss] damga ELEME ölçütü değil; monoton filigran ve checkpoint görevi durur", () => {
+// SÖZLEŞME DEĞİŞTİ (kök tasarım A). Bu test damganın "eleme ölçütü değil ama
+// uuid'siz turn'de kesici" hâlini sabitliyordu; üçüncü tur o kalıntının da kayıp
+// ürettiğini ölçtü. Damga artık karar yoluna HİÇ girmiyor; geriye yalnız
+// teşhis işi kaldı (monoton geri sarma engeli), o da burada sabit.
+test("[timestamp-watermark-turn-loss] damga eleme yolundan çıktı; monoton teşhis görevi durur", () => {
   const ts = (h: string) => `2026-08-11T${h}:00:00.000Z`;
-  // (a) uuid taşıyan turn damga yüzünden ASLA düşmez — eşit de, daha eski de.
+  const range = { from: 0, to: 400, truncated: false };
+  const wmPos = { byteOffset: 0, deliveryKey: null, deliveryTurns: null };
+
+  // (a) Damgası ne olursa olsun (eşit, geri, hiç) hiçbir turn damga yüzünden düşmez.
   const r = dropThroughWatermarkDetailed(
     [{ role: "user", text: "esit", uuid: "a1", timestamp: ts("10") },
-     { role: "user", text: "eski", uuid: "a2", timestamp: ts("09") }],
-    "bulunmayan-uuid", ts("10"),
+     { role: "user", text: "eski", uuid: "a2", timestamp: ts("09") },
+     { role: "user", text: "uuidsiz-eski", timestamp: ts("08") },
+     { role: "user", text: "damgasiz" }],
+    wmPos, range,
   );
-  assert.deepEqual(r.fresh.map((x) => x.text), ["esit", "eski"]);
+  assert.deepEqual(r.fresh.map((x) => x.text), ["esit", "eski", "uuidsiz-eski", "damgasiz"]);
+  assert.equal(r.match, "fresh");
 
-  // (b) uuid'siz turn yalnız KESİN ESKİYSE düşer.
-  const u = dropThroughWatermarkDetailed(
-    [{ role: "user", text: "eski", timestamp: ts("09") },
-     { role: "user", text: "esit", timestamp: ts("10") }],
-    null, ts("10"),
+  // (b) Eleme yapan tek şey konum.
+  const kapsanan = dropThroughWatermarkDetailed(
+    [{ role: "user", text: "esit", uuid: "a1", timestamp: ts("10") }],
+    { byteOffset: 400, deliveryKey: null, deliveryTurns: null }, range,
   );
-  assert.deepEqual(u.fresh.map((x) => x.text), ["esit"]);
+  assert.deepEqual(kapsanan.fresh, []);
 
-  // (c) Damganın KALAN iki işi aynen duruyor: monoton geri sarma engeli...
+  // (c) Damganın KALAN işi: monoton geri sarma engeli (teşhis sinyali)...
   const store = openStore(":memory:");
   const pid = upsertProject(store, { path: "/p", adapterId: "claude-code", transcriptDir: "/t" });
   setWatermark(store, { projectId: pid, sessionId: "s", lastUuid: "u9", lastTs: ts("10") });
   const w = setWatermark(store, { projectId: pid, sessionId: "s", lastUuid: "u10", lastTs: ts("03") });
   assert.equal(w.rewindBlocked?.storedTs, ts("10"));
   assert.equal(getWatermark(store, pid, "s")!.lastTs, ts("10"), "filigran geri sardı");
-  // ...ve uuid'siz parti için checkpoint kimliği.
+  // ...ve teşhis alanı olarak yazılabilirliği (karar alanı olmasa da kaydı kalır).
   setWatermark(store, { projectId: pid, sessionId: "s2", lastUuid: null, lastTs: ts("05") });
   assert.equal(getWatermark(store, pid, "s2")!.lastTs, ts("05"));
+  // (d) Ve tersi: hiç uuid/damga taşımayan, YALNIZ konumsal filigran da yazılabilmeli.
+  //     Eski şemadaki "biri dolu olmalı" CHECK kısıtı bunu reddederdi.
+  setWatermark(store, { projectId: pid, sessionId: "s3", byteOffset: 4096, deliveryKey: "b:0:4096:7", deliveryTurns: 7 });
+  const konumsal = getWatermark(store, pid, "s3")!;
+  assert.equal(konumsal.byteOffset, 4096);
+  assert.equal(konumsal.lastUuid, null);
+  assert.equal(konumsal.lastTs, null);
   store.close();
 });
 
@@ -145,6 +161,16 @@ test("[schema-migration-breaks-watermark] eski depo açılır, verisi korunur ve
   const yeni = getWatermark(store, 1, "damga-yalniz");
   assert.equal(yeni?.lastUuid, null);
   assert.equal(yeni?.lastTs, "2026-08-11T00:00:00.000Z");
+  // (b2) Kök tasarım A: ESKİ depoda KONUMSAL filigran da yazılabilmeli. Sütun
+  //      eklemek burada da yetmez — eski CHECK kısıtı ALTER ile kaldırılamıyor
+  //      ve uuid/damga taşımayan konumsal checkpoint'i reddederdi.
+  setWatermark(store, { projectId: 1, sessionId: "konumsal", byteOffset: 1234, deliveryKey: "b:0:1234:3", deliveryTurns: 3 });
+  const konumsal = getWatermark(store, 1, "konumsal");
+  assert.equal(konumsal?.byteOffset, 1234);
+  assert.equal(konumsal?.deliveryTurns, 3);
+  // Göç eski satırların konumunu UYDURMAZ: bilinmeyen ofset null kalır, ilk
+  // teslimat elenmez (kayıp yerine tekrar).
+  assert.equal(getWatermark(store, 1, "eski-oturum")?.byteOffset, null);
   store.close();
 
   // (c) Göç yeniden açmada da kararlı (idempotent).

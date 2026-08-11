@@ -1,12 +1,33 @@
 import type { Store } from "./db.ts";
 import { nowIso } from "./db.ts";
+import type { WatermarkPosition } from "../observer/batch.ts";
 
-export interface Watermark {
+/**
+ * Gözlemci filigranı. KARAR ALANLARI konumsal (byteOffset + deliveryKey/Turns);
+ * lastUuid ve lastTs yalnız TEŞHİS — hangi turn'e kadar gidildiği olay
+ * günlüğünde okunabilsin diye duruyor, eleme kararına girmiyor (kök tasarım
+ * değişikliği 11 Ağu 2026, gerekçe observer/batch.ts'te ölçümleriyle yazılı).
+ */
+export interface Watermark extends WatermarkPosition {
   projectId: number;
   sessionId: string;
-  /** Konumsal kimlik. Parti uuid taşımıyorsa null olabilir. */
   lastUuid: string | null;
-  /** Zamansal kimlik (ISO-8601 UTC). uuid tutmadığında kesim buradan yapılır. */
+  lastTs: string | null;
+}
+
+/**
+ * setWatermark girdisi. Verilmeyen (undefined) alan DEĞİŞTİRİLMEZ: filigran tek
+ * bir yazımla değil parça parça ilerliyor (parti checkpoint'i kimliği yazar,
+ * teslimat sonu ofseti yazar) ve bir yazımın diğerinin ilerlemesini silmesi
+ * sessiz veri tekrarı demek olurdu.
+ */
+export interface WatermarkInput {
+  projectId: number;
+  sessionId: string;
+  byteOffset?: number | null;
+  deliveryKey?: string | null;
+  deliveryTurns?: number | null;
+  lastUuid?: string | null;
   lastTs?: string | null;
 }
 
@@ -18,59 +39,129 @@ export interface Watermark {
  * dönüş değeriyle.
  */
 export interface WatermarkWrite {
-  /** Satır yazıldı mı. Kimliksiz (iki alanı da null) filigran yazılmaz. */
+  /** Satır yazıldı mı. Hiçbir alan taşımayan filigran yazılmaz. */
   applied: boolean;
   /**
-   * Gelen lastTs saklanandan ESKİYDİ: zamansal kimlik ilerletilmedi, saklanan
-   * korundu. Konumsal kimlik (last_uuid) yine de ilerler — bu bilinçli bir sapma:
-   * yazımı bütünüyle engellemek, işlenmiş bir partinin checkpoint'ini hiç
-   * yazmamak demek olurdu ve aynı turn'ler her koşumda yeniden işlenirdi
-   * (kapatmaya çalıştığımız sonsuz-yeniden-deneme arızasının ta kendisi).
-   * "Geri gitme" kuralı zamansal kimlikte tam olarak korunuyor: max(saklanan, gelen).
+   * Gelen lastTs saklanandan ESKİYDİ: teşhis damgası ilerletilmedi, saklanan
+   * korundu. Karar yolunu etkilemez (damga artık eleme ölçütü değil); yine de
+   * raporlanıyor, çünkü teslimat sırasının bozulduğunu gösteren tek ucuz sinyal
+   * bu ve sessiz kalırsa anomali hiç görülmez.
    */
   rewindBlocked?: { storedTs: string; incomingTs: string };
 }
 
+interface WatermarkRow {
+  byte_offset: number | null;
+  delivery_key: string | null;
+  delivery_turns: number | null;
+  last_uuid: string | null;
+  last_ts: string | null;
+}
+
 export function getWatermark(store: Store, projectId: number, sessionId: string): Watermark | null {
-  const row = store.get<{ last_uuid: string | null; last_ts: string | null }>(
-    "SELECT last_uuid, last_ts FROM observer_watermarks WHERE project_id = ? AND session_id = ?",
+  const row = store.get<WatermarkRow>(
+    `SELECT byte_offset, delivery_key, delivery_turns, last_uuid, last_ts
+     FROM observer_watermarks WHERE project_id = ? AND session_id = ?`,
     projectId,
     sessionId,
   );
-  return row ? { projectId, sessionId, lastUuid: row.last_uuid, lastTs: row.last_ts } : null;
+  if (!row) return null;
+  return {
+    projectId,
+    sessionId,
+    byteOffset: row.byte_offset,
+    deliveryKey: row.delivery_key,
+    deliveryTurns: row.delivery_turns,
+    lastUuid: row.last_uuid,
+    lastTs: row.last_ts,
+  };
 }
 
-export function setWatermark(store: Store, wm: Watermark): WatermarkWrite {
-  const lastUuid = wm.lastUuid ?? null;
-  const lastTs = wm.lastTs ?? null;
-  // Kimliksiz filigran hiçbir şey elemez, üstelik var olanı bozar.
-  if (lastUuid === null && lastTs === null) return { applied: false };
+export function setWatermark(store: Store, wm: WatermarkInput): WatermarkWrite {
+  const stored = getWatermark(store, wm.projectId, wm.sessionId);
+  // Hiçbir değer taşımayan ilk yazım satırı boş yere yaratırdı: ne eler ne
+  // ilerletir. Var olan satırda ise kısmi güncelleme meşru (aşağıdaki alan
+  // birleştirme kuralları), o yüzden ölçüt "yeni satır mı" ile birlikte.
+  const hasValue = [wm.byteOffset, wm.deliveryKey, wm.deliveryTurns, wm.lastUuid, wm.lastTs]
+    .some((v) => v != null);
+  if (!hasValue && stored === null) return { applied: false };
 
-  const storedTs = getWatermark(store, wm.projectId, wm.sessionId)?.lastTs ?? null;
-  // Zamansal kimlik MONOTON: asla küçülmez. Transcript satır sırası zaman
-  // sırasıyla birebir olmayabildiği için "gelen daha eski" normal bir olay,
-  // ama filigranın geri sarması değil.
+  // Ofset MONOTON ve NULL'la silinemez: geri gitmek işlenmiş baytları yeniden
+  // teslim etmek, silmek ise "hiç işlenmedi" demektir. Kısalmada anlamını
+  // yitiren ofsetin sıfırlanması ayrı ve AÇIK bir işlem (resetWatermarkOffset),
+  // çünkü örtük sıfırlama sessiz tam-tekrar üretir.
+  const incomingOffset = wm.byteOffset ?? null;
+  const nextOffset =
+    incomingOffset === null
+      ? stored?.byteOffset ?? null
+      : stored?.byteOffset == null
+        ? incomingOffset
+        : Math.max(stored.byteOffset, incomingOffset);
+
+  // Kimlik: yeni teslimat kimliği eskisinin üstüne yazılır (yarım kalan eski
+  // teslimat artık geri gelmeyecek). AYNI kimlikte ilerleme yalnız artar.
+  const nextKey = wm.deliveryKey === undefined ? stored?.deliveryKey ?? null : wm.deliveryKey;
+  const incomingTurns = wm.deliveryTurns === undefined ? null : wm.deliveryTurns;
+  const nextTurns =
+    incomingTurns === null
+      ? nextKey === (stored?.deliveryKey ?? null) ? stored?.deliveryTurns ?? null : null
+      : nextKey === (stored?.deliveryKey ?? null) && stored?.deliveryTurns != null
+        ? Math.max(stored.deliveryTurns, incomingTurns)
+        : incomingTurns;
+
+  const lastUuid = wm.lastUuid === undefined ? stored?.lastUuid ?? null : wm.lastUuid;
+  const incomingTs = wm.lastTs === undefined ? null : wm.lastTs;
+  const storedTs = stored?.lastTs ?? null;
   const rewindBlocked =
-    storedTs !== null && lastTs !== null && lastTs < storedTs
-      ? { storedTs, incomingTs: lastTs }
+    storedTs !== null && incomingTs !== null && incomingTs < storedTs
+      ? { storedTs, incomingTs }
       : undefined;
-  const nextTs = storedTs === null ? lastTs : lastTs === null || lastTs < storedTs ? storedTs : lastTs;
+  const nextTs =
+    storedTs === null ? incomingTs : incomingTs === null || incomingTs < storedTs ? storedTs : incomingTs;
 
   store.run(
-    `INSERT INTO observer_watermarks (project_id, session_id, last_uuid, last_ts, updated_at)
-     VALUES (?,?,?,?,?)
+    `INSERT INTO observer_watermarks
+       (project_id, session_id, byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, updated_at)
+     VALUES (?,?,?,?,?,?,?,?)
      ON CONFLICT (project_id, session_id) DO UPDATE SET
+       byte_offset = excluded.byte_offset,
+       delivery_key = excluded.delivery_key,
+       delivery_turns = excluded.delivery_turns,
        last_uuid = excluded.last_uuid,
        last_ts = excluded.last_ts,
        updated_at = excluded.updated_at`,
     wm.projectId,
     wm.sessionId,
-    // last_uuid ÜZERİNE yazılır, NULL'a bile: eski bir uuid saklı kalırsa
-    // tekrar-teslimde konumsal kesim ONU bulup arada işlenmiş turn'leri yeniden
-    // üretir — yani daha yeni olan zamansal kimliği etkisiz kılardı.
+    nextOffset,
+    nextKey,
+    nextTurns,
     lastUuid,
     nextTs,
     nowIso(),
   );
   return rewindBlocked ? { applied: true, rewindBlocked } : { applied: true };
+}
+
+/**
+ * Kısalma/yerine koyma sonrası konumsal durumu siler. Ofset uzayı sıfırlandığı
+ * için saklanan ofset artık BAŞKA bir baytı gösteriyor; monoton ilerleme kuralı
+ * onu koruduğu sürece yeni dosyanın tamamı "işlenmiş" sayılır — sessiz ve kalıcı
+ * turn kaybı. Teşhis alanları (uuid, damga) korunuyor: kısalmadan önce nereye
+ * gelindiği olay günlüğünden okunabilmeli.
+ *
+ * Dönüş: sıfırlanacak bir konumsal durum var mıydı (çağıran olayı ancak o zaman
+ * yazsın; her kısalma için olay yazmak gürültü olurdu).
+ */
+export function resetWatermarkOffset(store: Store, projectId: number, sessionId: string): boolean {
+  const stored = getWatermark(store, projectId, sessionId);
+  if (stored === null || (stored.byteOffset === null && stored.deliveryKey === null)) return false;
+  store.run(
+    `UPDATE observer_watermarks
+     SET byte_offset = NULL, delivery_key = NULL, delivery_turns = NULL, updated_at = ?
+     WHERE project_id = ? AND session_id = ?`,
+    nowIso(),
+    projectId,
+    sessionId,
+  );
+  return true;
 }

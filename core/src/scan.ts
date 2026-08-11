@@ -6,6 +6,7 @@
 
 import type { Store } from "./store/db.ts";
 import type { DiscoveredProject, DiscoveredSession, TranscriptAdapter, Turn } from "./types.ts";
+import type { DeliveryRange } from "./observer/batch.ts";
 import { upsertProject, getCursor, getCursorByInode, setCursor, markScanned } from "./store/projects.ts";
 import { logEvent } from "./store/events.ts";
 import { readIncremental } from "./adapters/claude-code.ts";
@@ -60,8 +61,21 @@ export interface ScanOptions {
   root?: string;
   /** Yalnız bu proje yollarını tara. */
   only?: string[];
-  /** Süzülmüş turn'ler buraya akar. M1'de sayaç, M2'de gözlemci. */
-  onTurns?: (ctx: { projectId: number; sessionId: string; turns: Turn[] }) => void | Promise<void>;
+  /**
+   * Süzülmüş turn'ler buraya akar. M1'de sayaç, M2'de gözlemci.
+   *
+   * `range` TESLİMATIN KENDİ KİMLİĞİ: bu turn'ler dosyanın [from, to) bayt
+   * aralığından çıktı. Tüketici "bunları daha önce işledim mi" sorusunu
+   * turn'lerin içeriğinden TAHMİN etmek zorunda kalmasın diye taşınıyor —
+   * tarama o cevabı zaten kesin biliyor (kök tasarım değişikliği 11 Ağu 2026;
+   * ölçümler observer/batch.ts'te).
+   */
+  onTurns?: (ctx: {
+    projectId: number;
+    sessionId: string;
+    turns: Turn[];
+    range: DeliveryRange;
+  }) => void | Promise<void>;
   /** Kilit sahibi kimliği; testlerde iki taramayı ayırt etmek için. */
   lockHolder?: string;
 }
@@ -236,11 +250,19 @@ async function scanSession(
 
     // onTurns ÖNCE, imleç SONRA: teslim en-az-bir-kez sözleşmesidir. Gözlemci
     // yazıp da imleç yazılmadan çökerse aynı turn tekrar gelir — kabul edilen
-    // bedel bu; ters sıra ise turn'ü kalıcı olarak kaybederdi. M2 tekrarı
-    // source_ref (oturum + uuid) ile elemek zorunda.
+    // bedel bu; ters sıra ise turn'ü kalıcı olarak kaybederdi. Tekrarı tüketici
+    // teslimatın bayt aralığıyla eler (aşağıdaki `range`).
     if (opts.onTurns && res.turns.length > 0) {
+      // Kısalmada okuma 0'dan başladı: aralığın başı da 0'dır. Eski `from`
+      // değeri artık başka bir dosyanın ofseti — taşınırsa tüketici işlenmiş
+      // sayıp yeni dosyanın başını atlar.
+      const range: DeliveryRange = {
+        from: res.truncated ? 0 : from,
+        to: res.byteOffset,
+        truncated: res.truncated,
+      };
       try {
-        await opts.onTurns({ projectId, sessionId: session.sessionId, turns: res.turns });
+        await opts.onTurns({ projectId, sessionId: session.sessionId, turns: res.turns, range });
       } catch (err) {
         // İmleç yazılmadan yeniden fırlatılıyor: turn kaybolmaz, sonraki
         // taramada yeniden teslim edilir (en-az-bir-kez).

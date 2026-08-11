@@ -18,7 +18,7 @@ import {
 import type { Turn } from "./types.ts";
 import { getWatermark } from "./store/watermarks.ts";
 import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
-import { dropThroughWatermark } from "./observer/batch.ts";
+import { dropThroughWatermark, type DeliveryRange } from "./observer/batch.ts";
 import { basename, dirname } from "node:path";
 
 register(claudeCodeAdapter);
@@ -247,7 +247,8 @@ async function cmdObserve(): Promise<void> {
           only: arg("project") ? [arg("project")!] : undefined,
           onTurns: budgetGuardedOnTurns(
             () => observer.stats.budgetExhausted,
-            (ctx: { projectId: number; sessionId: string; turns: Turn[] }) => observer.handleTurns(ctx),
+            (ctx: { projectId: number; sessionId: string; turns: Turn[]; range: DeliveryRange }) =>
+              observer.handleTurns(ctx),
           ),
         });
       }
@@ -297,12 +298,21 @@ async function observeSingleSession(
       transcriptDir: dirname(sessionPath), // dizin, dosya değil — projects sözleşmesi
     });
     // İmleçlere DOKUNULMAZ: imleç taramanın, filigran gözlemcinin (D-M2-2).
-    const res = await readIncremental(sessionPath, 0, null, null);
+    // Okuma FİLİGRANIN ofsetinden başlıyor — filigran artık bir bayt ofseti
+    // olduğu için gözlemcinin kendi ilerlemesi burada da kullanılabiliyor.
+    // Eskiden dosya her koşumda 0'dan okunuyordu ve eleme içerik kimliğine
+    // kaldığı için `--session` aynı oturumu tekrar tekrar Codex'e gönderiyordu.
     const wm = getWatermark(store, projectId, sessionId);
-    // Zaman damgası da bir filigran kimliği (batch.ts): uuid tutmayınca eleme
-    // yapılmazsa önizleme "hepsi yeni" sanıp şişiyor ve --yes kapısını
-    // gereksiz tetikliyordu. Observer'ın kendi elemesiyle aynı ölçüt kullanılmalı.
-    const fresh = dropThroughWatermark(res.turns, wm?.lastUuid ?? null, wm?.lastTs ?? null);
+    const from = wm?.byteOffset ?? 0;
+    const res = await readIncremental(sessionPath, from, null, null);
+    const range: DeliveryRange = {
+      from: res.truncated ? 0 : from,
+      to: res.byteOffset,
+      truncated: res.truncated,
+    };
+    // Önizleme gözlemcinin KENDİ kararıyla aynı fonksiyondan çıkıyor: iki ayrı
+    // ölçüt, maliyet kapısının yanlış sayıya bakması demek olurdu.
+    const fresh = dropThroughWatermark(res.turns, wm, range);
 
     let filteredBytes = 0;
     for (const t of fresh) filteredBytes += Buffer.byteLength(t.text, "utf8");
@@ -316,7 +326,9 @@ async function observeSingleSession(
       console.error(gate.reason);
       return true;
     }
-    await observer.handleTurns({ projectId, sessionId, turns: fresh });
+    // Turn'ler SÜZÜLMEDEN veriliyor: eleme kararı gözlemcinin, ve aynı aralığın
+    // kimliği ancak listenin tamamıyla hesaplanırsa tarama yolununkiyle örtüşür.
+    await observer.handleTurns({ projectId, sessionId, turns: res.turns, range });
     return false;
   } finally {
     releaseScanLock(store, holder);

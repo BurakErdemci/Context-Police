@@ -36,27 +36,32 @@ CREATE TABLE IF NOT EXISTS cursors (
   last_seen_at TEXT
 );
 
--- Gözlemci filigranı: oturum başına son işlenen turn uuid'i (D-M2-2).
+-- Gözlemci filigranı: oturum başına "nereye kadar gözlemlendi" (D-M2-2).
 -- İmleçten AYRI, çünkü işleri farklı: imleç "nereden okunacak"ı, filigran
 -- "nereye kadar gözlemlendi"yi tutar. Teslim en-az-bir-kez olduğu için ikisi
 -- ayrışabilir; filigran bulgularla aynı tx'te ilerleyerek mükerrer üretimi keser.
 -- Turn içeriği burada YOK — transcript zaten diskte, depoda turn tablosu olmaz.
 --
--- Filigranın İKİ kimliği var (denetim: order-sensitive-watermark +
--- missing-checkpoint-identity). last_uuid konumsal ve KESİN ama kırılgan:
--- akışta bulunamazsa hiçbir şey elenmiyordu, ve uuid taşımayan parti hiç
--- checkpoint yazamadığı için sonsuz yeniden denemeye giriyordu. last_ts ikinci
--- kimlik: uuid tutmadığında kesim buradan yapılır, geri sarma buradan engellenir.
--- İkisi de NULL olabilir değil — biri olmadan checkpoint yazılmaz (çağıran
--- tarafta "observer_batch_no_checkpoint" olayına düşer).
+-- KİMLİK KONUMSAL (kök tasarım değişikliği, 11 Ağu 2026). Üç doğrulama turu
+-- "işlendi mi" sorusunu turn'ün İÇERİĞİNDEN (uuid + damga) cevaplamanın her
+-- seferinde yeni bir kayıp ürettiğini ölçtü. Oysa okuma hangi bayt aralığını
+-- getirdiğini KESİN biliyor:
+--   byte_offset     bu ofsete kadarki her bayt işlendi (monoton; kısalmada NULL'lanır)
+--   delivery_key    yarım kalmış teslimatın kimliği ([from,to,turn sayısı] ya da içerik özeti)
+--   delivery_turns  o teslimatın kaç turn'lük ön eki işlendi (bütçe/çökme sonrası devam noktası)
+-- last_uuid ve last_ts KARAR ALANI DEĞİL, yalnız teşhis: hangi turn'e kadar
+-- gidildiği olay günlüğünde okunabilsin diye duruyor. Bu yüzden eski
+-- "biri dolu olmalı" CHECK kısıtı da kaldırıldı — kimliği artık ofset taşıyor.
 CREATE TABLE IF NOT EXISTS observer_watermarks (
-  project_id  INTEGER NOT NULL REFERENCES projects(id),
-  session_id  TEXT NOT NULL,
-  last_uuid   TEXT,
-  last_ts     TEXT,
-  updated_at  TEXT NOT NULL,
-  PRIMARY KEY (project_id, session_id),
-  CHECK (last_uuid IS NOT NULL OR last_ts IS NOT NULL)
+  project_id     INTEGER NOT NULL REFERENCES projects(id),
+  session_id     TEXT NOT NULL,
+  byte_offset    INTEGER,
+  delivery_key   TEXT,
+  delivery_turns INTEGER,
+  last_uuid      TEXT,
+  last_ts        TEXT,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (project_id, session_id)
 );
 
 -- Aynı anda iki tarama aynı imleci okuyup aynı aralığı iki kez teslim

@@ -211,43 +211,41 @@ test("[unsanitized-anchor-value] sahte çapa bulguyu active yapamaz: parti hiç 
 
 // --- class: order-sensitive-watermark ---
 
-// SÖZLEŞME DEĞİŞTİ (doğrulama turu, bulgu: timestamp-watermark-turn-loss).
-// Bu test eskiden "uuid bulunamazsa zaman damgası keser" diyordu ve uuid TAŞIYAN
-// turn'lerin damgayla düşmesini sabitliyordu. Ölçüm o sözleşmeyi çürüttü: gerçek
-// turn'lerin %11,55'i aynı oturumda bir başkasıyla AYNI damgayı paylaşıyor, yani
-// damga sıralama anahtarı değil ve uuid'li turn'ü damgayla elemek yeni turn'ü
-// kalıcı olarak düşürüyordu. Yeni sözleşme batch.ts'te gerekçesiyle yazılı.
-test("[timestamp-watermark-turn-loss] damga kesimi YALNIZ uuid'siz turn'e uygulanır", () => {
-  const turns = [t("a", "x1", "2026-08-11T10:00:00.000Z"), t("b", "x2", "2026-08-11T11:00:00.000Z")];
-  const r = dropThroughWatermarkDetailed(turns, "eskiden-baska-bir-uuid", "2026-08-11T10:00:00.000Z");
-  assert.deepEqual(r.fresh.map((x) => x.text), ["a", "b"], "uuid taşıyan turn damga yüzünden düştü");
-  // Bu NORMAL ileri teslimat: filigranla eşit damgalı yeni turn (gerçek veride
-  // %11,55) + daha yenisi. Eleyecek bir şey yok, olay da yazılmamalı — eşitliği
-  // şüphe saymak taramaların ~%11'ini gürültüye çevirirdi.
-  assert.equal(r.match, "timestamp");
+// SÖZLEŞME DEĞİŞTİ İKİNCİ KEZ (kök tasarım A, 11 Ağu 2026). Önce "uuid
+// bulunamazsa damga keser" idi; doğrulama turu bunu çürütünce "damga yalnız
+// uuid'siz turn'ü keser"e daralmıştı. Üçüncü tur o daraltmanın da kayıp
+// ürettiğini ölçtü (uuid'siz + geri damgalı YENİ turn düşüyordu). Kök sebep
+// ortak: damga da uuid de turn'ün İÇERİK kimliği ve "bu işlendi mi" sorusuna
+// cevap veremiyor. Yeni sözleşme: karar KONUMSAL, damga karar yoluna hiç girmez.
+test("[timestamp-watermark-turn-loss] damga ve uuid ELEME KARARINI ETKİLEMEZ", () => {
+  const range = { from: 0, to: 500, truncated: false };
+  const wm = (byteOffset: number | null) => ({ byteOffset, deliveryKey: null, deliveryTurns: null });
 
-  // Tekrar-teslim şüphesi ise görünür kalmalı: uuid taşıyan ama damgası
-  // filigrandan KESİN ESKİ turn, konumsal kesim tutmadığı hâlde işlenmiş olabilir.
-  const supheli = dropThroughWatermarkDetailed(
-    [t("a", "x1", "2026-08-11T09:00:00.000Z")], "eskiden-baska-bir-uuid", "2026-08-11T10:00:00.000Z",
+  // (a) Damgası filigranın altında kalan (eşit ya da geri tarihli) turn'ler:
+  //     eskiden düşüyorlardı, artık konum kararı verdiği için hepsi geçiyor.
+  const eskiDamgali = [t("esit", "x1", "2026-08-11T10:00:00.000Z"), t("geri", "x2", "2026-08-11T09:00:00.000Z")];
+  assert.deepEqual(
+    dropThroughWatermarkDetailed(eskiDamgali, wm(0), range).fresh.map((x) => x.text),
+    ["esit", "geri"],
   );
-  assert.deepEqual(supheli.fresh.map((x) => x.text), ["a"], "şüpheli turn yine de düşürülmemeli");
-  assert.equal(supheli.match, "none", "mükerrer riski sessiz kaldı");
 
-  // uuid'siz turn'de damga hâlâ kesiyor: KESİN ESKİ düşer, EŞİT düşmez.
+  // (b) uuid'siz + geri damgalı turn de düşmez (3. turun ölçtüğü kayıp).
   const uuidsiz = dropThroughWatermarkDetailed(
-    [t("eski", undefined, "2026-08-11T09:00:00.000Z"), t("esit", undefined, "2026-08-11T10:00:00.000Z"),
-     t("yeni", undefined, "2026-08-11T11:00:00.000Z")],
-    null,
-    "2026-08-11T10:00:00.000Z",
+    [t("uuidsiz-geri", undefined, "2026-08-11T09:00:00.000Z")], wm(0), range,
   );
-  assert.deepEqual(uuidsiz.fresh.map((x) => x.text), ["esit", "yeni"]);
-  assert.equal(uuidsiz.match, "timestamp");
+  assert.deepEqual(uuidsiz.fresh.map((x) => x.text), ["uuidsiz-geri"]);
+  assert.equal(uuidsiz.match, "fresh");
 
-  // Kimlik hiç tutmuyorsa davranış aynı (hepsi yeni) ama SESSİZ değil.
-  const none = dropThroughWatermarkDetailed([t("a", "x1")], "yok", "2026-08-11T10:00:00.000Z");
-  assert.equal(none.fresh.length, 1);
-  assert.equal(none.match, "none");
+  // (c) Mükerrer uuid: eskiden "belirsiz" saydırıp özel bir dala sokuyordu.
+  //     Artık kararın girdisi değil — aynı aralık, aynı sonuç.
+  const mukerrer = [t("kopya", "dup", "2026-08-11T01:00:00.000Z"), t("arada", "n1", "2026-08-11T02:00:00.000Z"),
+                    t("kopya2", "dup", "2026-08-11T01:00:00.000Z")];
+  assert.equal(dropThroughWatermarkDetailed(mukerrer, wm(0), range).fresh.length, 3);
+
+  // (d) Elemenin TEK ölçütü konum: ofset teslimatın sonunu kapsıyorsa hiçbiri kalmaz.
+  const kapsanan = dropThroughWatermarkDetailed(eskiDamgali, wm(500), range);
+  assert.deepEqual(kapsanan.fresh, []);
+  assert.equal(kapsanan.match, "already-processed");
 });
 
 // SÖZLEŞME DEĞİŞTİ (doğrulama turu, bulgu: timestamp-watermark-turn-loss).
@@ -296,18 +294,25 @@ test("[order-sensitive-watermark] zamansal kimlik geri sarmaz ve anomali olaya d
   assert.equal(getWatermark(store, pid, "s1")!.lastTs, "2026-08-11T09:00:00.000Z", "filigran geri sardı");
   assert.equal(getWatermark(store, pid, "s1")!.lastUuid, "u3", "konumsal ilerleme kaybolmamalı");
 
-  // Gözlemci yolundan: satır sırası zaman sırasıyla aynı değilse.
+  // Gözlemci yolundan: satır sırası zaman sırasıyla aynı değilse. Teslimatlar
+  // artık ARALIK taşıyor (kök tasarım A), o yüzden ikinci teslimatta yalnız YENİ
+  // baytlar geliyor — geri damgalı turn tek başına bir partiye düşüyor ve
+  // filigranın teşhis damgasını geri sarmaya çalışan hâl tam olarak budur
+  // (ölçüm: gerçek turn'lerin %0,70'i bir öncekinden geri damga taşıyor).
   const store2 = openStore(":memory:");
   const pid2 = upsertProject(store2, { path: "/p2", adapterId: "claude-code", transcriptDir: "/t" });
   const exec = fakeExecutor([]);
   const obs = new Observer({ store: store2, executor: exec, batchTokens: 500 });
-  await obs.handleTurns({ projectId: pid2, sessionId: "s1", turns: [
-    t("a", "u1", "2026-08-11T01:00:00.000Z"), t("b", "u2", "2026-08-11T09:00:00.000Z"),
-  ]});
-  await obs.handleTurns({ projectId: pid2, sessionId: "s1", turns: [
-    t("a", "u1", "2026-08-11T01:00:00.000Z"), t("b", "u2", "2026-08-11T09:00:00.000Z"),
-    t("c", "u3", "2026-08-11T03:00:00.000Z"),
-  ]});
+  await obs.handleTurns({
+    projectId: pid2, sessionId: "s1",
+    turns: [t("a", "u1", "2026-08-11T01:00:00.000Z"), t("b", "u2", "2026-08-11T09:00:00.000Z")],
+    range: { from: 0, to: 200, truncated: false },
+  });
+  await obs.handleTurns({
+    projectId: pid2, sessionId: "s1",
+    turns: [t("c", "u3", "2026-08-11T03:00:00.000Z")],
+    range: { from: 200, to: 300, truncated: false },
+  });
   assert.equal(countEvents(store2, "watermark_rewind_blocked"), 1, "geri sarma denemesi sessiz kaldı");
   assert.equal(getWatermark(store2, pid2, "s1")!.lastTs, "2026-08-11T09:00:00.000Z");
   assert.equal(getWatermark(store2, pid2, "s1")!.lastUuid, "u3");
@@ -315,13 +320,23 @@ test("[order-sensitive-watermark] zamansal kimlik geri sarmaz ve anomali olaya d
   store2.close();
 });
 
-test("[order-sensitive-watermark] eşleşmeyen filigran görünür olay bırakır", async () => {
+// SÖZLEŞME DEĞİŞTİ (kök tasarım A). "Filigran akışta eşleşmedi" diye bir hâl
+// artık YOK: eşleşme aranan şey içerik kimliğiydi ve karar yolundan çıktı.
+// Yerine geçen iddia: teşhis alanları dolu ama KONUMSAL durum boş olan bir
+// filigran (eski depodan göç etmiş satır) eleme yapmaz — ve bu sessiz bir kayıp
+// değil, bilinçli tekrar; ilk teslimat kendi konumunu yazar, ikincisi elenir.
+test("[order-sensitive-watermark] konumsuz (göç etmiş) filigran eleme yapmaz, ilk teslimatta konumunu kurar", async () => {
   const { store, pid } = setup();
   setWatermark(store, { projectId: pid, sessionId: "s1", lastUuid: "hic-gelmeyecek-uuid" });
   const obs = new Observer({ store, executor: fakeExecutor([]) });
-  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns: [t("a", "u1")] });
+  const turns = [t("a", "u1")];
+  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
+  assert.equal(obs.stats.skippedTurns, 0, "konumsal bilgi yokken eleme yapıldı: kayıp riski");
 
-  assert.equal(countEvents(store, "watermark_match_failed"), 1, "mükerrer riski sessizce geçti");
+  const wm = getWatermark(store, pid, "s1")!;
+  assert.ok(wm.deliveryKey !== null, "teslimat kimliği yazılmadı: tekrar elenemez");
+  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
+  assert.equal(obs.stats.skippedTurns, 1, "aynı teslimat ikinci kez işlendi");
   store.close();
 });
 
@@ -337,13 +352,12 @@ test("[missing-checkpoint-identity] parti lastTs'i partideki EN BÜYÜK damgadı
   assert.equal(batches[0]!.lastTs, "2026-08-11T09:00:00.000Z");
 });
 
-// SÖZLEŞME DARALDI (doğrulama turu, bulgu: timestamp-watermark-turn-loss).
-// uuid'siz parti hâlâ checkpoint YAZIYOR ve tekrar-teslimin büyük kısmını eliyor;
-// elenmeyen tek şey SINIR turn'ü, yani damgası tam olarak filigrana eşit olanlar.
-// Sebep: eşit damga, "işlenmiş" ile "aynı saniyede gelen yeni turn"ü ayırt
-// etmiyor (gerçek veride turn'lerin %11,55'i damga paylaşıyor) ve yanlış tarafa
-// düşmenin bedeli asimetrik — mükerrer bulgu geri alınabilir, kayıp turn alınamaz.
-test("[missing-checkpoint-identity] uuid'siz parti checkpoint yazar: yalnız sınır turn'ü yeniden gelir", async () => {
+// SÖZLEŞME GENİŞLEDİ (kök tasarım A). Önceki hâl "uuid'siz partide tekrar-
+// teslimin BÜYÜK KISMI elenir, sınır turn'ü yeniden gelir" diyordu; sınır turn'ü
+// eşit damganın ayırt edememesinden kalan artıktı. Konumsal kimlikte böyle bir
+// sınır yok: aynı teslimat tamamen eleniyor, uuid'siz olması hiçbir şeyi
+// değiştirmiyor.
+test("[missing-checkpoint-identity] uuid'siz teslimat da TAMAMEN elenir: sınır turn'ü kalmaz", async () => {
   const { store, pid } = setup();
   const exec = fakeExecutor([{ output: JSON.stringify({ findings: [{ content: "bir", anchors: [] }] }) }]);
   const obs = new Observer({ store, executor: exec });
@@ -352,10 +366,9 @@ test("[missing-checkpoint-identity] uuid'siz parti checkpoint yazar: yalnız sı
   await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
   await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
 
-  assert.equal(exec.calls.length, 2, "checkpoint hiç elemedi");
-  // Kesim gerçekten çalıştı: ikinci çağrıda YALNIZ sınır turn'ü var.
-  assert.ok(!exec.calls[1]!.prompt.includes("[user] a"), "eski turn de yeniden işlendi");
-  assert.ok(exec.calls[1]!.prompt.includes("[user] b"));
+  assert.equal(exec.calls.length, 1, "aynı teslimat ikinci kez ücretlendirildi");
+  assert.equal(obs.stats.skippedTurns, 2);
+  // Teşhis alanları yine yazılıyor: nereye kadar gidildiği okunabilmeli.
   assert.equal(getWatermark(store, pid, "s1")!.lastTs, "2026-08-11T02:00:00.000Z");
   assert.equal(getWatermark(store, pid, "s1")!.lastUuid, null);
   store.close();
@@ -382,26 +395,39 @@ test("[missing-checkpoint-identity] uuid'siz ZEHİRLİ parti sonsuz maliyet dön
   await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
 
   // ASIL İDDİA: TEK teslimat sonsuz denemeye dönmez. Zehirli parti en fazla bir
-  // düzeltme turu görür (spec §3.7) ve durur — bunun ölçüsü çağrı sayısının
-  // teslimat başına SABİT kalmasıdır, sıfır olması değil. (Doğrulama turunda
-  // tek turn'lük uuid'siz parti artık sınır turn'ü olduğu için elenmiyor:
-  // timestamp-watermark-turn-loss, yukarıdaki gerekçe.)
+  // düzeltme turu görür (spec §3.7) ve durur. Kök tasarım A ile iddia GÜÇLENDİ:
+  // aynı teslimat ikinci kez HİÇ ücretlendirilmiyor — eskiden uuid'siz sınır
+  // turn'ü elenemediği için teslimat başına 2 çağrı tekrar ediyordu.
   assert.equal(calls, 2, "önkoşul: bir düzeltme turu, sonra dur");
   await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
-  assert.equal(calls, 4, "teslimat başına maliyet sabit değil");
-  assert.equal(countEvents(store, "observer_batch_unprocessed"), 2);
+  assert.equal(calls, 2, "aynı zehirli teslimat yeniden ücretlendirildi");
+  assert.equal(countEvents(store, "observer_batch_unprocessed"), 1);
   assert.equal(getWatermark(store, pid, "s1")!.lastTs, "2026-08-11T01:00:00.000Z");
   store.close();
 });
 
-test("[missing-checkpoint-identity] hiçbir kimlik yoksa kayıp SESSİZ değil", async () => {
+// SÖZLEŞME DEĞİŞTİ (kök tasarım A). Eski iddia: "ne uuid ne damga taşıyan parti
+// checkpoint yazamaz, o yüzden kayıp en azından GÖRÜNÜR olsun". Kök değişiklikle
+// bu arıza sınıfı YAPISAL OLARAK ortadan kalktı — kimlik teslimatın kendisinde,
+// turn'ün içeriğinde değil; kimliksiz turn diye bir şey yok, dolayısıyla
+// raporlanacak kayıp da yok.
+test("[missing-checkpoint-identity] kimliksiz turn de checkpoint yazar: kayıp sınıfı kapandı", async () => {
   const { store, pid } = setup();
   const exec = fakeExecutor([]);
   const obs = new Observer({ store, executor: exec });
-  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns: [t("kimliksiz")] });
+  const turns = [t("kimliksiz")];
+  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
 
-  assert.equal(getWatermark(store, pid, "s1"), null, "kimliksiz filigran yazılmamalı");
-  assert.equal(countEvents(store, "observer_batch_no_checkpoint"), 1, "kayıp görünmez kaldı");
+  const wm = getWatermark(store, pid, "s1");
+  assert.ok(wm !== null, "checkpoint yazılamadı: turn her koşumda yeniden işlenir");
+  assert.equal(wm!.lastUuid, null);
+  assert.equal(wm!.lastTs, null);
+  assert.equal(wm!.deliveryTurns, 1, "ilerleme teslimat kimliğiyle kaydedilmeli");
+  assert.equal(countEvents(store, "observer_batch_no_checkpoint"), 0, "artık olmayan olay yazıldı");
+
+  // Ve ölçülebilir sonucu: ikinci teslimat bedava.
+  await obs.handleTurns({ projectId: pid, sessionId: "s1", turns });
+  assert.equal(exec.calls.length, 1, "kimliksiz turn sonsuz yeniden işleniyor");
   store.close();
 });
 
