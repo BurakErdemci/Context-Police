@@ -80,6 +80,17 @@ export type EventKind =
   /** Proje git deposu değil (ya da commit'siz): çapa sinyali KAPALI koştu. */
   | "anchor_signal_disabled"
   /**
+   * TEK bir çapanın git ölçümü arızalandı (bozuk repo, erişilemez promisor
+   * remote, git binary'si yok, zaman aşımı, maxBuffer taşması). Çapa
+   * `unverifiable` sayılır, skora katkı vermez.
+   * Gerekçe (denetim 2026-08-11, error-path turu): arıza eskiden `missing_now`
+   * hükmüne dönüşüyordu; artık dönüşmüyor, ama SESSİZ kalması da kabul değil —
+   * "git söyleyemedi" ile "dosya gitti" kullanıcı için aynı şey değil, ve
+   * arızanın kendisi (yanlış yapılandırılmış klon, kısmi klon) düzeltilebilir
+   * bir durum. Detay: çapa + hangi komut + sınıflandırılmış sebep.
+   */
+  | "anchor_measurement_failed"
+  /**
    * Bir bulgunun skoru hesaplandı. `reasons` skoru ÜRETEN çapaları taşır;
    * `states` ise çapaların TAMAMININ durum sayımını. İkisi ayrı, çünkü
    * `unverifiable` ve `never_existed` skor üretmediği için reasons'ta hiç

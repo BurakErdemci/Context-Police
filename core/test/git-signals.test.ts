@@ -45,23 +45,31 @@ test("openGit: repo tanınır, git olmayan dizinde null", async () => {
   assert.equal(await openGit(tmpDir("cp-nogit-"), { fetch: false }), null);
 });
 
+// Yardımcılar `Measured<T>` döndürüyor (denetim 2026-08-11): "hayır" ile
+// "ölçemedim" ayrı değerler. deepEqual ikisini birden sınar — `.value`'ya
+// bakan bir kısayol, arıza hâlinde undefined görüp sessizce yanlış cevap
+// verebilirdi. `{ok:true}` beklentisi aynı zamanda "ölçüm gerçekten yapıldı"
+// iddiasıdır.
+const yes = { ok: true, value: true };
+const no = { ok: true, value: false };
+
 test("dosya sinyalleri: var / silinmiş-ama-geçmişte-var / hiç-var-olmamış üçlüsü ayrışır", async () => {
   const ctx = (await openGit(repo, { fetch: false }))!;
-  assert.equal(await fileExistsAt(ctx, "HEAD", "src/a.ts"), true);
-  assert.equal(await fileExistsAt(ctx, "HEAD", "src/b.ts"), false);
-  assert.equal(await fileEverExisted(ctx, "src/b.ts"), true);   // silinmiş → missing_now hammaddesi
-  assert.equal(await fileEverExisted(ctx, "src/hayalet.ts"), false); // → never_existed hammaddesi
-  assert.equal(await commitsTouching(ctx, "HEAD", "src/a.ts", "1970-01-01T00:00:00Z"), 2);
+  assert.deepEqual(await fileExistsAt(ctx, "HEAD", "src/a.ts"), yes);
+  assert.deepEqual(await fileExistsAt(ctx, "HEAD", "src/b.ts"), no);
+  assert.deepEqual(await fileEverExisted(ctx, "src/b.ts"), yes);   // silinmiş → missing_now hammaddesi
+  assert.deepEqual(await fileEverExisted(ctx, "src/hayalet.ts"), no); // → never_existed hammaddesi
+  assert.deepEqual(await commitsTouching(ctx, "HEAD", "src/a.ts", "1970-01-01T00:00:00Z"), { ok: true, value: 2 });
 });
 
 test("sembol sinyalleri: kayıp sembol geçmişte aranır; sha varlığı", async () => {
   const ctx = (await openGit(repo, { fetch: false }))!;
-  assert.equal(await symbolExists(ctx, null, "yeniSembol"), true);   // null ref = çalışma ağacı
-  assert.equal(await symbolExists(ctx, null, "eskiSembol"), false);
-  assert.equal(await symbolEverExisted(ctx, "eskiSembol"), true);    // → symbol_lost hammaddesi
-  assert.equal(await symbolEverExisted(ctx, "hayaletSembol"), false); // → unverifiable
-  assert.equal(await commitExists(ctx, firstSha), true);
-  assert.equal(await commitExists(ctx, "deadbeef"), false);
+  assert.deepEqual(await symbolExists(ctx, null, "yeniSembol"), yes);   // null ref = çalışma ağacı
+  assert.deepEqual(await symbolExists(ctx, null, "eskiSembol"), no);
+  assert.deepEqual(await symbolEverExisted(ctx, "eskiSembol"), yes);    // → symbol_lost hammaddesi
+  assert.deepEqual(await symbolEverExisted(ctx, "hayaletSembol"), no); // → unverifiable
+  assert.deepEqual(await commitExists(ctx, firstSha), yes);
+  assert.deepEqual(await commitExists(ctx, "deadbeef"), no);
 });
 
 test("originRef: origin'li klonda aday listesinden ilk geçerli olan seçilir", async () => {
@@ -73,8 +81,8 @@ test("originRef: origin'li klonda aday listesinden ilk geçerli olan seçilir", 
   // dolayısıyla ilk aday kazanır. Sıra bozulursa bu satır kırmızı verir.
   assert.equal(ctx.originRef, "origin/HEAD");
   // İsim çözülmüş olması yetmez; ref'in gerçekten commit'e bağlandığını göster.
-  assert.equal(await commitExists(ctx, ctx.originRef!), true);
-  assert.equal(await fileExistsAt(ctx, ctx.originRef!, "src/a.ts"), true);
+  assert.deepEqual(await commitExists(ctx, ctx.originRef!), yes);
+  assert.deepEqual(await fileExistsAt(ctx, ctx.originRef!, "src/a.ts"), yes);
 });
 
 test("originRef: ölçüm pin'i her adaydan önce gelir ve pin'li ref sorgulanabilir", async () => {
@@ -83,12 +91,12 @@ test("originRef: ölçüm pin'i her adaydan önce gelir ve pin'li ref sorgulanab
   assert.equal(ctx.originRef, firstSha); // aday listesi hiç denenmedi
 
   // Pin'li ref üzerinden sorgu — ölçümün yapacağı şeyin aynısı.
-  assert.equal(await fileExistsAt(ctx, ctx.originRef!, "src/a.ts"), true);
+  assert.deepEqual(await fileExistsAt(ctx, ctx.originRef!, "src/a.ts"), yes);
   // Pin'in zamanı gerçekten geri sardığının kanıtı: eskiSembol ilk commit'te
   // duruyor, HEAD'de yok. İki cevabın FARKLI olması pin'in sahiden iş gördüğünü
   // gösterir — aynı olsalardı test pin'i ölçmüş olmazdı.
-  assert.equal(await symbolExists(ctx, firstSha, "eskiSembol"), true);
-  assert.equal(await symbolExists(ctx, "HEAD", "eskiSembol"), false);
+  assert.deepEqual(await symbolExists(ctx, firstSha, "eskiSembol"), yes);
+  assert.deepEqual(await symbolExists(ctx, "HEAD", "eskiSembol"), no);
 });
 
 test("originRef: geçersiz pin aday listesine DÜŞMEZ, null döner", async () => {
