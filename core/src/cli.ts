@@ -2,12 +2,19 @@
 // Çekirdeğin UI'sız girişi. Tauri kabuğu bunu sidecar olarak başlatacak;
 // geliştirme ve ölçüm sırasında doğrudan kullanılır.
 
-import { openStore, defaultStorePath } from "./store/db.ts";
-import { claudeCodeAdapter } from "./adapters/claude-code.ts";
+import { openStore, defaultStorePath, type Store } from "./store/db.ts";
+import { claudeCodeAdapter, readIncremental, readCwd } from "./adapters/claude-code.ts";
 import { register } from "./adapters/transcript.ts";
 import { scanOnce } from "./scan.ts";
-import { listProjects } from "./store/projects.ts";
+import { listProjects, upsertProject } from "./store/projects.ts";
 import { listEvents, countEvents } from "./store/events.ts";
+import { Observer } from "./observer/observer.ts";
+import { createCodexExecutor } from "./adapters/codex.ts";
+import { observeGuard, estimateSessionCalls, validateBatchTokens } from "./observe-cmd.ts";
+import { getWatermark } from "./store/watermarks.ts";
+import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
+import { dropThroughWatermark } from "./observer/batch.ts";
+import { basename, dirname } from "node:path";
 
 register(claudeCodeAdapter);
 
@@ -80,6 +87,103 @@ async function cmdScan(): Promise<void> {
   }
 }
 
+async function cmdObserve(): Promise<void> {
+  // Girdi doğrulaması EN ÖNDE: kullanım hatası için Codex kurulu olmak zorunda
+  // değil ve süreç başlatmadan önce bilinmesi ucuz.
+  let batchTokens: number;
+  try {
+    batchTokens = validateBatchTokens(arg("batch-tokens"));
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+
+  const effortArg = arg("effort");
+  const executor = createCodexExecutor({
+    model: arg("model"),
+    reasoningEffort: (effortArg as "minimal" | "low" | "medium" | "high" | undefined) ?? "low",
+  });
+
+  // K2: Codex sert bağımlılık. Yoksa yönlendir, çalışmayı deneme.
+  const det = await executor.detect();
+  if (!det.found) {
+    console.error(`codex bulunamadı: ${det.error ?? "PATH'te yok"}`);
+    console.error("kurulum: npm install -g @openai/codex  (ya da https://developers.openai.com/codex)");
+    process.exit(2);
+  }
+  console.log(`codex ${det.version} bulundu`);
+
+  const yes = process.argv.includes("--yes");
+  const store = openStore(arg("store") ?? defaultStorePath());
+  try {
+    const observer = new Observer({ store, executor, batchTokens });
+    const sessionPath = arg("session");
+
+    if (sessionPath) {
+      await observeSingleSession(store, observer, sessionPath, batchTokens, yes);
+    } else {
+      const guard = observeGuard(store, yes);
+      if (!guard.ok) {
+        console.error(guard.reason);
+        process.exit(3);
+      }
+      await scanOnce(store, {
+        adapter: claudeCodeAdapter,
+        root: arg("dir"),
+        only: arg("project") ? [arg("project")!] : undefined,
+        onTurns: (ctx) => observer.handleTurns(ctx),
+      });
+    }
+
+    const s = observer.stats;
+    console.log(`parti: ${s.batches}  codex çağrısı: ${s.calls}`);
+    console.log(`yeni bulgu: ${s.findings}  supersede: ${s.superseded}`);
+    if (s.skippedTurns > 0) console.log(`filigranla elenen tekrar turn: ${s.skippedTurns}`);
+    if (s.unprocessed > 0) console.log(`⚠ işlenemeyen parti: ${s.unprocessed}  (ayrıntı: status)`);
+  } finally {
+    store.close();
+  }
+}
+
+async function observeSingleSession(
+  store: Store,
+  observer: Observer,
+  sessionPath: string,
+  batchTokens: number,
+  yes: boolean,
+): Promise<void> {
+  const projPath = await readCwd(sessionPath);
+  if (!projPath) throw new Error(`oturum dosyasından proje yolu çözülemedi: ${safe(sessionPath)}`);
+  const sessionId = basename(sessionPath).replace(/\.jsonl$/, "");
+
+  // Kilit: aynı anda koşan bir scan/observe ile filigran yarışını engeller.
+  const holder = `pid:${process.pid}`;
+  acquireScanLock(store, holder);
+  try {
+    const projectId = upsertProject(store, {
+      path: projPath,
+      adapterId: claudeCodeAdapter.id,
+      transcriptDir: dirname(sessionPath), // dizin, dosya değil — projects sözleşmesi
+    });
+    // İmleçlere DOKUNULMAZ: imleç taramanın, filigran gözlemcinin (D-M2-2).
+    const res = await readIncremental(sessionPath, 0, null, null);
+    const wm = getWatermark(store, projectId, sessionId);
+    const fresh = dropThroughWatermark(res.turns, wm?.lastUuid ?? null);
+
+    let filteredBytes = 0;
+    for (const t of fresh) filteredBytes += Buffer.byteLength(t.text, "utf8");
+    const calls = estimateSessionCalls(filteredBytes, batchTokens);
+    console.log(`oturum: ${safe(sessionId)}  yeni turn: ${fresh.length}  tahmini çağrı: ~${calls}`);
+    if (calls > 20 && !yes) {
+      console.error(`tahmini ${calls} Codex çağrısı > 20: maliyet onayı için --yes ekleyin (D-M2-4).`);
+      process.exit(3);
+    }
+    await observer.handleTurns({ projectId, sessionId, turns: fresh });
+  } finally {
+    releaseScanLock(store, holder);
+  }
+}
+
 function cmdStatus(): void {
   const store = openStore(arg("store") ?? defaultStorePath());
   try {
@@ -91,6 +195,9 @@ function cmdStatus(): void {
       `bozuk satır ${countEvents(store, "malformed_line")}, ` +
       `kısalma ${countEvents(store, "truncation_detected")}, ` +
       `okunamayan oturum ${countEvents(store, "session_read_failed")}`);
+    const findingCount = store.get<{ n: number }>("SELECT COUNT(*) n FROM findings")?.n ?? 0;
+    console.log(`bulgu: ${findingCount}  gözlemci partisi: ${countEvents(store, "observer_batch_ok")}, ` +
+      `işlenemeyen: ${countEvents(store, "observer_batch_unprocessed")}`);
   } finally {
     store.close();
   }
@@ -98,12 +205,15 @@ function cmdStatus(): void {
 
 const cmd = process.argv[2];
 if (cmd === "scan") await cmdScan();
+else if (cmd === "observe") await cmdObserve();
 else if (cmd === "status") cmdStatus();
 else {
   console.log(`context-police — AI ajan hafızası denetçisi (çekirdek)
 
 kullanım:
-  context-police scan   [--dir <transcript kökü>] [--store <db yolu>]
-  context-police status [--store <db yolu>]`);
+  context-police scan    [--dir <transcript kökü>] [--store <db yolu>]
+  context-police observe [--project <yol>] [--session <jsonl>] [--dir <kök>] [--store <db>]
+                         [--batch-tokens N] [--model M] [--effort E] [--yes]
+  context-police status  [--store <db yolu>]`);
   process.exit(cmd ? 1 : 0);
 }

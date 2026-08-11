@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { openStore } from "../src/store/db.ts";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.ts";
 import { scanOnce } from "../src/scan.ts";
-import { listProjects } from "../src/store/projects.ts";
+import { listProjects, upsertProject } from "../src/store/projects.ts";
 import { countEvents } from "../src/store/events.ts";
+import { observeGuard, estimateSessionCalls, validateBatchTokens } from "../src/observe-cmd.ts";
 import { tmpDir } from "./helpers.ts";
 import type { Turn } from "../src/types.ts";
 
@@ -111,4 +112,44 @@ test("only filtresi yalnız verilen projeyi tarar", async () => {
   assert.equal(sum.projects, 1);
   assert.equal(listProjects(store)[0]!.path, "/tmp/y");
   store.close();
+});
+
+test("sel koruması: imleçsiz depo observe'u reddeder, --yes geçer (D-M2-4)", () => {
+  const store = openStore(":memory:");
+  const g1 = observeGuard(store, false);
+  assert.equal(g1.ok, false);
+  assert.match(g1.reason!, /scan/);
+  assert.equal(observeGuard(store, true).ok, true);
+
+  // Bir imleç varsa taban çizgisi var demektir: serbest.
+  const pid = upsertProject(store, { path: "/p", adapterId: "claude-code", transcriptDir: "/t" });
+  store.run(
+    "INSERT INTO cursors (file_path, project_id, session_id, byte_offset) VALUES (?,?,?,?)",
+    "/t/s.jsonl", pid, "s", 10,
+  );
+  assert.equal(observeGuard(store, false).ok, true);
+  store.close();
+});
+
+test("çağrı tahmini: süzülmüş bayt → parti sayısı", () => {
+  // 8000 token'lık parti ≈ 32000 bayt.
+  assert.equal(estimateSessionCalls(0, 8000), 0);
+  assert.equal(estimateSessionCalls(31_999, 8000), 1);
+  assert.equal(estimateSessionCalls(64_001, 8000), 3);
+});
+
+test("--batch-tokens doğrulaması: tam sayı ve ≥500", () => {
+  assert.equal(validateBatchTokens(undefined), 8000);
+  assert.equal(validateBatchTokens("500"), 500);
+  assert.equal(validateBatchTokens("12000"), 12000);
+  // Küçük değer: cutBatches maxTokens<16'da negatif subarray üretiyor (Görev 4
+  // ölçümü) ve küçük partiler maliyeti katlıyor.
+  assert.throws(() => validateBatchTokens("8"), /geçersiz --batch-tokens/);
+  assert.throws(() => validateBatchTokens("0"), /geçersiz --batch-tokens/);
+  assert.throws(() => validateBatchTokens("-1000"), /geçersiz --batch-tokens/);
+  // Sayı olmayan / tam sayı olmayan.
+  assert.throws(() => validateBatchTokens("abc"), /geçersiz --batch-tokens/);
+  assert.throws(() => validateBatchTokens(""), /geçersiz --batch-tokens/);
+  assert.throws(() => validateBatchTokens("8000.5"), /geçersiz --batch-tokens/);
+  assert.throws(() => validateBatchTokens("Infinity"), /geçersiz --batch-tokens/);
 });

@@ -234,7 +234,7 @@ export async function readIncremental(
 }
 
 /** Transcript'in içindeki cwd alanı — proje yolunun tek güvenilir kaynağı. */
-async function readCwd(filePath: string, maxLines = 50): Promise<string | null> {
+export async function readCwd(filePath: string, maxLines = 50): Promise<string | null> {
   const fh = await open(filePath, "r");
   try {
     let seen = 0;
