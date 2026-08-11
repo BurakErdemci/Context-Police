@@ -11,6 +11,18 @@ export type EventKind =
   | "observer_failed"
   | "session_read_failed"
   | "scan_lock_stolen"
+  /**
+   * Kimliği DOĞRULANMIŞ canlı bir sahip kilidi eşiği aşacak kadar uzun süredir
+   * tutuyor (lock.ts LONG_HELD_MS). Kilit ÇALINMADI — uzun denetim meşrudur ve
+   * çalmak, kilidin var olma sebebi olan mükerrer teslimat yarışını geri
+   * getirirdi. Bu satır bir arıza bildirimi değil GÖRÜNÜRLÜK: sahip kimliği
+   * `ps lstart`'a dayanıyor, çözünürlüğü 1 saniye ölçüldü, ve aynı-saniye PID
+   * yeniden kullanımı kimliği aldatıp kilidi süresiz takılı bırakabiliyor
+   * (lock.ts'teki "KABUL EDİLEN KALINTI"). Meşru uzun denetimle o kalıntı
+   * diskte AYNI görünüyor; ayrımı insan yapar, ama ancak olay yazılırsa.
+   * Aynı kilit satırı (sahip + alınma zamanı) için en fazla bir kayıt.
+   */
+  | "scan_lock_held_long"
   | "discovery_failed"
   | "unknown_type_overflow"
   | "malformed_line"

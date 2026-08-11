@@ -95,6 +95,85 @@ test("SAĞLIKLI ve uzun süren sahip kilidini bir saat sonra da kaybetmez", () =
   store.close();
 });
 
+// --- 2c) uzun tutulan kilit görünür (coarse-start-time-pid-reuse guard) ---
+
+/** Kilidi geriye tarihlemek: `acquired_at` tek yaş kaynağı. */
+function backdateLock(store: ReturnType<typeof openStore>, ms: number): void {
+  store.run("UPDATE scan_lock SET acquired_at = ? WHERE id = 1", new Date(Date.now() - ms).toISOString());
+}
+
+const HOUR = 60 * 60 * 1000;
+
+test("çok uzun tutulan doğrulanmış kilit: devralma YOK ama olay VAR", () => {
+  // Kilit sahibinin kimliği `ps lstart`'a dayanıyor ve çözünürlüğü 1 saniye
+  // (ölçüldü). Aynı-saniye PID yeniden kullanımı sahte bir sahibi "canlı +
+  // kimliği uyuşuyor" gösterebiliyor; kilit o hâlde SÜRESİZ takılı kalır.
+  // Kalıntı bilinçli açık bırakıldı — kapatan şey değil GÖRÜNÜR kılan şey
+  // sınanıyor.
+  const store = openStore(":memory:");
+  const holder = `pid:${process.pid}`;
+  acquireScanLock(store, holder);
+  backdateLock(store, 7 * HOUR); // LONG_HELD_MS = 6 saat
+
+  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy,
+    "uzun tutma kilidi ÇALDIRMAZ: sağlıklı uzun denetim meşru");
+  assert.equal(store.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_stolen'")?.n, 0,
+    "devralma olmamalı");
+
+  const ev = store.get<{ detail: string }>(
+    "SELECT detail FROM events WHERE kind = 'scan_lock_held_long'");
+  assert.ok(ev, "takılı kalmış olabilecek kilit sessiz kalmamalı");
+  const d = JSON.parse(ev.detail);
+  assert.equal(d.holder, stampHolderIdentity(holder), "detay sahibi taşımalı");
+  assert.ok(d.ageMs >= 7 * HOUR - 60_000, `yaş taşınmalı, gelen: ${d.ageMs}`);
+  assert.equal(d.stolen, false, "devralınmadığı gerçeği detayda yazılı olmalı");
+
+  releaseScanLock(store, holder);
+  store.close();
+});
+
+test("uzun tutma olayı gürültü yapmaz: aynı kilit satırı için tek kayıt", () => {
+  // Takılı bir kilide her tarama çarpar. Tekrar yazmak `events`'i geri
+  // alınamaz şekilde şişirir ve sayacı "kaç kez takıldık" değil "kaç kez
+  // denedik" ölçmeye başlar.
+  const store = openStore(":memory:");
+  const holder = `pid:${process.pid}`;
+  acquireScanLock(store, holder);
+  backdateLock(store, 7 * HOUR);
+  for (let i = 0; i < 3; i++) {
+    assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
+  }
+  assert.equal(store.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_held_long'")?.n, 1);
+
+  // Kilit bırakılıp YENİDEN alınırsa bu başka bir takılmadır: susmak,
+  // ikinci arızayı birincinin arkasına gizlemek olurdu.
+  releaseScanLock(store, holder);
+  acquireScanLock(store, holder);
+  backdateLock(store, 7 * HOUR);
+  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
+  assert.equal(store.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_held_long'")?.n, 2);
+  releaseScanLock(store, holder);
+  store.close();
+});
+
+test("eşik STALE_MS'ten belirgin büyük: iki saatlik sağlıklı denetim olay yazmaz", () => {
+  // STALE_MS (1 saat) üstü ama LONG_HELD_MS (6 saat) altı. Eşik STALE_MS'e
+  // yakın seçilseydi olay her uzun denetimde yanar, gürültüye karışır ve
+  // "birine bak" sinyali olmaktan çıkardı.
+  const store = openStore(":memory:");
+  const holder = `pid:${process.pid}`;
+  acquireScanLock(store, holder);
+  backdateLock(store, 2 * HOUR);
+  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
+  assert.equal(store.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_held_long'")?.n, 0);
+  releaseScanLock(store, holder);
+  store.close();
+});
+
 test("geri dönüştürülmüş PID: kayıttaki başlangıç zamanı tutmazsa hemen devralınır", () => {
   const store = openStore(":memory:");
   // Canlı PID (bu süreç) ama BAŞKA bir başlangıç zamanı: eski sahip ölmüş,
