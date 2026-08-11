@@ -3,7 +3,7 @@
 // geliştirme ve ölçüm sırasında doğrudan kullanılır.
 
 import { openStore, defaultStorePath, type Store } from "./store/db.ts";
-import { claudeCodeAdapter, readIncremental, readCwd } from "./adapters/claude-code.ts";
+import { claudeCodeAdapter, readCwd } from "./adapters/claude-code.ts";
 import { register } from "./adapters/transcript.ts";
 import { scanOnce } from "./scan.ts";
 import { listProjects, upsertProject } from "./store/projects.ts";
@@ -13,10 +13,10 @@ import { createCodexExecutor } from "./adapters/codex.ts";
 import {
   observeGuard, estimateCalls, validateBatchTokens, validateEffort, validateModel,
   callBudget, costGate, budgetExhaustedMessage, budgetGuardedOnTurns,
+  readSessionIncremental, recordSessionFreshness,
   type Effort,
 } from "./observe-cmd.ts";
 import type { Turn } from "./types.ts";
-import { getWatermark } from "./store/watermarks.ts";
 import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
 import { dropThroughWatermark, type DeliveryRange } from "./observer/batch.ts";
 import { basename, dirname } from "node:path";
@@ -302,14 +302,7 @@ async function observeSingleSession(
     // olduğu için gözlemcinin kendi ilerlemesi burada da kullanılabiliyor.
     // Eskiden dosya her koşumda 0'dan okunuyordu ve eleme içerik kimliğine
     // kaldığı için `--session` aynı oturumu tekrar tekrar Codex'e gönderiyordu.
-    const wm = getWatermark(store, projectId, sessionId);
-    const from = wm?.byteOffset ?? 0;
-    const res = await readIncremental(sessionPath, from, null, null);
-    const range: DeliveryRange = {
-      from: res.truncated ? 0 : from,
-      to: res.byteOffset,
-      truncated: res.truncated,
-    };
+    const { wm, res, range } = await readSessionIncremental(store, projectId, sessionId, sessionPath);
     // Önizleme gözlemcinin KENDİ kararıyla aynı fonksiyondan çıkıyor: iki ayrı
     // ölçüt, maliyet kapısının yanlış sayıya bakması demek olurdu.
     const fresh = dropThroughWatermark(res.turns, wm, range);
@@ -329,6 +322,9 @@ async function observeSingleSession(
     // Turn'ler SÜZÜLMEDEN veriliyor: eleme kararı gözlemcinin, ve aynı aralığın
     // kimliği ancak listenin tamamıyla hesaplanırsa tarama yolununkiyle örtüşür.
     await observer.handleTurns({ projectId, sessionId, turns: res.turns, range });
+    // Tazelik SONRA yazılıyor: handleTurns atarsa filigran okuduğumuz dosyanın
+    // kimliğini üstlenmemeli, yoksa işlenmemiş bir okuma "görüldü" sayılırdı.
+    recordSessionFreshness(store, projectId, sessionId, res);
     return false;
   } finally {
     releaseScanLock(store, holder);

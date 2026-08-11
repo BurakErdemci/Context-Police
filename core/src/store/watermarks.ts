@@ -13,6 +13,14 @@ export interface Watermark extends WatermarkPosition {
   sessionId: string;
   lastUuid: string | null;
   lastTs: string | null;
+  /**
+   * Ofsetin hangi FİZİKSEL dosyaya ait olduğu. Karar alanı değil ama karar
+   * alanının geçerlilik koşulu: bu ikisi olmadan `readIncremental` aynı boyutta
+   * yerinde yeniden yazılmış bir dosyayı "hiç değişmemiş" görüyor ve ofset
+   * başka baytları işlenmiş sayıyor (M3 borç 2).
+   */
+  inode: string | null;
+  mtimeMs: number | null;
 }
 
 /**
@@ -29,6 +37,8 @@ export interface WatermarkInput {
   deliveryTurns?: number | null;
   lastUuid?: string | null;
   lastTs?: string | null;
+  inode?: string | null;
+  mtimeMs?: number | null;
 }
 
 /**
@@ -56,11 +66,13 @@ interface WatermarkRow {
   delivery_turns: number | null;
   last_uuid: string | null;
   last_ts: string | null;
+  inode: string | null;
+  mtime_ms: number | null;
 }
 
 export function getWatermark(store: Store, projectId: number, sessionId: string): Watermark | null {
   const row = store.get<WatermarkRow>(
-    `SELECT byte_offset, delivery_key, delivery_turns, last_uuid, last_ts
+    `SELECT byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, inode, mtime_ms
      FROM observer_watermarks WHERE project_id = ? AND session_id = ?`,
     projectId,
     sessionId,
@@ -74,6 +86,8 @@ export function getWatermark(store: Store, projectId: number, sessionId: string)
     deliveryTurns: row.delivery_turns,
     lastUuid: row.last_uuid,
     lastTs: row.last_ts,
+    inode: row.inode,
+    mtimeMs: row.mtime_ms,
   };
 }
 
@@ -82,7 +96,7 @@ export function setWatermark(store: Store, wm: WatermarkInput): WatermarkWrite {
   // Hiçbir değer taşımayan ilk yazım satırı boş yere yaratırdı: ne eler ne
   // ilerletir. Var olan satırda ise kısmi güncelleme meşru (aşağıdaki alan
   // birleştirme kuralları), o yüzden ölçüt "yeni satır mı" ile birlikte.
-  const hasValue = [wm.byteOffset, wm.deliveryKey, wm.deliveryTurns, wm.lastUuid, wm.lastTs]
+  const hasValue = [wm.byteOffset, wm.deliveryKey, wm.deliveryTurns, wm.lastUuid, wm.lastTs, wm.inode, wm.mtimeMs]
     .some((v) => v != null);
   if (!hasValue && stored === null) return { applied: false };
 
@@ -119,16 +133,23 @@ export function setWatermark(store: Store, wm: WatermarkInput): WatermarkWrite {
   const nextTs =
     storedTs === null ? incomingTs : incomingTs === null || incomingTs < storedTs ? storedTs : incomingTs;
 
+  // Tazelik alanları lastUuid kalıbıyla birleşiyor: verilmeyen saklananı korur.
+  // Monotonluk aranmıyor — bunlar bir ilerleme değil, okunan dosyanın kimliği.
+  const inode = wm.inode === undefined ? stored?.inode ?? null : wm.inode;
+  const mtimeMs = wm.mtimeMs === undefined ? stored?.mtimeMs ?? null : wm.mtimeMs;
+
   store.run(
     `INSERT INTO observer_watermarks
-       (project_id, session_id, byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, updated_at)
-     VALUES (?,?,?,?,?,?,?,?)
+       (project_id, session_id, byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, inode, mtime_ms, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT (project_id, session_id) DO UPDATE SET
        byte_offset = excluded.byte_offset,
        delivery_key = excluded.delivery_key,
        delivery_turns = excluded.delivery_turns,
        last_uuid = excluded.last_uuid,
        last_ts = excluded.last_ts,
+       inode = excluded.inode,
+       mtime_ms = excluded.mtime_ms,
        updated_at = excluded.updated_at`,
     wm.projectId,
     wm.sessionId,
@@ -137,6 +158,8 @@ export function setWatermark(store: Store, wm: WatermarkInput): WatermarkWrite {
     nextTurns,
     lastUuid,
     nextTs,
+    inode,
+    mtimeMs,
     nowIso(),
   );
   return rewindBlocked ? { applied: true, rewindBlocked } : { applied: true };
@@ -147,7 +170,9 @@ export function setWatermark(store: Store, wm: WatermarkInput): WatermarkWrite {
  * için saklanan ofset artık BAŞKA bir baytı gösteriyor; monoton ilerleme kuralı
  * onu koruduğu sürece yeni dosyanın tamamı "işlenmiş" sayılır — sessiz ve kalıcı
  * turn kaybı. Teşhis alanları (uuid, damga) korunuyor: kısalmadan önce nereye
- * gelindiği olay günlüğünden okunabilmeli.
+ * gelindiği olay günlüğünden okunabilmeli. Tazelik alanlarına (inode, mtime) da
+ * DOKUNULMUYOR: onlar konum değil kimlik ve okumanın sonunda zaten yeniden
+ * yazılıyor; burada null'lamak yalnız bir sonraki tespiti körleştirirdi.
  *
  * Dönüş: sıfırlanacak bir konumsal durum var mıydı (çağıran olayı ancak o zaman
  * yazsın; her kısalma için olay yazmak gürültü olurdu).

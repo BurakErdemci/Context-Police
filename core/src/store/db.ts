@@ -183,6 +183,11 @@ function migrateCursors(db: DatabaseSync): void {
  * checkpoint'i reddeder, yani göç "başarılı" görünürken filigran yazılamaz
  * hâle gelirdi. O yüzden tablo yeniden kuruluyor — kalıp kopyalanmaz,
  * `rebuildTable` çağrılır.
+ *
+ * M3'te BEŞİNCİ kez değişti (inode/mtime_ms tazelik alanları). Bu sefer
+ * kaldırılacak kısıt yok, o yüzden iki kuşak iki ayrı dalda: eski kuşak zaten
+ * yeniden kuruluyor (güncel şemaya doğrudan çıkar), M2-sonu kuşağa yalnız iki
+ * sütun ekleniyor.
  */
 function migrateWatermarks(db: DatabaseSync): void {
   const cols = db.prepare("PRAGMA table_info(observer_watermarks)").all() as {
@@ -190,28 +195,45 @@ function migrateWatermarks(db: DatabaseSync): void {
     notnull: number;
   }[];
   if (cols.length === 0) return; // yeni depo: şema zaten güncel
-  if (cols.some((c) => c.name === "byte_offset")) return; // güncel
 
-  // Eski depolar iki kuşak olabilir: last_ts'li ve last_ts'siz. Eksik sütunu
-  // SELECT'te NULL ile dolduruyoruz, yoksa kopyalama SQL hatasıyla düşer.
-  const hasLastTs = cols.some((c) => c.name === "last_ts");
+  if (!cols.some((c) => c.name === "byte_offset")) {
+    // Eski depolar iki kuşak olabilir: last_ts'li ve last_ts'siz. Eksik sütunu
+    // SELECT'te NULL ile dolduruyoruz, yoksa kopyalama SQL hatasıyla düşer.
+    const hasLastTs = cols.some((c) => c.name === "last_ts");
 
-  rebuildTable(db, "observer_watermarks", (tmp) => `
-    CREATE TABLE ${tmp} (
-      project_id     INTEGER NOT NULL REFERENCES projects(id),
-      session_id     TEXT NOT NULL,
-      byte_offset    INTEGER,
-      delivery_key   TEXT,
-      delivery_turns INTEGER,
-      last_uuid      TEXT,
-      last_ts        TEXT,
-      updated_at     TEXT NOT NULL,
-      PRIMARY KEY (project_id, session_id)
-    );
-    INSERT INTO ${tmp} (project_id, session_id, byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, updated_at)
-    SELECT project_id, session_id, NULL, NULL, NULL, last_uuid, ${hasLastTs ? "last_ts" : "NULL"}, updated_at
-    FROM observer_watermarks;
-  `);
+    // İçerik-kimlikli eski kuşak DOĞRUDAN güncel şemaya çıkar (inode/mtime_ms
+    // dahil): iki aşamalı göç, iki kesilme noktası demek olurdu.
+    rebuildTable(db, "observer_watermarks", (tmp) => `
+      CREATE TABLE ${tmp} (
+        project_id     INTEGER NOT NULL REFERENCES projects(id),
+        session_id     TEXT NOT NULL,
+        byte_offset    INTEGER,
+        delivery_key   TEXT,
+        delivery_turns INTEGER,
+        last_uuid      TEXT,
+        last_ts        TEXT,
+        inode          TEXT,
+        mtime_ms       REAL,
+        updated_at     TEXT NOT NULL,
+        PRIMARY KEY (project_id, session_id)
+      );
+      INSERT INTO ${tmp} (project_id, session_id, byte_offset, delivery_key, delivery_turns, last_uuid, last_ts, inode, mtime_ms, updated_at)
+      SELECT project_id, session_id, NULL, NULL, NULL, last_uuid, ${hasLastTs ? "last_ts" : "NULL"}, NULL, NULL, updated_at
+      FROM observer_watermarks;
+    `);
+    return;
+  }
+
+  if (!cols.some((c) => c.name === "inode")) {
+    // Konumsal kuşak (M2 sonu): yalnız tazelik alanları eksik. Sütun EKLEMEK
+    // ALTER ile güvenli — kaldırılacak bir CHECK kısıtı yok, dolayısıyla tabloyu
+    // yeniden kurmaya gerek de yok. İki ifade TEK işlemde: yarıda kesilirse
+    // yarım şema kalmasın (2. doğrulama turunun atomiklik dersi).
+    inTransaction(db, () => {
+      db.exec("ALTER TABLE observer_watermarks ADD COLUMN inode TEXT");
+      db.exec("ALTER TABLE observer_watermarks ADD COLUMN mtime_ms REAL");
+    });
+  }
 }
 
 /**

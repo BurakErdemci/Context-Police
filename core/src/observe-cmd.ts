@@ -2,6 +2,9 @@
 // (sel, maliyet) testle sabitlenmek zorunda; süreç çıkışı test edilemez.
 
 import type { Store } from "./store/db.ts";
+import { getWatermark, setWatermark, type Watermark } from "./store/watermarks.ts";
+import { readIncremental, type IncrementalResult } from "./adapters/claude-code.ts";
+import type { DeliveryRange } from "./observer/batch.ts";
 
 /**
  * Sel koruması (D-M2-4): hiç taranmamış depoda observe TÜM geçmişi Codex'e
@@ -193,4 +196,42 @@ export function validateModel(raw: string | undefined): string | undefined {
   if (raw.startsWith("-"))
     throw new Error(`geçersiz --model: tire ile başlayamaz (bayrakla karışıyor): ${raw}`);
   return raw;
+}
+
+/**
+ * `--session` okuma kararı. cli.ts'ten ayrı, çünkü test edilebilir olmak zorunda:
+ * eski hâli `readIncremental(path, from, null, null)` çağırıyordu ve iki null
+ * yerinde-yazım tespitini (claude-code.ts `replacedInPlace`) kapatıyordu — aynı
+ * boyutta yeniden yazılan bir dosya "hiç değişmemiş" görünüyor, saklanan ofset
+ * BAŞKA baytları işlenmiş sayıyordu (M3 borç 2). Filigranın inode/mtime'ı
+ * artık geçiriliyor; politika zaten adaptörde, eksik olan yalnız veriydi.
+ */
+export async function readSessionIncremental(
+  store: Store,
+  projectId: number,
+  sessionId: string,
+  sessionPath: string,
+): Promise<{ wm: Watermark | null; res: IncrementalResult; range: DeliveryRange }> {
+  const wm = getWatermark(store, projectId, sessionId);
+  const from = wm?.byteOffset ?? 0;
+  const res = await readIncremental(sessionPath, from, wm?.inode ?? null, wm?.mtimeMs ?? null);
+  return {
+    wm,
+    res,
+    range: { from: res.truncated ? 0 : from, to: res.byteOffset, truncated: res.truncated },
+  };
+}
+
+/**
+ * Okunan dosyanın kimliğini filigrana işler. Karar alanlarına (ofset, teslimat)
+ * DOKUNMAZ: kısmi yazım kuralı gereği verilmeyen alan olduğu gibi kalır, yani
+ * bu çağrı gözlemcinin ilerlemesini geri saramaz.
+ */
+export function recordSessionFreshness(
+  store: Store,
+  projectId: number,
+  sessionId: string,
+  res: { inode: string; mtimeMs: number },
+): void {
+  setWatermark(store, { projectId, sessionId, inode: res.inode, mtimeMs: res.mtimeMs });
 }

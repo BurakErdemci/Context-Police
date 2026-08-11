@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS observer_watermarks (
   delivery_turns INTEGER,
   last_uuid      TEXT,
   last_ts        TEXT,
+  -- --session yolu için tazelik: readIncremental'ın yerinde-yazım tespiti
+  -- (claude-code.ts replacedInPlace) bu ikisi olmadan çalışamıyor — M2'de null
+  -- geçiliyordu ve aynı boyutta yeniden yazılan dosya görünmüyordu (M3 borç 2).
+  -- Tarama yolunun karşılığı cursors tablosunda; filigran ayrı tutuyor, çünkü
+  -- --session imleçlere hiç dokunmuyor.
+  inode          TEXT,
+  mtime_ms       REAL,
   updated_at     TEXT NOT NULL,
   PRIMARY KEY (project_id, session_id)
 );
