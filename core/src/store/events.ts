@@ -16,7 +16,9 @@ export type EventKind =
   | "malformed_line"
   | "truncation_detected"
   | "unresolved_project_key"
-  | "scan_completed";
+  | "scan_completed"
+  | "observer_batch_ok"
+  | "observer_batch_unprocessed";
 
 export function logEvent(
   store: Store,
