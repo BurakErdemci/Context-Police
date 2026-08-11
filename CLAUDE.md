@@ -209,3 +209,9 @@ assumed.
   silent. (This project is that principle, productised.)
 - Prefer cheap validation before building. The retrospective measurement in §5
   exists because of this.
+- **Schema changes: `CREATE TABLE IF NOT EXISTS` is not a migration.** When a
+  column or table is added, the `migrate()` path ships in the same commit and is
+  verified against an **existing store file** — working on a fresh store proves
+  nothing. Measured: this class surfaced in three consecutive audits (M1, the
+  cursor table — that audit's most serious finding, cursors became unwritable;
+  M2 round 1, the watermark table; M2 round 2, migration atomicity).
