@@ -38,8 +38,8 @@ const ITEMS_MAX = 24;
 const RAW_MAX = 256_000;
 
 /**
- * Çapa değerinde YASAK karakterler. Tek kaynak burası ve küme bir kod noktası
- * listesi DEĞİL, Unicode KATEGORİSİ:
+ * Çapa değerinde HER BAĞLAMDA yasak karakterler. Tek kaynak burası ve küme bir
+ * kod noktası listesi DEĞİL, Unicode ÖZELLİĞİ:
  *
  *   \p{Cc}  kontrol karakterleri: C0 (satır sonları dahil), DEL, C1
  *   \p{Cf}  biçim karakterleri: U+00AD (yumuşak tire), U+061C (ALM), U+180E,
@@ -49,19 +49,31 @@ const RAW_MAX = 256_000;
  *           U+E0001 ve U+E0020-7F (tag karakterleri)
  *   \p{Cs}  yalnız kalan vekil (surrogate): model çıktısındaki \uD800 böyle bir
  *           değer üretebiliyor, depoya yazılınca kodlama gidiş-dönüşü bozuluyor
- *   U+2028/29                 satır/paragraf ayırıcı (Zl/Zp — C* değil, ayrıca yazılı)
- *   U+FE00-0F, U+E0100-E01EF  varyasyon seçiciler (kategori Mn ama görünmez;
- *                             yol/sembol/SHA değerinde meşru karşılıkları yok)
+ *   \p{Default_Ignorable_Code_Point}
+ *           "hiç çizilmemesi gereken kod noktası"nın Unicode'un KENDİ tanımı:
+ *           varyasyon seçiciler (U+FE00-0F, U+180B-D, U+E0100-E01EF), U+034F
+ *           (birleştirici grafem birleştirici), U+115F/U+1160/U+3164 (Hangul
+ *           doldurucular), U+17B4-5, U+2065, U+FFA0 …
+ *   U+2028/29  satır/paragraf ayırıcı (Zl/Zp — yukarıdakilerin hiçbirinde yok)
  *
- * NEDEN KATEGORİ, NEDEN ELLE LİSTE DEĞİL: ilk düzeltme elle sayılmış aralıklar
- * kullanıyordu ve doğrulama turu dört görünmez `Cf` karakterinin (U+00AD, U+180E,
- * U+2060, U+206A) o listeden kaçtığını ÖLÇTÜ. Elle liste bir sonraki denetimde
- * yine delinir; kategori delinmez.
+ * NEDEN "DEFAULT IGNORABLE", NEDEN ELLE LİSTE DEĞİL: bu küme İKİ kez delindi.
+ * 1. tur elle sayılmış aralıklar kullanıyordu, dört `Cf` karakteri (U+00AD,
+ * U+180E, U+2060, U+206A) kaçtı; kategoriye geçildi ama KATEGORİ DE YETMEDİ —
+ * 2. tur U+034F, U+115F, U+180B ve U+3164'ün `Cc/Cf/Cs` DIŞINDA kalıp görünmez
+ * olduğunu ölçtü (probes/invisible-anchor-bypass.sh). "Görünmez"in bizim
+ * ürettiğimiz her karşılığı deliniyor; Unicode'un kendi türetilmiş özelliği
+ * delinmiyor — ölçüt artık bizde değil standartta.
  *
- * AŞIRI DÜZELTMENİN SINIRI (ölçüldü): normal içerik bu kümede DEĞİL —
- * "src/çekirdek/görüntü.ts", "日本語/パス.ts", "İĞÜŞÖÇığüşöç", "naïve café"
- * hepsi geçiyor. Reddedilen küme yalnız GÖRÜNMEZ olanlar; fazla geniş bir küme
- * meşru çapayı sessizce yutar, o da veri kaybıdır.
+ * AŞIRI DÜZELTMENİN SINIRI, ve o da ÖLÇÜLDÜ: aynı turda TERS hata da bulundu
+ * (probes/emoji-anchor-rejected.sh) — "docs/❤️.md" gibi GERÇEK dosya adları
+ * reddediliyordu, çünkü ❤️ = U+2764 + U+FE0F ve varyasyon seçicisi koşulsuz
+ * yasaktı. Tek bir çapa yüzünden partinin tamamı reddedilip turn'ler
+ * "işlenemedi" diye checkpoint'lendiği için bu doğrudan veri kaybı. Bu yüzden
+ * U+FE0E/U+FE0F ve U+200D (ZWJ) kümeden ÇIKARILDI ve aşağıda BAĞLAMA BAKARAK
+ * denetleniyor. Ayırt edici ölçüt tek cümle: metni YENİDEN YÖNLENDİREN ya da
+ * GÖRÜNMEZ KILAN karakter reddedilir, görünen bir grafemin PARÇASI olan kabul
+ * edilir. Normal içerik zaten kümede değil: "src/çekirdek/görüntü.ts",
+ * "日本語/パス.ts", "İĞÜŞÖÇığüşöç", "naïve café", "a/b\\c" hepsi geçiyor.
  *
  * Gerekçe: aynı sınıf M1'de ÇIKTI sınırında kapatılmıştı (cli.ts safe()); veri
  * sınırında açık kalınca sahte bir çapa (U+202E ile ters çevrilmiş yol) bulguyu
@@ -74,7 +86,66 @@ const RAW_MAX = 256_000;
  */
 const FORBIDDEN_ANCHOR_CHARS =
   // eslint-disable-next-line no-control-regex -- kontrol karakteri aramak İŞİN KENDİSİ
-  /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+  /[[\p{Cc}\p{Cf}\p{Cs}\p{Default_Ignorable_Code_Point}\u2028\u2029]--[\uFE0E\uFE0F\u200D]]/v;
+
+/** Emoji çekirdeği. Varyasyon seçicisinin ve ZWJ'nin meşruluğu yalnız bunun yanında var. */
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+
+/** Ten tonu modifiye edicileri (U+1F3FB-FF): Extended_Pictographic DEĞİLLER. */
+const EMOJI_MODIFIER = /\p{Emoji_Modifier}/u;
+
+/** U+20E3 COMBINING ENCLOSING KEYCAP — keycap dizisinde U+FE0F rakamdan SONRA gelir. */
+const KEYCAP = "\u20E3";
+const ZWJ = "\u200D";
+const VS16 = "\uFE0F"; // emoji sunumu
+const VS15 = "\uFE0E"; // metin sunumu
+
+const isPictographic = (ch: string | undefined): boolean => ch !== undefined && PICTOGRAPHIC.test(ch);
+
+/**
+ * Emoji tabanının ÜSTÜNE binen, tek başına anlamı olmayan karakterler: sunum
+ * seçicileri ve ten tonu modifiye edicileri (U+1F3FB-FF). Bunlar taban ile ZWJ
+ * arasına girebildiği için "solumda emoji var mı" sorusu onları atlayarak
+ * sorulmak zorunda.
+ */
+const isEmojiDecorator = (ch: string): boolean =>
+  ch === VS16 || ch === VS15 || EMOJI_MODIFIER.test(ch);
+
+/**
+ * Çapa değerinin karakter denetimi; dönen null "temiz", dize ise gösterilecek sebep.
+ *
+ * İKİ katman, çünkü tek katman iki YÖNDEN de yanlış oldu (yukarıdaki iki prob):
+ * (1) bağlamdan bağımsız yasak küme; (2) emoji sunum karakterlerinin BAĞLAM
+ * denetimi. U+FE0F yalnız bir emojiden sonra "bunu renkli çiz" demektir; bir
+ * harfin arkasında hiçbir görsel karşılığı yoktur, yani orada bulunmasının tek
+ * işlevi iki farklı dizeyi aynı göstermektir. ZWJ de aynı: iki emojiyi tek
+ * grafeme bağlarsa meşru, iki harfin arasına girerse "src/a<ZWJ>b.ts" ile
+ * "src/ab.ts"yi ayırt edilemez yapan bir saldırıdır.
+ */
+function anchorCharError(value: string): string | null {
+  if (FORBIDDEN_ANCHOR_CHARS.test(value)) return "kontrol/görünmez karakter";
+
+  const cps = [...value];
+  for (let i = 0; i < cps.length; i++) {
+    const ch = cps[i]!;
+    if (ch === ZWJ) {
+      // ZWJ'nin SOLUNDA emoji SÜSLERİ durabiliyor ve taban onların gerisinde
+      // kalıyor: gökkuşağı bayrağı U+1F3F3 U+FE0F U+200D U+1F308, kadın-yazılımcı
+      // ise U+1F469 U+1F3FD U+200D U+1F4BB. Süsler atlanmazsa GERÇEK dosya adı
+      // reddediliyor — ölçüldü, ilk düzeltme ten tonu modifiye edicisinde kaldı.
+      let k = i - 1;
+      while (k >= 0 && isEmojiDecorator(cps[k]!)) k--;
+      if (!isPictographic(cps[k]) || !isPictographic(cps[i + 1]))
+        return "emoji dizisi dışında sıfır genişlikli birleştirici";
+    } else if (ch === VS16 || ch === VS15) {
+      // Tek istisna keycap: orada seçici RAKAMDAN sonra, U+20E3'ten önce gelir.
+      const base = isEmojiDecorator(cps[i - 1] ?? "") ? cps[i - 2] : cps[i - 1];
+      if (!isPictographic(base) && cps[i + 1] !== KEYCAP)
+        return "emoji dışında varyasyon seçicisi";
+    }
+  }
+  return null;
+}
 
 const ANCHOR_KINDS: readonly AnchorKind[] = ["file_path", "symbol", "commit_sha", "external_path"];
 
@@ -263,8 +334,9 @@ export function parseObserverOutput(
         return { ok: false, error: `madde ${i} çapa ${j}: geçersiz tür ${JSON.stringify(kind)}` };
       if (typeof value !== "string" || value.trim().length === 0 || value.length > ANCHOR_VALUE_MAX)
         return { ok: false, error: `madde ${i} çapa ${j}: geçersiz değer` };
-      if (FORBIDDEN_ANCHOR_CHARS.test(value))
-        return { ok: false, error: `madde ${i} çapa ${j}: çapa değerinde kontrol/görünmez karakter` };
+      const charError = anchorCharError(value);
+      if (charError !== null)
+        return { ok: false, error: `madde ${i} çapa ${j}: çapa değerinde ${charError}` };
       validAnchors.push({ kind: kind as AnchorKind, value });
     }
 

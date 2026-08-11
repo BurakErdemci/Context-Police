@@ -45,6 +45,95 @@ function migrate(db: DatabaseSync): void {
   migrateWatermarks(db);
 }
 
+/**
+ * Tablo yeniden kurularak yapılan göçün geçici tablo son eki. TEK yerde tanımlı,
+ * çünkü kurtarma kodu yetim ara tabloyu tam olarak bu ekten tanıyor.
+ */
+const MIGRATION_SUFFIX = "_migrated";
+
+/** DDL dahil her şeyi tek işleme sarar; hata hâlinde geri alır. */
+function inTransaction(db: DatabaseSync, fn: () => void): void {
+  // IMMEDIATE: yazma kilidini hemen alır. Gecikmeli kilit, göçün ortasında
+  // SQLITE_BUSY ile yarıda kalabilir — atomiklik istediğimiz yerde en istemediğimiz şey.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    fn();
+    db.exec("COMMIT");
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch (rollbackErr) {
+      (err as { rollbackError?: unknown }).rollbackError = rollbackErr;
+    }
+    throw err;
+  }
+}
+
+/**
+ * "Yarat → kopyala → düşür → yeniden adlandır" göçünün TEK ve GÜVENLİ kalıbı.
+ *
+ * NEDEN TEK YERDE: bu SINIF projede ÜÇ kez çıktı — M1'de imleç tablosunun
+ * anahtarı değişti, M2 doğrulama turunda filigran tablosuna sütun eklendi, 2.
+ * doğrulama turunda ise göç ADIMLARININ atomik olmadığı ölçüldü. İlk iki kez
+ * kalıp kopyalandığı için kusur da kopyalandı. Yeni bir tablo şeması
+ * değişecekse yazılacak yer bu fonksiyonun ÇAĞRISI, kalıbın kendisi değil.
+ *
+ * Ölçülen kırılma (probes/interrupted-watermark-migration.sh): dört DDL
+ * ifadesi ayrı ayrı otomatik commit ediliyordu; `CREATE TABLE` ile `DROP TABLE`
+ * arasında öldürülen bir süreç kalıcı bir `..._migrated` tablosu bırakıyor ve
+ * sonraki açılış `table observer_watermarks_migrated already exists` ile
+ * ÖLÜYORDU — depo bir daha açılamıyor. Tek işlem bunu imkânsız kılar: ya hepsi
+ * ya hiçbiri.
+ */
+function rebuildTable(db: DatabaseSync, table: string, sql: (tmp: string) => string): void {
+  const tmp = `${table}${MIGRATION_SUFFIX}`;
+  inTransaction(db, () => {
+    // Eski bir sürümün bıraktığı yetim ara tabloya karşı: kurtarma zaten
+    // temizliyor ama kalıp kendi başına da yeniden koşulabilir olmalı.
+    db.exec(`DROP TABLE IF EXISTS "${tmp}"`);
+    db.exec(sql(tmp)); // tmp'yi yaratır ve eskiden kopyalar
+    db.exec(`DROP TABLE "${table}"`);
+    db.exec(`ALTER TABLE "${tmp}" RENAME TO "${table}"`);
+  });
+}
+
+/**
+ * Yarıda kesilmiş bir göçün bıraktığı ara tabloyu temizler ya da yerine oturtur.
+ * Tek işlem sözleşmesi bugünden sonrasını kurtarır; ESKİ sürümle bozulmuş bir
+ * depo hâlâ diskte duruyor ve kendiliğinden açılabilmeli.
+ *
+ * ŞEMADAN ÖNCE ÇALIŞMAK ZORUNDA: schema.sql'in `CREATE TABLE IF NOT EXISTS`i,
+ * göç "düşür" ile "yeniden adlandır" arasında kesilmişse hedefi BOŞ olarak
+ * yeniden yaratır; o andan sonra veri yetim tabloda kalır ve ayırt edilemez.
+ * Satır sayısı ölçütü tam da bu durumu ayırıyor — hiçbir dalda satır kaybolmaz.
+ */
+function recoverInterruptedMigrations(db: DatabaseSync): void {
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[])
+    .map((t) => t.name);
+  const orphans = tables.filter((n) => n.endsWith(MIGRATION_SUFFIX) && n.length > MIGRATION_SUFFIX.length);
+  if (orphans.length === 0) return;
+
+  const rowCount = (t: string) => Number((db.prepare(`SELECT COUNT(*) AS n FROM "${t}"`).get() as { n: number }).n);
+
+  inTransaction(db, () => {
+    for (const tmp of orphans) {
+      const target = tmp.slice(0, -MIGRATION_SUFFIX.length);
+      if (!tables.includes(target)) {
+        // "DROP TABLE eski" ile "RENAME" arasında kesilmiş: veri yalnız tmp'de.
+        db.exec(`ALTER TABLE "${tmp}" RENAME TO "${target}"`);
+      } else if (rowCount(target) === 0 && rowCount(tmp) > 0) {
+        // Hedef sonradan schema.sql tarafından BOŞ yaratılmış; gerçek veri tmp'de.
+        db.exec(`DROP TABLE "${target}"`);
+        db.exec(`ALTER TABLE "${tmp}" RENAME TO "${target}"`);
+      } else {
+        // Kopyalama yarıda kalmış: hedef hâlâ tam, tmp eksik bir kopya. Atılır ve
+        // göç aşağıda baştan koşar.
+        db.exec(`DROP TABLE "${tmp}"`);
+      }
+    }
+  });
+}
+
 function migrateCursors(db: DatabaseSync): void {
   const cols = db.prepare("PRAGMA table_info(cursors)").all() as { name: string; pk: number }[];
   if (cols.length === 0) return; // yeni depo: şema zaten güncel
@@ -58,8 +147,8 @@ function migrateCursors(db: DatabaseSync): void {
     // Aynı dosya yolu eski şemada birden çok satırda olabilir (kimlik değişimi
     // yetim satır bırakıyordu); en ileri imleci koruyoruz — geri gitmek veri
     // tekrarı demek.
-    db.exec(`
-      CREATE TABLE cursors_migrated (
+    rebuildTable(db, "cursors", (tmp) => `
+      CREATE TABLE ${tmp} (
         file_path    TEXT PRIMARY KEY,
         project_id   INTEGER NOT NULL REFERENCES projects(id),
         session_id   TEXT NOT NULL,
@@ -68,11 +157,9 @@ function migrateCursors(db: DatabaseSync): void {
         mtime_ms     REAL,
         last_seen_at TEXT
       );
-      INSERT INTO cursors_migrated (file_path, project_id, session_id, byte_offset, inode, mtime_ms, last_seen_at)
+      INSERT INTO ${tmp} (file_path, project_id, session_id, byte_offset, inode, mtime_ms, last_seen_at)
       SELECT file_path, project_id, session_id, MAX(byte_offset), inode, mtime_ms, last_seen_at
       FROM cursors GROUP BY file_path;
-      DROP TABLE cursors;
-      ALTER TABLE cursors_migrated RENAME TO cursors;
     `);
   }
 }
@@ -82,12 +169,14 @@ function migrateCursors(db: DatabaseSync): void {
  * `last_uuid` NOT NULL'dan nullable'a döndü (uuid taşımayan parti de checkpoint
  * yazabilsin diye — missing-checkpoint-identity).
  *
- * AYNI SINIF İKİNCİ KEZ: M1 denetiminde imleç tablosu için çıktı
+ * AYNI SINIF ÜÇÜNCÜ KEZ: M1 denetiminde imleç tablosu için çıktı
  * (schema-migration-breaks-cursor, o turun en ciddi bulgusuydu), M2 doğrulama
- * turunda filigran tablosu için çıktı. İki denetimde iki kez çıkması kalıcı bir
- * örüntü: `CREATE TABLE IF NOT EXISTS` var olan tabloya DOKUNMAZ, dolayısıyla
- * her tablo değişimi burada ayrıca ele alınmak zorunda. Yeni bir tablo şeması
- * değiştirildiğinde ilk yazılacak yer bu dosyadır.
+ * turunda filigran tablosu için, 2. doğrulama turunda ise göç adımlarının
+ * atomik olmaması olarak çıktı. Üç denetimde üç kez çıkması kalıcı bir örüntü:
+ * `CREATE TABLE IF NOT EXISTS` var olan tabloya DOKUNMAZ, dolayısıyla her tablo
+ * değişimi burada ayrıca ele alınmak zorunda. Yeni bir tablo şeması
+ * değiştirildiğinde ilk yazılacak yer bu dosyadır — ve yeniden kurma kalıbı
+ * kopyalanmaz, `rebuildTable` çağrılır.
  *
  * `last_ts` yokluğu tek başına ALTER TABLE ADD COLUMN ile kapanır (cursors.mtime_ms
  * kalıbı). Ama `last_uuid NOT NULL` kısıtı SQLite'ta ALTER ile kaldırılamaz —
@@ -111,8 +200,8 @@ function migrateWatermarks(db: DatabaseSync): void {
     return;
   }
 
-  db.exec(`
-    CREATE TABLE observer_watermarks_migrated (
+  rebuildTable(db, "observer_watermarks", (tmp) => `
+    CREATE TABLE ${tmp} (
       project_id  INTEGER NOT NULL REFERENCES projects(id),
       session_id  TEXT NOT NULL,
       last_uuid   TEXT,
@@ -121,11 +210,9 @@ function migrateWatermarks(db: DatabaseSync): void {
       PRIMARY KEY (project_id, session_id),
       CHECK (last_uuid IS NOT NULL OR last_ts IS NOT NULL)
     );
-    INSERT INTO observer_watermarks_migrated (project_id, session_id, last_uuid, last_ts, updated_at)
+    INSERT INTO ${tmp} (project_id, session_id, last_uuid, last_ts, updated_at)
     SELECT project_id, session_id, last_uuid, ${hasLastTs ? "last_ts" : "NULL"}, updated_at
     FROM observer_watermarks;
-    DROP TABLE observer_watermarks;
-    ALTER TABLE observer_watermarks_migrated RENAME TO observer_watermarks;
   `);
 }
 
@@ -171,6 +258,11 @@ export function openStore(path: string): Store {
     chmodSync(dirname(path), 0o700);
   }
   const db = new DatabaseSync(path);
+
+  // Şemadan ÖNCE: yarıda kesilmiş bir göçün ara tablosu ortadaysa schema.sql
+  // hedefi boş yeniden yaratıp veriyi yetim bırakıyor (gerekçe: fonksiyonun
+  // kendi yorumunda).
+  recoverInterruptedMigrations(db);
 
   const schema = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
   db.exec(schema);

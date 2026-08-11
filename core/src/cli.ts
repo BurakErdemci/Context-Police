@@ -29,25 +29,98 @@ register(claudeCodeAdapter);
  */
 class UsageError extends Error {}
 
+interface OptionSpec {
+  /** Değer alan seçenekler (`--ad değer` ya da `--ad=değer`). */
+  readonly values: readonly string[];
+  /** Değer ALMAYAN bayraklar. */
+  readonly flags: readonly string[];
+}
+
 /**
- * `--ad değer` okur. Bayrak HİÇ VERİLMEMİŞ olmakla DEĞERSİZ verilmiş olmak
- * ayrı iki şey: eski hâl ikisini de `undefined`a indiriyordu, dolayısıyla
- * `observe --model` (argv sonunda) ya da `observe --model --yes` sessizce
- * "varsayılan" sayılıyor, komut Codex tespitini başlatıp çok sonraki ilgisiz bir
- * kapıda duruyordu (bulgu: missing-cli-option-value). Yazım hatası kullanıcıya
- * yazım hatası olarak dönmeli.
+ * Komut başına TANINAN seçenekler. Liste KAPALI: burada olmayan bir seçenek
+ * kullanım hatasıdır, sessizce yutulmaz.
+ */
+const COMMANDS: Record<string, OptionSpec> = {
+  scan: { values: ["dir", "store"], flags: [] },
+  observe: {
+    values: ["project", "session", "dir", "store", "batch-tokens", "model", "effort"],
+    flags: ["yes"],
+  },
+  status: { values: ["store"], flags: [] },
+};
+
+let parsedOptions = new Map<string, string | true>();
+let parsedSpec: OptionSpec = { values: [], flags: [] };
+
+/**
+ * argv'yi komutun seçenek listesine karşı BİR KEZ, komut gövdesi çalışmadan
+ * önce ayrıştırır. Eskiden ayrıştırma yoktu: `arg()` argv'de `--ad` token'ını
+ * ARIYORDU ve bulamazsa "verilmemiş" sayıyordu.
  *
- * Değerin `--` ile başlaması eksik operandın en yaygın hâli. Tek tireli değer
+ * Ölçüldü (probes/cli-option-spelling-leaks.sh): `--model=`, `--effort=`,
+ * `-model x`, `--model good --model` ve `--effort low --effort` biçimlerinin
+ * BEŞİ DE kullanım hatası vermek yerine varsayılanla ilerleyip Codex tespitine
+ * kadar gidiyordu. Aramak yerine AYRIŞTIRMAK bu sınıfı topluca kapatır:
+ * bilinmeyen yazım "hiç verilmemiş" olamaz, çünkü her token bir kurala çarpar.
+ *
+ * Kurallar ve gerekçeleri:
+ * - `--` ile başlamayan token: `-model` gibi tek tireli yazımlar burada durur.
+ *   Konumsal operandımız yok, dolayısıyla belirsizlik de yok.
+ * - Bilinmeyen ad: yazım hatasının sessiz varsayılana dönüşmesini engeller.
+ * - Aynı seçenek iki kez: hangisinin geçerli olduğu tanımsız. Eski kod İLKİNİ
+ *   alıp ikinciyi hiç görmüyordu — kullanıcı ikincisinin geçtiğini sanıyordu.
+ * - Boş değer (`--model=` ya da `--model ""`): "değer verilmedi" ile aynı şey.
+ *
+ * Değerin `--` ile başlaması eksik operandın en yaygın hâli. Tek tireli DEĞER
  * reddedilmiyor: negatif sayı gibi meşru kullanımı var, ve `--model -x` zaten
  * validateModel'in kapısında duruyor.
  */
+function parseArgs(cmd: string, spec: OptionSpec): void {
+  const out = new Map<string, string | true>();
+  const argv = process.argv.slice(3);
+
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (!token.startsWith("--") || token === "--")
+      throw new UsageError(`beklenmeyen argüman: ${safe(token)} (seçenekler --ad biçiminde yazılır)`);
+
+    const eq = token.indexOf("=");
+    const name = eq === -1 ? token.slice(2) : token.slice(2, eq);
+    const takesValue = spec.values.includes(name);
+    if (!takesValue && !spec.flags.includes(name))
+      throw new UsageError(`bilinmeyen seçenek: --${safe(name)} (${cmd} için geçerli değil)`);
+    if (out.has(name)) throw new UsageError(`--${name} iki kez verildi`);
+
+    if (!takesValue) {
+      if (eq !== -1) throw new UsageError(`--${name} değer almaz`);
+      out.set(name, true);
+      continue;
+    }
+
+    let value: string | undefined;
+    if (eq !== -1) value = token.slice(eq + 1);
+    else if (argv[i + 1] !== undefined && !argv[i + 1]!.startsWith("--")) value = argv[++i];
+    if (value === undefined || value === "") throw new UsageError(`--${name} bir değer bekliyor`);
+    out.set(name, value);
+  }
+
+  parsedOptions = out;
+  parsedSpec = spec;
+}
+
+/** `--ad` değeri. Listede olmayan ad sorulması KOD hatasıdır, kullanım hatası değil. */
 function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  if (i === -1) return undefined;
-  const value = process.argv[i + 1];
-  if (value === undefined || value.startsWith("--"))
-    throw new UsageError(`--${name} bir değer bekliyor`);
-  return value;
+  if (!parsedSpec.values.includes(name))
+    throw new Error(`iç hata: --${name} bu komutun değer alan seçenekleri arasında yok`);
+  const v = parsedOptions.get(name);
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Değer almayan bayrak verildi mi. */
+function flag(name: string): boolean {
+  if (!parsedSpec.flags.includes(name))
+    throw new Error(`iç hata: --${name} bu komutun bayrakları arasında yok`);
+  return parsedOptions.get(name) === true;
 }
 
 const mb = (n: number) => (n / 1048576).toFixed(1) + " MB";
@@ -143,7 +216,7 @@ async function cmdObserve(): Promise<void> {
   }
   console.log(`codex ${det.version} bulundu`);
 
-  const yes = process.argv.includes("--yes");
+  const yes = flag("yes");
   // Sert tavan HER İKİ yolda da: --session yolunda tahmin yanılsa bile gerçek
   // sınır budur, scan yolunda ise tahmin hiç yapılamıyor (kaç turn geleceği
   // taramadan önce bilinmiyor) — tek koruma bu (missing-global-call-budget).
@@ -271,10 +344,16 @@ function cmdStatus(): void {
 
 const cmd = process.argv[2];
 try {
-  if (cmd === "scan") await cmdScan();
-  else if (cmd === "observe") await cmdObserve();
-  else if (cmd === "status") cmdStatus();
-  else usage();
+  const spec = cmd === undefined ? undefined : COMMANDS[cmd];
+  if (spec === undefined) usage();
+  else {
+    // Ayrıştırma komut gövdesinden ÖNCE: kullanım hatası için ne Codex ne depo
+    // gerekiyor, ve yazım hatasının maliyeti bir mesaj olmalı, bir süreç değil.
+    parseArgs(cmd!, spec);
+    if (cmd === "scan") await cmdScan();
+    else if (cmd === "observe") await cmdObserve();
+    else cmdStatus();
+  }
 } catch (err) {
   // Kullanım hatası her komutta aynı: mesaj + rc=1. Diğer hatalar olduğu gibi
   // yukarı çıkar — yığın izi teşhis için gerekli.
