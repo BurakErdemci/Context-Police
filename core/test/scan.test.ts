@@ -138,7 +138,7 @@ test("çağrı tahmini: süzülmüş bayt → parti sayısı", () => {
   assert.equal(estimateSessionCalls(64_001, 8000), 3);
 });
 
-test("--batch-tokens doğrulaması: tam sayı ve ≥500", () => {
+test("--batch-tokens doğrulaması: tam sayı ve ≥500 (üst sınır: audit-m2-cli)", () => {
   assert.equal(validateBatchTokens(undefined), 8000);
   assert.equal(validateBatchTokens("500"), 500);
   assert.equal(validateBatchTokens("12000"), 12000);

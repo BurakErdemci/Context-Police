@@ -10,7 +10,12 @@ import { listProjects, upsertProject } from "./store/projects.ts";
 import { listEvents, countEvents } from "./store/events.ts";
 import { Observer } from "./observer/observer.ts";
 import { createCodexExecutor } from "./adapters/codex.ts";
-import { observeGuard, estimateSessionCalls, validateBatchTokens } from "./observe-cmd.ts";
+import {
+  observeGuard, estimateCalls, validateBatchTokens, validateEffort, validateModel,
+  callBudget, costGate, budgetExhaustedMessage, budgetGuardedOnTurns,
+  type Effort,
+} from "./observe-cmd.ts";
+import type { Turn } from "./types.ts";
 import { getWatermark } from "./store/watermarks.ts";
 import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
 import { dropThroughWatermark } from "./observer/batch.ts";
@@ -89,20 +94,23 @@ async function cmdScan(): Promise<void> {
 
 async function cmdObserve(): Promise<void> {
   // Girdi doğrulaması EN ÖNDE: kullanım hatası için Codex kurulu olmak zorunda
-  // değil ve süreç başlatmadan önce bilinmesi ucuz.
+  // değil ve süreç başlatmadan önce bilinmesi ucuz. Yürütücü seçenekleri de
+  // buraya dahil — geçersiz bir --effort/--model Codex'in her çağrıyı
+  // reddetmesine, o da zehirli-parti yolunun turn'leri kalıcı olarak
+  // atlamasına yol açıyordu (unvalidated-executor-option-data-loss).
   let batchTokens: number;
+  let effort: Effort;
+  let model: string | undefined;
   try {
     batchTokens = validateBatchTokens(arg("batch-tokens"));
+    effort = validateEffort(arg("effort"));
+    model = validateModel(arg("model"));
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);
   }
 
-  const effortArg = arg("effort");
-  const executor = createCodexExecutor({
-    model: arg("model"),
-    reasoningEffort: (effortArg as "minimal" | "low" | "medium" | "high" | undefined) ?? "low",
-  });
+  const executor = createCodexExecutor({ model, reasoningEffort: effort });
 
   // K2: Codex sert bağımlılık. Yoksa yönlendir, çalışmayı deneme.
   const det = await executor.detect();
@@ -114,44 +122,72 @@ async function cmdObserve(): Promise<void> {
   console.log(`codex ${det.version} bulundu`);
 
   const yes = process.argv.includes("--yes");
+  // Sert tavan HER İKİ yolda da: --session yolunda tahmin yanılsa bile gerçek
+  // sınır budur, scan yolunda ise tahmin hiç yapılamıyor (kaç turn geleceği
+  // taramadan önce bilinmiyor) — tek koruma bu (missing-global-call-budget).
+  const maxCalls = callBudget(yes);
   const store = openStore(arg("store") ?? defaultStorePath());
+  let exitCode = 0;
   try {
-    const observer = new Observer({ store, executor, batchTokens });
+    const observer = new Observer({ store, executor, batchTokens, maxCalls });
     const sessionPath = arg("session");
 
     if (sessionPath) {
-      await observeSingleSession(store, observer, sessionPath, batchTokens, yes);
+      const halted = await observeSingleSession(store, observer, sessionPath, batchTokens, yes);
+      if (halted) exitCode = 3;
     } else {
       const guard = observeGuard(store, yes);
       if (!guard.ok) {
         console.error(guard.reason);
-        process.exit(3);
+        exitCode = 3;
+      } else {
+        console.log(
+          maxCalls === undefined
+            ? "maliyet tavanı: yok (--yes verildi)"
+            : `maliyet tavanı: en fazla ${maxCalls} Codex çağrısı (--yes ile kaldırılır)`,
+        );
+        await scanOnce(store, {
+          adapter: claudeCodeAdapter,
+          root: arg("dir"),
+          only: arg("project") ? [arg("project")!] : undefined,
+          onTurns: budgetGuardedOnTurns(
+            () => observer.stats.budgetExhausted,
+            (ctx: { projectId: number; sessionId: string; turns: Turn[] }) => observer.handleTurns(ctx),
+          ),
+        });
       }
-      await scanOnce(store, {
-        adapter: claudeCodeAdapter,
-        root: arg("dir"),
-        only: arg("project") ? [arg("project")!] : undefined,
-        onTurns: (ctx) => observer.handleTurns(ctx),
-      });
     }
 
-    const s = observer.stats;
-    console.log(`parti: ${s.batches}  codex çağrısı: ${s.calls}`);
-    console.log(`yeni bulgu: ${s.findings}  supersede: ${s.superseded}`);
-    if (s.skippedTurns > 0) console.log(`filigranla elenen tekrar turn: ${s.skippedTurns}`);
-    if (s.unprocessed > 0) console.log(`⚠ işlenemeyen parti: ${s.unprocessed}  (ayrıntı: status)`);
+    if (exitCode === 0) {
+      const s = observer.stats;
+      console.log(`parti: ${s.batches}  codex çağrısı: ${s.calls}`);
+      console.log(`yeni bulgu: ${s.findings}  supersede: ${s.superseded}`);
+      if (s.skippedTurns > 0) console.log(`filigranla elenen tekrar turn: ${s.skippedTurns}`);
+      if (s.unprocessed > 0) console.log(`⚠ işlenemeyen parti: ${s.unprocessed}  (ayrıntı: status)`);
+      if (s.budgetExhausted) {
+        // Yarım iş rc=0 dönemez: betikle koşan biri "bitti" sanar. Ayrı çıkış
+        // kodu, "onay gerekiyor" (3) ile "onayla başladı ama yarıda kaldı"yı ayırır.
+        console.error(`\n${budgetExhaustedMessage(s.calls, maxCalls)}`);
+        exitCode = 4;
+      }
+    }
   } finally {
+    // Kapanış finally'de, çıkış SONRA: process.exit() finally'yi çalıştırmıyor
+    // ve depo tanıtıcısı açık kalıyordu.
     store.close();
   }
+  if (exitCode !== 0) process.exit(exitCode);
 }
 
+/** Dönüş: maliyet kapısı işi durdurduysa true. Süreç çıkışı ÇAĞIRANA ait —
+ *  process.exit() burada finally'yi atlayıp tarama kilidini asılı bırakıyordu. */
 async function observeSingleSession(
   store: Store,
   observer: Observer,
   sessionPath: string,
   batchTokens: number,
   yes: boolean,
-): Promise<void> {
+): Promise<boolean> {
   const projPath = await readCwd(sessionPath);
   if (!projPath) throw new Error(`oturum dosyasından proje yolu çözülemedi: ${safe(sessionPath)}`);
   const sessionId = basename(sessionPath).replace(/\.jsonl$/, "");
@@ -168,17 +204,25 @@ async function observeSingleSession(
     // İmleçlere DOKUNULMAZ: imleç taramanın, filigran gözlemcinin (D-M2-2).
     const res = await readIncremental(sessionPath, 0, null, null);
     const wm = getWatermark(store, projectId, sessionId);
-    const fresh = dropThroughWatermark(res.turns, wm?.lastUuid ?? null);
+    // Zaman damgası da bir filigran kimliği (batch.ts): uuid tutmayınca eleme
+    // yapılmazsa önizleme "hepsi yeni" sanıp şişiyor ve --yes kapısını
+    // gereksiz tetikliyordu. Observer'ın kendi elemesiyle aynı ölçüt kullanılmalı.
+    const fresh = dropThroughWatermark(res.turns, wm?.lastUuid ?? null, wm?.lastTs ?? null);
 
     let filteredBytes = 0;
     for (const t of fresh) filteredBytes += Buffer.byteLength(t.text, "utf8");
-    const calls = estimateSessionCalls(filteredBytes, batchTokens);
-    console.log(`oturum: ${safe(sessionId)}  yeni turn: ${fresh.length}  tahmini çağrı: ~${calls}`);
-    if (calls > 20 && !yes) {
-      console.error(`tahmini ${calls} Codex çağrısı > 20: maliyet onayı için --yes ekleyin (D-M2-4).`);
-      process.exit(3);
+    const est = estimateCalls(filteredBytes, batchTokens);
+    console.log(
+      `oturum: ${safe(sessionId)}  yeni turn: ${fresh.length}  ` +
+        `parti: ${est.batches}  çağrı: beklenen ~${est.expected}, en kötü ${est.worst}`,
+    );
+    const gate = costGate(est, yes);
+    if (!gate.ok) {
+      console.error(gate.reason);
+      return true;
     }
     await observer.handleTurns({ projectId, sessionId, turns: fresh });
+    return false;
   } finally {
     releaseScanLock(store, holder);
   }
@@ -213,7 +257,15 @@ else {
 kullanım:
   context-police scan    [--dir <transcript kökü>] [--store <db yolu>]
   context-police observe [--project <yol>] [--session <jsonl>] [--dir <kök>] [--store <db>]
-                         [--batch-tokens N] [--model M] [--effort E] [--yes]
-  context-police status  [--store <db yolu>]`);
+                         [--batch-tokens 500..200000] [--model M]
+                         [--effort minimal|low|medium|high] [--yes]
+  context-police status  [--store <db yolu>]
+
+observe maliyeti:
+  --yes VERİLMEDİKÇE bir koşum en fazla 20 Codex çağrısı yapar; sınıra gelince
+  iş yarıda bırakılır (filigran ilerlemez, veri kaybolmaz) ve çıkış kodu 4 olur.
+  --yes bu tavanı kaldırır: harcamayı onaylamış olursunuz.
+
+çıkış kodları: 1 kullanım hatası · 2 codex yok · 3 onay gerekiyor · 4 bütçe doldu`);
   process.exit(cmd ? 1 : 0);
 }
