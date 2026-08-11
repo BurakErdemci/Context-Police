@@ -32,8 +32,23 @@ test("extractAnchors: tavan aşımı sessiz kırpılmaz, dropped sayılır", () 
   assert.equal(dropped, 30 - MAX_ANCHORS_PER_NOTE);
 });
 
-test("noteTimestamp: frontmatter modified > created > geri düşüş", () => {
+test("extractAnchors: tavan M0-D4 önceliğine uyar — yol seli içinde sembol hayatta kalır", () => {
+  const paths = Array.from({ length: 30 }, (_, i) => `src/mod${i}/dosya${i}.ts`).join(" ");
+  const { anchors, dropped } = extractAnchors(`${paths} ve \`scanOnce\` fonksiyonu`);
+  assert.equal(anchors.length, MAX_ANCHORS_PER_NOTE);
+  assert.equal(dropped, 31 - MAX_ANCHORS_PER_NOTE);
+  assert.deepEqual(anchors.filter((a) => a.kind === "symbol").map((a) => a.value), ["scanOnce"]);
+  // Aynı tür içinde metin sırası korunur: ilk yollar kalır, kuyruktakiler düşer.
+  assert.equal(anchors[1]!.value, "src/mod0/dosya0.ts");
+  assert.equal(anchors.at(-1)!.value, `src/mod${MAX_ANCHORS_PER_NOTE - 2}/dosya${MAX_ANCHORS_PER_NOTE - 2}.ts`);
+});
+
+test("noteTimestamp: frontmatter modified > created > geri düşüş, geçerli tarih ISO'ya normalize edilir", () => {
   assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00.000Z" }, "2026-08-11T00:00:00Z"), "2026-08-01T10:00:00.000Z");
   assert.equal(noteTimestamp({}, "2026-08-11T00:00:00Z"), "2026-08-11T00:00:00Z");
   assert.equal(noteTimestamp({ modified: "bozuk-tarih" }, "F"), "F"); // ayrıştırılamayan → geri düşüş
+  // ISO olmayan ama ayrıştırılabilir giriş. Saat dilimi GMT olarak yazıldı: dilimsiz
+  // yazılsaydı beklenen değer testi koşturan makinenin diliminden değişirdi.
+  assert.equal(noteTimestamp({ created: "11 Aug 2026 00:00:00 GMT" }, "F"), "2026-08-11T00:00:00.000Z");
+  assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00Z" }, "F"), "2026-08-01T10:00:00.000Z");
 });

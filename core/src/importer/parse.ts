@@ -27,12 +27,20 @@ export function parseNote(raw: string): ParsedNote {
 export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): string {
   for (const key of ["modified", "created", "date"]) {
     const v = fm[key];
-    if (v !== undefined && !Number.isNaN(Date.parse(v))) return v;
+    if (v === undefined) continue;
+    const t = Date.parse(v);
+    // ISO'ya normalize: churn penceresi (Görev 7) ve depodaki createdAt
+    // karşılaştırmaları tek biçim varsayıyor; "11 Aug 2026" gibi ayrıştırılabilir
+    // ama ISO olmayan bir frontmatter değeri oraya ham geçerse pencere kayar.
+    if (!Number.isNaN(t)) return new Date(t).toISOString();
   }
   return fallbackIso;
 }
 
 export const MAX_ANCHORS_PER_NOTE = 16;
+
+/** Tavan kırpmasının sırası (M0-D4); satır no çapası hiç üretilmediği için listede yok. */
+const ANCHOR_PRIORITY: readonly Anchor["kind"][] = ["symbol", "file_path", "commit_sha", "external_path"];
 
 // Satır numarası deseni BİLEREK yok (M0-D4): kırılgan ve içerik göstergesi değil.
 const SHA_RE = /\b[0-9a-f]{7,40}\b/g;
@@ -65,6 +73,10 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
     push("symbol", v);
   }
 
-  // Tavan: sessiz kırpma yok — çağıran dropped'ı olaya yazar (Görev 4).
-  return { anchors: all.slice(0, MAX_ANCHORS_PER_NOTE), dropped: Math.max(0, all.length - MAX_ANCHORS_PER_NOTE) };
+  // Tavana kimin gireceği M0-D4 önceliğiyle belirlenir: sembol çapası kayma
+  // tespitinde en güçlü sinyal, yol seli onu kurban etmemeli. Tür içinde metindeki
+  // geçiş sırası korunur (kararlı çıktı). Tavan: sessiz kırpma yok — çağıran
+  // dropped'ı olaya yazar (Görev 4).
+  const ordered = ANCHOR_PRIORITY.flatMap((kind) => all.filter((a) => a.kind === kind));
+  return { anchors: ordered.slice(0, MAX_ANCHORS_PER_NOTE), dropped: Math.max(0, ordered.length - MAX_ANCHORS_PER_NOTE) };
 }
