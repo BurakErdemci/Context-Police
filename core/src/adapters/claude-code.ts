@@ -161,9 +161,30 @@ export interface IncrementalResult {
 }
 
 /**
+ * Tek bir satır için üst sınır. Aşan satır MALFORMED sayılır, atlanır ve tampon
+ * boşaltılır — böylece imleç ilerler ve maliyet her taramada yeniden ödenmez.
+ *
+ * Sınır ölçüyle seçildi (11 Ağu 2026, ~/.claude/projects altında 542 MB / tüm
+ * .jsonl dosyaları, `awk` ile en uzun satır): gerçek verideki EN BÜYÜK satır
+ * 1.610.098 bayt (~1,54 MiB) — büyük bir tool_result. 8 MiB bunun ~5,2 katı,
+ * yani gerçek transcript'lerde veri kaybettirmez; ama tek bir dev/yarım satırın
+ * tarama döngüsünü CPU'ya boğmasını da engeller.
+ *
+ * Sınırın ikinci işi bellek: sınırı aşan satırın parçaları BİRİKTİRİLMEZ, yalnız
+ * uzunluğu sayılır (imleci doğru ilerletmek için), yani tampon 8 MiB'ı geçmez.
+ */
+export const MAX_LINE_BYTES = 8 * 1024 * 1024;
+
+/**
  * Artımlı okuma. Akış hâlinde okur — 245 MB'lık dosya bile belleğe alınmaz.
  * Bayt üzerinden çalışır (karakter değil): çok baytlı UTF-8 karakterler chunk
  * sınırına denk gelirse metin bozulmasın diye satırlar Buffer olarak biriktirilir.
+ *
+ * Biriktirme DOĞRUSAL: eski hâli her 64 KiB'lık parçada tamponun tamamını yeni
+ * bir Buffer'a kopyalıyordu (Buffer.concat([pending, chunk])), yani n baytlık bir
+ * satır için O(n²) kopya. Ölçüldü (bulgu: unbounded-line-buffering): 8 MiB → 32 MiB
+ * dosyada süre ~16×, tam karesel. Şimdi parçalar listede tutuluyor ve satır
+ * tamamlandığında TEK Buffer.concat yapılıyor — her bayt en fazla bir kez kopyalanır.
  */
 export async function readIncremental(
   filePath: string,
@@ -201,28 +222,63 @@ export async function readIncremental(
   if (start >= st.size) return res;
 
   const stream = createReadStream(filePath, { start });
-  let pending: Buffer = Buffer.alloc(0);
+  // Değişmez: `parts` içindeki hiçbir parça "\n" İÇERMEZ; hepsi işlenmemiş
+  // satırın kuyruğudur. Yeni gelen parçadaki newline'ları doğrudan o parçada
+  // arıyoruz — birikmiş tamponu yeniden taramaya gerek yok.
+  let parts: Buffer[] = [];
+  let pendingLen = 0;
+  /** İçinde bulunduğumuz satır sınırı aştı: parçaları at, yalnız uzunluğu say. */
+  let overlong = false;
   let consumed = start;
 
-  for await (const chunk of stream) {
-    pending = pending.length === 0 ? (chunk as Buffer) : Buffer.concat([pending, chunk as Buffer]);
+  for await (const c of stream) {
+    let chunk = c as Buffer;
 
     let nl: number;
-    while ((nl = pending.indexOf(0x0a)) !== -1) {
-      const lineBuf = pending.subarray(0, nl);
-      pending = pending.subarray(nl + 1);
-      consumed += lineBuf.length + 1;
+    while ((nl = chunk.indexOf(0x0a)) !== -1) {
+      const head = chunk.subarray(0, nl);
+      chunk = chunk.subarray(nl + 1);
+      const lineLen = pendingLen + head.length;
+      consumed += lineLen + 1;
 
-      const parsed = parseLine(lineBuf.toString("utf8"));
-      if (parsed.kind === "turn") res.turns.push(parsed.turn);
-      else if (parsed.kind === "skip") res.counts.skipped++;
-      else if (parsed.kind === "unknown") {
-        res.counts.unknown++;
-        const prev = res.unknownTypes.get(parsed.lineType);
-        if (prev) prev.count++;
-        else res.unknownTypes.set(parsed.lineType, { count: 1, shape: parsed.shape });
-      } else {
+      if (overlong || lineLen > MAX_LINE_BYTES) {
+        // Sessiz kayıp yok: mevcut malformed sayacına yazılır, o da scan.ts'te
+        // `malformed_line` olayına dönüşür.
         res.counts.malformed++;
+      } else {
+        // Tek concat: satır tamamlandığında, tam boyu bilinerek.
+        let lineBuf: Buffer;
+        if (pendingLen === 0) lineBuf = head;
+        else {
+          parts.push(head);
+          lineBuf = Buffer.concat(parts, lineLen);
+        }
+        const parsed = parseLine(lineBuf.toString("utf8"));
+        if (parsed.kind === "turn") res.turns.push(parsed.turn);
+        else if (parsed.kind === "skip") res.counts.skipped++;
+        else if (parsed.kind === "unknown") {
+          res.counts.unknown++;
+          const prev = res.unknownTypes.get(parsed.lineType);
+          if (prev) prev.count++;
+          else res.unknownTypes.set(parsed.lineType, { count: 1, shape: parsed.shape });
+        } else {
+          res.counts.malformed++;
+        }
+      }
+      parts = [];
+      pendingLen = 0;
+      overlong = false;
+    }
+
+    // Parçanın newline'sız kuyruğu bir sonraki satırın parçası.
+    if (chunk.length > 0) {
+      if (overlong || pendingLen + chunk.length > MAX_LINE_BYTES) {
+        overlong = true;
+        parts = []; // biriktirmeyi bırak: bellek sınırlı kalsın
+        pendingLen += chunk.length; // ama uzunluğu say: imleç doğru ilerlemeli
+      } else {
+        parts.push(chunk);
+        pendingLen += chunk.length;
       }
     }
   }
