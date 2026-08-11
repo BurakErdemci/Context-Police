@@ -36,6 +36,19 @@ CREATE TABLE IF NOT EXISTS cursors (
   last_seen_at TEXT
 );
 
+-- Gözlemci filigranı: oturum başına son işlenen turn uuid'i (D-M2-2).
+-- İmleçten AYRI, çünkü işleri farklı: imleç "nereden okunacak"ı, filigran
+-- "nereye kadar gözlemlendi"yi tutar. Teslim en-az-bir-kez olduğu için ikisi
+-- ayrışabilir; filigran bulgularla aynı tx'te ilerleyerek mükerrer üretimi keser.
+-- Turn içeriği burada YOK — transcript zaten diskte, depoda turn tablosu olmaz.
+CREATE TABLE IF NOT EXISTS observer_watermarks (
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  session_id  TEXT NOT NULL,
+  last_uuid   TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (project_id, session_id)
+);
+
 -- Aynı anda iki tarama aynı imleci okuyup aynı aralığı iki kez teslim
 -- edebiliyordu (denetim bulgusu). Tek satırlık kilit; sahibi ölürse
 -- bayatlama süresiyle devralınır.

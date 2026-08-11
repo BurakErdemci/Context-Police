@@ -7,6 +7,8 @@ import { openStore } from "../src/store/db.ts";
 import { upsertProject, getCursor, setCursor, listProjects } from "../src/store/projects.ts";
 import { appendFinding, supersede, restore, listActive, getAnchors, getFinding } from "../src/store/findings.ts";
 import { logEvent, listEvents, countEvents } from "../src/store/events.ts";
+import { getWatermark, setWatermark } from "../src/store/watermarks.ts";
+import { tmpStorePath } from "./helpers.ts";
 
 function seed() {
   const s = openStore(":memory:");
@@ -144,4 +146,35 @@ test("olaylar yazılıyor, filtreleniyor, sayılıyor", () => {
   assert.match(rows[1]!.detail!, /uydurma/);
   assert.match(rows[0]!.at, /^\d{4}-\d{2}-\d{2}T.*Z$/);
   s.close();
+});
+
+// --- gözlemci filigranı (D-M2-2) ---
+
+test("filigran oturum başına yazılır, okunur, üstüne yazılır", () => {
+  const store = openStore(":memory:");
+  const pid = upsertProject(store, { path: "/p", adapterId: "claude-code", transcriptDir: "/t" });
+  assert.equal(getWatermark(store, pid, "s1"), null);
+
+  setWatermark(store, { projectId: pid, sessionId: "s1", lastUuid: "uuid-5" });
+  assert.equal(getWatermark(store, pid, "s1")!.lastUuid, "uuid-5");
+
+  setWatermark(store, { projectId: pid, sessionId: "s1", lastUuid: "uuid-9" });
+  assert.equal(getWatermark(store, pid, "s1")!.lastUuid, "uuid-9");
+
+  // Oturumlar birbirine karışmaz.
+  assert.equal(getWatermark(store, pid, "s2"), null);
+  store.close();
+});
+
+test("eski şemalı depo açılınca filigran tablosu kendiliğinden gelir", () => {
+  // schema.sql her açılışta CREATE TABLE IF NOT EXISTS ile koşuyor (M1 kalıbı);
+  // yeni tablo için ayrı migrasyon gerekmediğini bu test sabitler.
+  const path = tmpStorePath();
+  const once = openStore(path);
+  once.close();
+  const again = openStore(path);
+  const pid = upsertProject(again, { path: "/p", adapterId: "claude-code", transcriptDir: "/t" });
+  setWatermark(again, { projectId: pid, sessionId: "s", lastUuid: "u1" });
+  assert.equal(getWatermark(again, pid, "s")!.lastUuid, "u1");
+  again.close();
 });
