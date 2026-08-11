@@ -194,10 +194,53 @@ göçün atomikliği. Üç ayrı denetimde üç kez = örüntü.
    `events` silinemez. Temiz çözüm `scan.ts`'in bütçe bitişini erken durdurma
    sinyali sayması — M3'e devredildi.
 
-## 11. Tavan aşıldı — mimar kararı bekleyen iki tasarım değişikliği
+## 11. Tavan aşıldı — iki kök tasarım değişikliği **yapıldı**
 
-3. tur sıfır blocker vermedi. Dördüncü bir yama turu yerine iki kök çare öneriliyor;
-karar Burak'ın (bu rapor onun önüne bu haliyle gidiyor).
+3. tur sıfır blocker vermedi. Dördüncü bir yama turu yerine iki kök çare önerildi;
+**Burak ikisini de M2 kapanmadan yapmayı seçti** (11 Ağu 2026). Sonuç:
+`f5b2793` (B) ve `fdfd4fe` (A). Test 182 → **199**, hepsi yeşil.
+
+Kanıt — 3. turun probe'ları ana ağaçta kırmızıdan yeşile döndü:
+`equal-timestamp-watermark-loss` 0 · `uuidless-backdated-watermark-loss` 0 ·
+`duplicate-terminal-uuid-loop` 0 · `legitimate-unicode-anchor-rejection` 0.
+Önceki turların probe'ları regresyonsuz: `reordered-uuid-turn-loss` 0 ·
+`equal-or-older-timestamp-loss` 0 · `emoji-anchor-rejected` 0. Gerçek akış
+reprosu: modele hiç gitmeyen turn **20 → 0**.
+
+İki probe bilinçli olarak kırmızı bırakıldı ve demote edildi (§6'ya ek):
+`nonstandard-emoji-zwj-bypass` ve `invisible-anchor-bypass` — ikisi de "görünmez
+ama zararsız" karakterleri şikayet ediyor (U+034F, U+115F, U+180B, U+3164, ZWJ);
+yeni tasarımda çapa **veri** sayıldığı için kabul ediliyorlar. Bu demote'lar
+**M3'ün git doğrulamasına ve M5'in kaçışlamasına borçlu** — ikisi de henüz
+yazılmadı, M3 planında bu borç kapatılmalı.
+
+### Ne değişti
+
+**A — filigran kimliği konumsal oldu.** `scan.ts` artık `onTurns`'a teslimatın
+bayt aralığını veriyor (`{from, to, truncated}`); filigran "şu ofsete kadar
+işlendi" tutuyor. `last_uuid`/`last_ts` yalnız teşhis alanı olarak kaldı, karar
+yolundan çıktı; belirsizlik mantığı ve ona bağlı üç olay tipi silindi. Mükerrer
+uuid, eşit damga, geri giden damga, uuid'sizlik — dördü de artık **konuyla
+ilgisiz**, çünkü karar içerikten değil konumdan geliyor.
+Uygulayıcı iki yerde brief'in ötesine geçti, ikisi de gerekliydi: (1) ofset yalnız
+teslimatın tamamı işlenince ilerliyor, yarım iş teslimat kimliği + işlenen turn
+sayısıyla saklanıyor — aksi hâlde `--max-calls` ile koşan uzun oturum hiç
+ilerlemezdi; (2) `--session` artık dosyayı 0'dan değil filigran ofsetinden okuyor,
+yani "her koşumda her şeyi yeniden gönderme" kusuru da kapandı.
+
+**B — çapa filtresi daraltıldı.** Elle Unicode sınıflandırma (~55 satırlık emoji
+bağlam denetimi) kaldırıldı. Reddedilen küme artık dar ve tartışmasız: C0/C1, DEL,
+satır sonu, U+2028/2029, bidi kontrolleri, ve yalnız kalan vekil (`\p{Cs}` — bu
+bir görünürlük değil iyi-biçimlilik meselesi: UTF-8 gidiş-dönüşü bozuyor).
+Gerisi kabul: emoji, ZWJ, varyasyon seçicisi, tag dizileri, CJK, Türkçe, boşluk.
+
+### Kalan endişeler (M3'e devir)
+
+1. Kısmi örtüşmede teslimatın tamamı yeniden Codex'e gidiyor — bilinçli tercih
+   (kayıp yerine tekrar) ama gerçek veride sıklığı ölçülmedi.
+2. `--session` yolu inode/mtime taşımıyor, yani aynı boyutta yerinde yeniden yazımı
+   göremiyor; ofset tabanlı karara geçildiği için bunun etkisi büyüdü.
+3. Yukarıdaki iki çapa demote'unun M3/M5 borcu.
 
 **A. Filigranı kimlikten çıkarma, teslimatın kendisine sor.**
 `scan.ts` her teslimatta hangi bayt aralığını okuduğunu kesin biliyor (imleç zaten
