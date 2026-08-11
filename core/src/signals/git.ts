@@ -1,5 +1,10 @@
-// Salt-okunur git yardımcısı. Tek yan etkisi best-effort fetch (D-M3-5) — o da
-// çalışma ağacına değil .git'e dokunur ve --no-fetch ile kapatılabilir.
+// Salt-okunur git yardımcısı. Tek yan etkisi fetch, ve o da AÇIK istekle:
+// `opts.fetch === true` değilse ağa çıkılmaz. Varsayılan bilerek güvenli tarafta
+// (denetim: transcript-cwd-fetch) — fetch, hedef reponun .git/config'indeki
+// `remote.origin.uploadpack` üzerinden keyfî YEREL komut çalıştırabiliyor ve
+// hedef repo transcript'teki `cwd` alanından, yani güvenilmeyen veriden seçiliyor.
+// Varsayılanı "alan verilmezse fetch KOŞAR" bırakmak, yeni bir çağıranın alanı
+// unutmasını sessiz bir güvenlik gerilemesine çeviriyordu.
 // Her çağrı zaman aşımlı: asılı bir git süreci arka plan denetçisini asamaz.
 //
 // TEMEL SÖZLEŞME (denetim 2026-08-11, error-path turu): bu modül "hayır" ile
@@ -24,6 +29,15 @@ export interface GitContext {
   head: string;
   /** origin/<default> çözümü; null = origin yok, yalnız çalışma ağacı denetlenir. */
   originRef: string | null;
+  /**
+   * Fetch İSTENDİ ama arızalandı. Alan opsiyonel — yokluğu "fetch sorunsuzdu"
+   * DEĞİL "fetch istenmedi ya da başarılıydı" demek; ikisi de ölçümü tazelemek
+   * adına bir şey vaat etmiyor, arıza ise ediyor.
+   * Gerekçe: eski kod `await git(...)` dönüşünü ATIYORDU. Arıza sessiz kalınca
+   * denetim BAYAT bir origin ref'ine karşı koşup sonucu taze sanıyor — ölçümü
+   * sessizce yanlış yapan sınıf. Çağıran (audit.ts) bunu olaya ve özete taşır.
+   */
+  fetchFailed?: { reason: string };
 }
 
 /**
@@ -100,7 +114,13 @@ export async function openGit(
   const head = await git(root.out, ["rev-parse", "HEAD"]);
   if (head.kind !== "ok") return null; // commit'siz repo: denetlenecek geçmiş yok
 
-  if (opts.fetch !== false) await git(root.out, ["fetch", "--quiet", "origin"]); // best-effort
+  // AÇIK istek şartı: `!== false` idi, yani alanı unutan her çağıran fetch
+  // koşturuyordu. Varsayılan artık güvenli tarafta (dosya başındaki gerekçe).
+  let fetchFailed: { reason: string } | undefined;
+  if (opts.fetch === true) {
+    const f = await git(root.out, ["fetch", "--quiet", "origin"]);
+    if (f.kind === "failed") fetchFailed = { reason: f.reason };
+  }
 
   let originRef: string | null = null;
   // Ölçüm pin'i (D-M3-8) her adaydan önce gelir: altın set origin'in BUGÜNKÜ
@@ -112,7 +132,9 @@ export async function openGit(
     const r = await git(root.out, ["rev-parse", "--verify", "--quiet", `${cand}^{commit}`], { noExit: 1 });
     if (r.kind === "ok") { originRef = cand; break; }
   }
-  return { repoRoot: root.out, head: head.out, originRef };
+  return fetchFailed === undefined
+    ? { repoRoot: root.out, head: head.out, originRef }
+    : { repoRoot: root.out, head: head.out, originRef, fetchFailed };
 }
 
 /**

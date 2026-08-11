@@ -110,28 +110,35 @@ export async function importMemoryDir(
 
     const { frontmatter } = parseNote(raw);
     const { anchors, dropped } = extractAnchors(raw);
-    // Yeni kayıt ve eskisinin supersede'i TEK işlemde: arada çökme, aynı dosyanın
-    // iki canlı temsilini bırakırdı (yukarıdaki "en yeni" sorgusu sessizce
-    // eskisini gözden kaçırır).
-    const newId = store.tx(() => {
-      const id = appendFinding(store, {
+    // Yeni kayıt, eskisinin supersede'i VE bunları açıklayan olaylar TEK işlemde.
+    // İki ayrı gerekçe, ikisi de "arada çökme":
+    //   - kayıt/supersede ayrı olsaydı aynı dosyanın iki canlı temsili kalırdı
+    //     (yukarıdaki "en yeni" sorgusu sessizce eskisini gözden kaçırır);
+    //   - olay tx'in DIŞINDA yazılıyordu (denetim: import-event-outside-transaction):
+    //     olay yazımı patlarsa ya da süreç arada ölürse append-only tablo ile
+    //     denetim günlüğü çelişiyordu — kayıt superseded ama sebebini açıklayan
+    //     olay yok, yani §3.2'nin "geri alınabilirlik" iddiası kanıtsız kalıyordu.
+    store.tx(() => {
+      const newId = appendFinding(store, {
         projectId, source: "imported", content: raw, sourceRef: path, anchors,
         // Not tarihi frontmatter'dan: churn penceresi (Görev 7) import gününden
         // değil notun yazıldığı günden başlamalı, yoksa her not "bugün doğmuş" olur.
         createdAt: noteTimestamp(frontmatter, nowIso()),
       });
-      if (existing) supersede(store, existing.id, id);
-      return id;
+      if (dropped > 0)
+        logEvent(store, { projectId, kind: "import_anchor_overflow", detail: { file: name, kept: anchors.length, dropped } });
+      if (existing) {
+        supersede(store, existing.id, newId);
+        logEvent(store, {
+          projectId, kind: "finding_superseded",
+          detail: { oldId: existing.id, newId, reason: "memory_file_changed", file: name },
+        });
+      }
     });
-    if (dropped > 0)
-      logEvent(store, { projectId, kind: "import_anchor_overflow", detail: { file: name, kept: anchors.length, dropped } });
-    if (existing) {
-      sum.replaced++;
-      logEvent(store, {
-        projectId, kind: "finding_superseded",
-        detail: { oldId: existing.id, newId, reason: "memory_file_changed", file: name },
-      });
-    } else sum.added++;
+    // Sayaçlar tx'ten SONRA: geri alınan bir işlem özet sayısına yansımamalı
+    // (tx atarsa buraya hiç gelinmez).
+    if (existing) sum.replaced++;
+    else sum.added++;
   }
 
   // Diskte artık olmayan dosyaların temsilleri: superseded (yerine geçen yok).
@@ -141,9 +148,15 @@ export async function importMemoryDir(
     projectId,
   ).filter((r) => !currentRefs.has(r.source_ref));
   for (const g of gone) {
-    supersede(store, g.id);
+    // Yukarıdakiyle aynı gerekçe: supersede ile onu açıklayan olay ayrılamaz.
+    // Burada tek satır bile olsa tx şart — olay yazımı patlarsa kayıt sebepsiz
+    // superseded kalırdı, ve "yanlışsa tek tıkla geri al" iddiası günlükten
+    // okunamaz hâle gelirdi.
+    store.tx(() => {
+      supersede(store, g.id);
+      logEvent(store, { projectId, kind: "import_file_deleted", detail: { findingId: g.id, file: g.source_ref } });
+    });
     sum.deleted++;
-    logEvent(store, { projectId, kind: "import_file_deleted", detail: { findingId: g.id, file: g.source_ref } });
   }
 
   return sum;

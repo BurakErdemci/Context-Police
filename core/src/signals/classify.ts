@@ -5,11 +5,11 @@
 import type { ExecutorAdapter } from "../adapters/executor.ts";
 import type { Candidate, NoteView } from "./contradiction.ts";
 import { parseNote } from "../importer/parse.ts";
-// Veri-bloğu çiti gözlemci prompt'uyla ORTAK tutuluyor: aynı sınıf iki yerde
-// (transcript → supersedes, not metni → celiski) ve iki ayrı sınır tanımı,
-// birinin diğerinden sessizce ayrışması demek. Tanım şu an observer/prompt.ts'te
-// yaşıyor; ortak bir modüle taşınması bu turun dosya kapsamı dışındaydı.
-import { DATA_FENCE_RULE, fenceUntrusted, neutralizeFence } from "../observer/prompt.ts";
+// Veri-bloğu çiti gözlemci prompt'uyla ORTAK: aynı sınıf iki yerde (transcript →
+// supersedes, not metni → çelişki) ve iki ayrı sınır tanımı, birinin diğerinden
+// sessizce ayrışması demek. Tanım artık ortak modülde — eskiden observer/prompt.ts'ten
+// alınıyordu, yani sinyal katmanı gözlemci katmanına bağımlıydı.
+import { DATA_FENCE_RULE, fenceUntrusted, neutralizeFence } from "../prompt-fence.ts";
 
 export const MAX_CLASSIFY_ITEMS = 20; // koşum başına; taşan sayı raporlanır
 const EXCERPT_CHARS = 1500;
@@ -73,7 +73,7 @@ export function buildClassifyPrompt(items: ClassifyItem[]): string {
   // (denetim: classify-note-prompt-injection). Guillemet bir sınır değildi —
   // metnin içinde de geçebiliyor. Artık her alıntı etiketli bir veri bloğunda,
   // blok işaretleri metnin içinde kurulamıyor. TAM koruma DEĞİL: gerekçesi ve
-  // sınırları observer/prompt.ts'teki DATA_FENCE_RULE yorumunda.
+  // sınırları prompt-fence.ts'teki DATA_FENCE_RULE yorumunda.
   const rendered = items.map((it) => {
     // Gerekçe de dolaylı olarak not metninden türüyor ("ortak çapa: <yol>"):
     // başlık satırında duruyor, o yüzden bloğa alınmıyor ama etkisizleştiriliyor.

@@ -107,6 +107,12 @@ export interface AuditSummary {
    * ancak böyle ayırt edebiliyor.
    */
   measurementFailures: number;
+  /**
+   * `--fetch` istendi ama fetch arızalandı: origin ref'i BAYAT olabilir.
+   * Ayrı bir alan, çünkü çapa sinyali yine de koşuyor — yani hiçbir sayaçta iz
+   * bırakmıyor ve sessiz kalırsa kullanıcı bayat bir ölçümü taze sanıyor.
+   */
+  fetchFailed: boolean;
 }
 
 interface ScoreEntry {
@@ -135,7 +141,7 @@ export async function auditProject(
   const sum: AuditSummary = {
     runId, import: null, gitAvailable: false, checked: 0, suspects: 0, cleared: 0,
     candidates: 0, classified: false, contradictions: 0, classifyDropped: 0, classifyCalls: 0,
-    anchorStates: emptyAnchorStates(), measurementFailures: 0,
+    anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
   };
 
   /** Her denetim olayı koşum kimliği taşır — tek yazma yolu bu. */
@@ -163,6 +169,13 @@ export async function auditProject(
     sum.gitAvailable = ctx !== null;
     if (ctx === null)
       ev("anchor_signal_disabled", { path: project.path });
+    // Fetch arızası sinyali KAPATMAZ (yerel geçmiş hâlâ ölçülebilir) ama tazelik
+    // iddiasını düşürür: bayat bir origin ref'ine karşı ölçüp bunu taze sanmak,
+    // ölçümü sessizce yanlış yapar. Bu yüzden hem günlüğe hem özete.
+    if (ctx?.fetchFailed !== undefined) {
+      sum.fetchFailed = true;
+      ev("git_fetch_failed", { path: project.path, reason: ctx.fetchFailed.reason.slice(0, 200) });
+    }
     // Pin İSTENDİ ama tutmadı: sessizce yalnız HEAD'e karşı koşmak yerine dur.
     // (git yoksa hüküm zaten tümden kapalı ve `anchor_signal_disabled` yazılı —
     // orada ayrıca patlamak kullanıcıya yeni bir şey söylemezdi.)
@@ -289,6 +302,7 @@ export async function auditProject(
       checked: sum.checked, suspects: sum.suspects, cleared: sum.cleared,
       candidates: sum.candidates, contradictions: sum.contradictions,
       classifyCalls: sum.classifyCalls, measurementFailures: sum.measurementFailures,
+      fetchFailed: sum.fetchFailed,
       importErrors: sum.import?.errors ?? 0, importRejected: sum.import?.rejected ?? 0,
     });
     return sum;

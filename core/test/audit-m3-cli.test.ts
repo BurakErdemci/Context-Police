@@ -373,7 +373,11 @@ test("[cli] SIGINT: kilit bırakılır ve yarım denetim depoda audit_failed ola
 
   const store = openStore(storePath);
   assert.equal(store.get<{ n: number }>("SELECT COUNT(*) n FROM scan_lock")!.n, 0,
-    "kilit asılı kalırsa sonraki denetim bir saat boyunca hiç başlayamaz");
+    // İddia aynı, gerekçesi güncel: ölü sahip artık HEMEN devralınıyor (lock.ts),
+    // yani asılı kilit kalıcı bir tıkanma değil. Yine de temiz kapanış şart —
+    // devralma bir `scan_lock_stolen` olayı yazar ve düzgün kapanmış bir
+    // denetimin ardından o soru günlüğe hiç düşmemeli.
+    "düzgün kapanışta kilit bırakılmalı: aksi hâlde sonraki koşum devralmak zorunda kalır");
   assert.equal(countEvents(store, "audit_started"), 1);
   assert.equal(countEvents(store, "audit_completed"), 0, "denetim bitmedi");
   assert.equal(countEvents(store, "audit_failed"), 1, "yarım denetim 'ölçüldü, temiz' ile karışmamalı");

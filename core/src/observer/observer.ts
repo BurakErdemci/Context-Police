@@ -264,6 +264,11 @@ export class Observer {
           sessionId, lastUuid: batch.lastUuid, lastTs: batch.lastTs, turnCount: batch.turns.length,
           estTokens: batch.estTokens, newFindings: written,
           superseded: supersededCount, droppedSupersedes,
+          // Biçim/tür doğrulamasından düşen çapalar (prompt.ts: hex olmayan sha,
+          // bayrak şekilli yol). Parti reddedilmediği için başka hiçbir yerde
+          // görünmüyordu — sessiz düşüş, çapasını kaybeden bulguyu denetim
+          // yüzeyinden çıkarıyor ve bunun sebebi hiçbir kayıtta yoktu.
+          droppedAnchors: outcome.droppedAnchors,
         },
       });
     });
@@ -316,7 +321,10 @@ export class Observer {
    */
   private async callWithRecovery(
     prompt: string,
-  ): Promise<{ ok: true; items: ObserverItem[] } | { ok: false; error: string; budget?: true }> {
+  ): Promise<
+    | { ok: true; items: ObserverItem[]; droppedAnchors: number }
+    | { ok: false; error: string; budget?: true }
+  > {
     const stop = { ok: false, error: "maliyet bütçesi (maxCalls) doldu", budget: true } as const;
 
     if (!this.hasBudget()) return stop;

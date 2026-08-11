@@ -80,6 +80,14 @@ export type EventKind =
   /** Proje git deposu değil (ya da commit'siz): çapa sinyali KAPALI koştu. */
   | "anchor_signal_disabled"
   /**
+   * `--fetch` İSTENDİ ama fetch arızalandı: denetim BAYAT bir origin ref'ine
+   * karşı koştu. Sinyal kapanmıyor (çalışma ağacı ve yerel geçmiş hâlâ geçerli)
+   * ama tazelik iddiası düşüyor — ve bayat bir ölçümü taze sanmak, ölçümü
+   * sessizce yanlış yapar. Eskiden fetch dönüşü hiç okunmuyordu; arıza ne
+   * günlükte ne ekranda görünüyordu. Detay: sınıflandırılmış sebep.
+   */
+  | "git_fetch_failed"
+  /**
    * Denetimin yaşam döngüsü — proje başına, `detail.runId` ile. Gerekçe ölçüm:
    * import bir transaction'da, skorlar çok sonra BAŞKASINDA commit ediliyor;
    * arada süreç ölürse not `active`/skor 0 kalıyor ve bu "ölçüldü, temiz çıktı"

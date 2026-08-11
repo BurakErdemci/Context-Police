@@ -21,7 +21,10 @@ import {
 } from "./observe-cmd.ts";
 import { logEvent } from "./store/events.ts";
 import type { Turn } from "./types.ts";
-import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
+import { acquireScanLock, releaseScanLock, ScanLockBusy } from "./store/lock.ts";
+import {
+  EXIT_USAGE, EXIT_NO_CODEX, EXIT_NEEDS_APPROVAL, EXIT_BUDGET, EXIT_LOCK_BUSY,
+} from "./cli-exit.ts";
 import { dropThroughWatermark, type DeliveryRange } from "./observer/batch.ts";
 import { basename, dirname } from "node:path";
 
@@ -31,9 +34,11 @@ register(claudeCodeAdapter);
  * Düzenli kapanış kancaları. Ölçüldü (denetim 2026-08-11,
  * probes/audit-kill-leaves-active.sh): Node varsayılanında SIGINT/SIGTERM
  * `finally` bloklarını KOŞTURMADAN süreci bitiriyor — yani Ctrl-C tarama
- * kilidini asılı (lock.ts: canlı olmayan sahip bile bir saat bayat sayılmıyor,
- * yani sonraki denetim bir saat boyunca hiç başlayamaz) ve denetimi yarım
- * bırakıyordu. Kanca listesi LIFO: en son alınan kaynak ilk bırakılır.
+ * kilidini asılı ve denetimi yarım bırakıyordu. Kilidin asılı kalması artık
+ * kalıcı bir tıkanma DEĞİL (lock.ts: ölü sahip hemen devralınıyor), ama yine de
+ * bir arıza: devralma bir olay yazar ve "kilit çalındı mı" sorusunu günlüğe
+ * taşır — düzgün kapanışta hiç sorulmaması gereken bir soru.
+ * Kanca listesi LIFO: en son alınan kaynak ilk bırakılır.
  */
 const interruptHandlers: ((signal: string) => void)[] = [];
 
@@ -244,7 +249,7 @@ async function cmdObserve(): Promise<void> {
     model = validateModel(arg("model"));
   } catch (err) {
     console.error((err as Error).message);
-    process.exit(1);
+    process.exit(EXIT_USAGE);
   }
 
   const executor = createCodexExecutor({ model, reasoningEffort: effort });
@@ -254,7 +259,7 @@ async function cmdObserve(): Promise<void> {
   if (!det.found) {
     console.error(`codex bulunamadı: ${det.error ?? "PATH'te yok"}`);
     console.error("kurulum: npm install -g @openai/codex  (ya da https://developers.openai.com/codex)");
-    process.exit(2);
+    process.exit(EXIT_NO_CODEX);
   }
   console.log(`codex ${det.version} bulundu`);
 
@@ -271,12 +276,12 @@ async function cmdObserve(): Promise<void> {
 
     if (sessionPath) {
       const halted = await observeSingleSession(store, observer, sessionPath, batchTokens, yes);
-      if (halted) exitCode = 3;
+      if (halted) exitCode = EXIT_NEEDS_APPROVAL;
     } else {
       const guard = observeGuard(store, yes);
       if (!guard.ok) {
         console.error(guard.reason);
-        exitCode = 3;
+        exitCode = EXIT_NEEDS_APPROVAL;
       } else {
         console.log(
           maxCalls === undefined
@@ -306,7 +311,7 @@ async function cmdObserve(): Promise<void> {
         // Yarım iş rc=0 dönemez: betikle koşan biri "bitti" sanar. Ayrı çıkış
         // kodu, "onay gerekiyor" (3) ile "onayla başladı ama yarıda kaldı"yı ayırır.
         console.error(`\n${budgetExhaustedMessage(s.calls, maxCalls)}`);
-        exitCode = 4;
+        exitCode = EXIT_BUDGET;
       }
     }
   } finally {
@@ -388,7 +393,7 @@ async function cmdAudit(): Promise<void> {
   if (!det.found) {
     console.error(`codex bulunamadı: ${det.error ?? "PATH'te yok"}`);
     console.error("kurulum: npm install -g @openai/codex  (ya da https://developers.openai.com/codex)");
-    process.exit(2);
+    process.exit(EXIT_NO_CODEX);
   }
 
   // Fetch VARSAYILAN KAPALI (denetim: transcript-cwd-fetch). Ölçüldü: denetlenecek
@@ -475,7 +480,7 @@ async function cmdAudit(): Promise<void> {
         // Onay gerekiyor: TEK ücretli çağrı yapılmadan durulur (observe ile aynı
         // çıkış kodu — 3 "onay gerekiyor", 4 "onayla başladı ama yarıda kaldı").
         console.error(gate.reason);
-        exitCode = 3;
+        exitCode = EXIT_NEEDS_APPROVAL;
       } else {
         const results: { path: string; id: number; summary: AuditSummary }[] = [];
         let halted = false;
@@ -501,7 +506,7 @@ async function cmdAudit(): Promise<void> {
 
         if (halted) {
           console.error(`\n${auditBudgetExhaustedMessage(budget.spent, results.length, targets.length, maxCalls)}`);
-          exitCode = 4;
+          exitCode = EXIT_BUDGET;
         }
       }
     } finally {
@@ -536,6 +541,11 @@ function printAuditResults(
         console.log(`  ⚠ import reddedilen girdi: ${s.import.rejected}  (hafıza ağacının dışını gösteriyordu)`);
     }
     if (!s.gitAvailable) console.log("  ⚠ git yok: çapa sinyali KAPALI, yalnız çelişki koşuyor");
+    // Fetch arızası sinyali kapatmadığı için hiçbir sayaçta iz bırakmıyor:
+    // burada söylenmezse hiç söylenmez, ve kullanıcı bayat bir origin'e karşı
+    // yapılmış ölçümü taze sanır.
+    if (s.fetchFailed)
+      console.log("  ⚠ git fetch başarısız: origin ref'i BAYAT olabilir, ölçüm eski uca karşı koştu (ayrıntı: status)");
     console.log(`  denetlenen: ${s.checked}  şüpheli: ${s.suspects}  temize dönen: ${s.cleared}`);
     // "codex çağrısı" GERÇEK koşum sayısıdır, aday sayısı değil: tek toplu
     // sınıflama yürütücü tekrarı ya da düzeltme turuyla birden çok koşum
@@ -580,7 +590,8 @@ function cmdStatus(): void {
     console.log(`denetim: başlayan ${countEvents(store, "audit_started")}, ` +
       `biten ${countEvents(store, "audit_completed")}, ` +
       `kesilen ${countEvents(store, "audit_failed")}, ` +
-      `ölçüm arızası ${countEvents(store, "anchor_measurement_failed")}`);
+      `ölçüm arızası ${countEvents(store, "anchor_measurement_failed")}, ` +
+      `fetch arızası ${countEvents(store, "git_fetch_failed")}`);
   } finally {
     store.close();
   }
@@ -600,6 +611,14 @@ try {
     else cmdStatus();
   }
 } catch (err) {
+  // Kilit çakışması ÖNCE ve AYRI kodla: ölçüldü (probes/lock-busy-exit-is-usage.sh)
+  // ScanLockBusy hiç yakalanmıyordu — kullanıcı yığın izi görüyor ve rc=1
+  // dönüyordu, yani "argümanın yanlış" ile bayt bayt aynı. Oysa tepki taban
+  // tabana zıt: burada argüman doğru, tek doğru davranış BEKLEYİP TEKRAR DENEMEK.
+  if (err instanceof ScanLockBusy) {
+    console.error(`${err.message} — bitmesini bekleyip tekrar deneyin (kilit bayatlarsa kendiliğinden devralınır)`);
+    process.exit(EXIT_LOCK_BUSY);
+  }
   // Kullanım hatası her komutta aynı: mesaj + rc=1. Diğer hatalar olduğu gibi
   // yukarı çıkar — yığın izi teşhis için gerekli.
   //
@@ -609,7 +628,7 @@ try {
   // karşı koşturuyordu ve altın set ölçümü tam o pine dayanıyor).
   if (!(err instanceof UsageError) && !(err instanceof OriginRefUnresolved)) throw err;
   console.error(err.message);
-  process.exit(1);
+  process.exit(EXIT_USAGE);
 }
 
 function usage(): void {
@@ -640,6 +659,7 @@ maliyet (observe ve audit):
   --yes bu tavanı kaldırır: harcamayı onaylamış olursunuz.
 
 çıkış kodları: 1 kullanım hatası · 2 codex yok · 3 onay gerekiyor · 4 bütçe doldu
+                5 tarama kilidi başkasında (geçici: bekleyip tekrar deneyin)
                 130/143 SIGINT/SIGTERM ile kesildi (kilit bırakıldı, kesinti depoda yazılı)`);
-  process.exit(cmd ? 1 : 0);
+  process.exit(cmd ? EXIT_USAGE : 0);
 }
