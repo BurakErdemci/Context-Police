@@ -521,7 +521,7 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
   const seen = new Set<string>();
   const all: Anchor[] = [];
   const push = (kind: Anchor["kind"], value: string) => {
-    const key = `${kind} ${value}`;
+    const key = `${kind}\u0000${value}`;
     if (seen.has(key)) return;
     seen.add(key);
     all.push({ kind, value });
@@ -1282,7 +1282,7 @@ export function findCandidates(notes: NoteView[]): { candidates: Candidate[]; sk
   const byAnchor = new Map<string, { label: string; ids: number[] }>();
   for (const n of notes) {
     for (const a of n.anchors) {
-      const key = `${a.kind} ${a.value}`;
+      const key = `${a.kind}\u0000${a.value}`;
       const e = byAnchor.get(key) ?? { label: a.value, ids: [] };
       if (!e.ids.includes(n.findingId)) e.ids.push(n.findingId);
       byAnchor.set(key, e);
