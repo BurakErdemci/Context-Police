@@ -20,6 +20,7 @@ test("fakeExecutor senaryoyu sırayla oynar ve istekleri kaydeder", async () => 
   assert.equal(r1.output, '{"findings":[]}');
   const r2 = await fake.run({ prompt: "ikinci" });
   assert.equal(r2.ok, false);
+  assert.equal(r2.output, "", "ok=false iken output boş dize (executor.ts sözleşmesi)");
   assert.match(r2.error!, /patladı: ikinc/);
   assert.equal(fake.calls.length, 2);
   assert.equal(fake.calls[0]!.prompt, "birinci");

@@ -39,7 +39,11 @@ export function fakeExecutor(script: FakeStep[]): ExecutorAdapter & { calls: Exe
       const partial = typeof step === "function" ? step(req) : (step ?? {});
       return {
         ok: partial.ok ?? true,
-        output: partial.output ?? '{"findings":[]}',
+        // Varsayılan çıktı sözleşmeye uyar (executor.ts: ok=false iken boş dize).
+        // Sözleşmeyi ihlal eden fake, "hata varken output okuyan" bir gözlemci
+        // hatasını testlerde görünmez kılardı — 6 görev boyunca tek LLM ikamesi bu.
+        // Senaryo açıkça output verirse ona dokunulmaz (ihlali bilerek kurmak serbest).
+        output: partial.output ?? (partial.ok === false ? "" : '{"findings":[]}'),
         error: partial.error,
         durationMs: partial.durationMs ?? 1,
       };
