@@ -40,7 +40,20 @@ export type EventKind =
    */
   | "watermark_offset_reset"
   /** maxCalls bütçesi doldu: kalan partiler İŞLENMEDİ, filigran ilerlemedi. */
-  | "observer_budget_exhausted";
+  | "observer_budget_exhausted"
+  /**
+   * Kısmi örtüşme: saklanan ofset teslimatın ortasına düştü, kesme noktası
+   * bilinemediği için teslimatın TAMAMI yeniden Codex'e gitti (batch.ts
+   * `overlap-resent`). Kayıp değil tekrar — ama tekrar para demek ve M2'de bu
+   * yolun ne sıklıkta işlediği ölçülemedi (borç 3). Olay tam o ölçüm.
+   */
+  | "observer_partial_overlap"
+  /**
+   * Bütçe taramayı ERKEN DURDURDU: kalan oturumlar hiç İŞLENMEDİ, imleçleri
+   * ilerlemedi. Tarama başına TEK kayıt — oturum başına observer_failed yazmak
+   * maliyet sınırını arıza gibi gösteriyordu (M2 borç 4).
+   */
+  | "observer_budget_halt";
 
 export function logEvent(
   store: Store,

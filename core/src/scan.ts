@@ -10,6 +10,7 @@ import type { DeliveryRange } from "./observer/batch.ts";
 import { upsertProject, getCursor, getCursorByInode, setCursor, markScanned } from "./store/projects.ts";
 import { logEvent } from "./store/events.ts";
 import { readIncremental } from "./adapters/claude-code.ts";
+import { BudgetHalt } from "./observe-cmd.ts";
 import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
 import { realpath, stat } from "node:fs/promises";
 
@@ -53,6 +54,12 @@ export interface ScanSummary {
   unresolvedProjects: number;
   /** Okunamayan oturum sayısı — tarama devam eder, iz events'te kalır. */
   sessionErrors: number;
+  /**
+   * Maliyet bütçesi tarama ortasında doldu ve tarama ERKEN DURDU. Tarama bitti
+   * DEĞİL yarım kaldı demek: kalan oturumlar hiç okunmadı, imleçleri
+   * ilerlemedi. Çağıran bunu bir hata sayacıyla karıştırmasın diye ayrı alan.
+   */
+  budgetHalted: boolean;
 }
 
 export interface ScanOptions {
@@ -114,7 +121,7 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
   const sum: ScanSummary = {
     projects: 0, sessionsTouched: 0, turns: 0, bytesRead: 0, filteredBytes: 0,
     skipped: 0, unknown: 0, malformed: 0, truncations: 0, unresolvedProjects: 0,
-    sessionErrors: 0,
+    sessionErrors: 0, budgetHalted: false,
   };
 
   for (const proj of found) {
@@ -147,6 +154,21 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
       try {
         await scanSession(store, opts, projectId, session, sum);
       } catch (err) {
+        // Bütçe bitişi hata değil erken durdurma: oturum başına observer_failed
+        // üretmek yerine TEK olay yazılır ve tarama durur — kalan oturumların
+        // imleçleri ilerlemediği için veri kaybı yok (en-az-bir-kez). Kontrol
+        // StoreFailure'dan da ÖNCE, çünkü sınıflandırma sırası burada anlam
+        // taşıyor: bütçe bir arıza sınıfı değil.
+        if (err instanceof ObserverError && err.reason instanceof BudgetHalt) {
+          sum.budgetHalted = true;
+          logEvent(store, {
+            projectId,
+            kind: "observer_budget_halt",
+            detail: { sessionId: session.sessionId },
+          });
+          break;
+        }
+
         // Depo yazamıyorsa devam etmek anlamsız: imleç ilerlemeyeceği için her
         // tarama aynı veriyi yeniden teslim eder. Yutulmaz, yukarı fırlar.
         if (err instanceof StoreFailure) throw err;
@@ -168,6 +190,11 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
         });
       }
     }
+
+    // markScanned bu dalda ÇAĞRILMAZ: proje yarım tarandı ve "en son şu an
+    // tarandı" damgası, hiç okunmamış oturumları taranmış gibi gösterirdi —
+    // tetikleyici mantığı (spec §2.4) o damgaya bakıyor.
+    if (sum.budgetHalted) break;
 
     markScanned(store, projectId);
   }

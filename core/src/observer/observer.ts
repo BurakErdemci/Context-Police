@@ -90,6 +90,23 @@ export class Observer {
     const decision = dropThroughWatermarkDetailed(ctx.turns, wm, range);
     this.stats.skippedTurns += decision.dropped;
 
+    // Kısmi örtüşme kararı sessiz kalmamalı: teslimatın tamamı yeniden Codex'e
+    // gidiyor, yani bu satır para harcayan bir yol. M2'de sıklığı hiç
+    // ölçülemedi (borç 3) — olay o sayıyı bedavaya biriktirir.
+    if (decision.match === "overlap-resent") {
+      logEvent(this.store, {
+        projectId: ctx.projectId,
+        kind: "observer_partial_overlap",
+        detail: {
+          sessionId: ctx.sessionId,
+          from: range?.from ?? null,
+          to: range?.to ?? null,
+          watermarkOffset: wm?.byteOffset ?? null,
+          turnCount: ctx.turns.length,
+        },
+      });
+    }
+
     if (decision.fresh.length === 0) {
       // Bir iş yok ama ofset geride kalmış olabilir: teslimatın tamamı kimlikle
       // elendiğinde (son parti yazıldı, teslimat sonu yazılamadan çökme) ofseti
