@@ -102,12 +102,10 @@ test("düşmanca çıktılar, ikinci tur: parser'ın kendi kör noktaları", () 
     ["çapa değeri şişkin", `{"findings":[{"content":"x","anchors":[{"kind":"file_path","value":"${"a".repeat(513)}"}]}]}`],
     ["çapa sayısı sınır üstü", `{"findings":[{"content":"x","anchors":[${Array.from({ length: 17 }, () => '{"kind":"symbol","value":"s"}').join(",")}]}]}`],
     ["supersedes sıfır", '{"findings":[{"content":"x","anchors":[],"supersedes":0}]}'],
-    ["supersedes null", '{"findings":[{"content":"x","anchors":[],"supersedes":null}]}'],
     ["supersedes dize", '{"findings":[{"content":"x","anchors":[],"supersedes":"12"}]}'],
     ["supersedes NaN benzeri", '{"findings":[{"content":"x","anchors":[],"supersedes":1e999}]}'],
     ["boş girdi", ""],
     ["yalnız boşluk", "   \n\t "],
-    ["JSON öncesi düzyazı", 'İşte bulgular:\n{"findings":[]}'],
   ];
   for (const [ad, raw] of bad) {
     const r = parseObserverOutput(raw);
@@ -196,6 +194,48 @@ test("başlıklar prompt'ta eski→yeni sırada, kaynak dizi bozulmadan", () => 
 test("başlık CRLF ve baştaki boşlukla da ilk satırı verir", () => {
   assert.equal(titleOf("  Karar: X\r\nayrıntı"), "Karar: X");
   assert.equal(titleOf(""), "");
+});
+
+// ————— Mimar kararı (11 Ağu): parser toleransı — endişe 1 ve 3 —————
+
+test("supersedes null, alan hiç yokmuş gibi karşılanır", () => {
+  const r = parseObserverOutput('{"findings":[{"content":"x","anchors":[],"supersedes":null}]}');
+  assert.equal(r.ok, true, r.ok ? "" : r.error);
+  if (r.ok) {
+    assert.equal(r.items[0]!.supersedes, undefined);
+    assert.deepEqual(Object.keys(r.items[0]!).sort(), ["anchors", "content"], "null alan çıktıya sızmamalı");
+  }
+});
+
+test("düzyazıyla sarmalanmış JSON kurtarılır", () => {
+  const cases: Array<[string, string]> = [
+    ["önce ve sonra düzyazı", 'İşte bulgular:\n{"findings":[{"content":"Karar: Y","anchors":[]}]}\nUmarım yardımcı olur.'],
+    ["yalnız önde düzyazı", 'İşte bulgular:\n{"findings":[]}'],
+    ["düzyazı + çit", 'Sonuç:\n```json\n{"findings":[]}\n```\nbitti'],
+    ["çit kapanmamış", '```json\n{"findings":[]}'],
+  ];
+  for (const [ad, raw] of cases) {
+    const r = parseObserverOutput(raw);
+    assert.equal(r.ok, true, `kurtarılamadı: ${ad} — ${r.ok ? "" : r.error}`);
+  }
+  const r2 = parseObserverOutput('İşte bulgular:\n{"findings":[{"content":"Karar: Y","anchors":[]}]}\nUmarım yardımcı olur.');
+  if (r2.ok) assert.equal(r2.items[0]!.content, "Karar: Y", "kurtarma içeriği bozmamalı");
+});
+
+test("kurtarma çöpü kabul etmez: ilk { ile son } arası da doğrulanır", () => {
+  const bad: Array<[string, string]> = [
+    ["sarmal içi bozuk JSON", 'İşte bulgular:\n{"findings":[bozuk}\nbitti.'],
+    ["iki ayrı süslü parantez bloğu", "{ merhaba } ve { dünya }"],
+    ["kurtarılan JSON yanlış şekilli", 'not: {"a":1} son'],
+    ["kurtarılan JSON şema dışı", 'bak: {"findings":[{"content":"x","anchors":[{"kind":"line_number","value":"1"}]}]} bitti'],
+    ["yalnız açılış parantezi", 'İşte: {"findings":[]'],
+    ["parantezler ters sırada", "} önce kapanış { sonra açılış"],
+  ];
+  for (const [ad, raw] of bad) {
+    const r = parseObserverOutput(raw);
+    assert.equal(r.ok, false, `kabul edildi: ${ad}`);
+    if (!r.ok) assert.ok(r.error.length > 0, `sebep boş: ${ad}`);
+  }
 });
 
 test("prompt turn metnini olduğu gibi taşır, çok satırlı olsa da", () => {

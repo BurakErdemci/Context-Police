@@ -151,7 +151,25 @@ export function parseObserverOutput(
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    return { ok: false, error: `JSON ayrıştırılamadı: ${err instanceof Error ? err.message : String(err)}` };
+    // Sarmalayıcı kurtarması: model JSON'u düzyazıya ("İşte bulgular: …") ya da
+    // kapanmamış bir çite sarabiliyor. İlk '{' ile son '}' arasını bir kez daha
+    // dener. Bu bir gevşetme DEĞİL: kurtarılan metin aynı JSON.parse'tan ve aynı
+    // şema doğrulamasından geçer — yalnız sarmalayıcı soyulur, çöp kabul edilmez.
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    const inner = start !== -1 && end > start ? text.slice(start, end + 1) : null;
+    let recovered = false;
+    if (inner !== null && inner !== text) {
+      try {
+        parsed = JSON.parse(inner);
+        recovered = true;
+      } catch {
+        // Kurtarma da tutmadı; aşağıda ORİJİNAL hata döner — teşhis, modelin
+        // gerçekte ne yazdığına işaret etmeli, kurtarma denemesine değil.
+      }
+    }
+    if (!recovered)
+      return { ok: false, error: `JSON ayrıştırılamadı: ${err instanceof Error ? err.message : String(err)}` };
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
@@ -182,8 +200,12 @@ export function parseObserverOutput(
       validAnchors.push({ kind: kind as AnchorKind, value });
     }
 
+    // null, "geçersiz kılınan yok"un en doğal model ifadesi — şema alanı
+    // opsiyonel diye modeller onu boş bırakmak yerine null yazıyor. Bu yüzden
+    // undefined ile aynı sayılır: tek bir null yüzünden partinin tamamını
+    // reddetmek (ve D-M2-3 ile turn'leri kalıcı atlamak) orantısız bir bedel.
     let sup: number | undefined;
-    if (supersedes !== undefined) {
+    if (supersedes !== undefined && supersedes !== null) {
       if (typeof supersedes !== "number" || !Number.isInteger(supersedes) || supersedes <= 0)
         return { ok: false, error: `madde ${i}: supersedes pozitif tam sayı değil` };
       sup = supersedes;
