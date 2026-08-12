@@ -111,33 +111,49 @@ CREATE TABLE IF NOT EXISTS findings (
 
 CREATE INDEX IF NOT EXISTS idx_findings_project_status ON findings(project_id, status);
 
--- Sınıflama bütçesinin (MAX_CLASSIFY_ITEMS) YÜZEY BAŞINA rotasyon imleci:
--- "bu yüzeyin kararlı aday sırasında bir sonraki koşum nereden başlayacak".
+-- Sınıflama bütçesinin (MAX_CLASSIFY_ITEMS) rotasyon durumu: ADAY KİMLİĞİ
+-- başına "en son hangi koşumda SEÇİLDİ". Tasarımın tam gerekçesi ve adaletin
+-- ispatı signals/classify.ts'te (`selectCandidates`); özeti:
 --
--- Neden konum, neden not damgası DEĞİL (denetim: `classification-candidate-
--- starvation`, 12 Ağu 2026): rotasyon durumu bir gün önce NOT başına tutuluyordu
--- (findings.last_classified_at), oysa tavanlanan iş birimi ÇİFT. Yedi notun her
--- ikilisi bir çapa paylaştığında 21 aday çıkıyor; tavan 20'yi alıyor ama o 20
--- kenar yedi notun HEPSİNE dokunuyor, dolayısıyla ölçüm damgası bütün notlara
--- yazılıyordu. Ölçülmemiş 21. çift, ölçülmüşlerle aynı anahtarı alıyor ve
--- kararlı sıralama onu her koşumda yeniden dışarıda bırakıyordu — 8 koşum
--- boyunca ölçüldü, hep atlandı. Durum çift bazında olmalıydı ya da hiç
--- olmamalıydı; imleç ikincisini seçiyor.
+-- Rotasyon durumu üç kuşak geçirdi ve ilk ikisi aynı kök sebepten kanadı —
+-- TÜRETİLMİŞ ve DEĞİŞEN bir küme üzerinde KONUM tutmak:
+--   1) NOT başına damga (findings.last_classified_at): tavanlanan iş birimi
+--      ÇİFT olduğu için yanlış granülarite. K7'de seçilen 20 kenar yedi notun
+--      hepsine dokunuyor, 21. çift ölçülmediği hâlde "ölçülmüş" sayılıyordu.
+--   2) Yüzeyin aday listesinde KONUMSAL imleç (classify_cursors): sabit listede
+--      adil, ama aday listesi sabit değil. Ölçüldü (probe
+--      candidate-churn-coverage-bound, 6 koşum): diğer adaylar her koşumda
+--      değişince sabit bir çift pencerenin arkasına düşüp sonsuza aç kaldı.
+--   3) Bu tablo: damga adayın KİMLİĞİNE yazılıyor, listedeki yerine değil.
+--      Seçilmeyen aday her zaman seçilenden daha eski damga taşır, dolayısıyla
+--      sonraki koşumda kesinlikle öne gelir — ve bu churn'den bağımsız.
 --
--- İmlecin ispatı YAPICI: her koşum imleci SEÇİLEN aday sayısı kadar ilerletiyor
--- ve pencere listede dönüyor, dolayısıyla N aday ve M<N tavanla ⌈N/M⌉ koşumda
--- her aday en az bir kez seçiliyor. İlerleme ölçümün SONUCUNA bağlı değil
--- (seçildi mi, ilerledi): sürekli hüküm döndürmeyen zehirli bir parti, geri
--- kalan adayların sırasını kilitleyemesin.
+-- Damga SEÇİM anında yazılır, hükmün dönüp dönmediğine bakılmadan: sonuca
+-- bağlansaydı hiç hüküm döndürmeyen zehirli bir parti seçimi kilitlerdi.
 --
--- Satır sayısı sınırlı: proje başına en çok yüzey sayısı kadar (3). Budama
--- sorusu yok — çift başına durum tutan alternatifin (aday tablosu) getirdiği
--- kareli büyüme ve "bulgu süpersede olunca satır ne olacak" sorusu da yok.
-CREATE TABLE IF NOT EXISTS classify_cursors (
-  project_id INTEGER NOT NULL REFERENCES projects(id),
-  kind       TEXT NOT NULL,
-  next_index INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (project_id, kind)
+-- `selected_seq` bir SAAT DEĞİL, proje başına artan bir koşum sayacı: sıralama
+-- deterministik olsun ve testler saate bağlanmasın diye.
+--
+-- b_id NULL DEĞİL, -1 sentinel (intra/frontmatter tek notluk). SQLite'ta
+-- birincil anahtar sütunu NULL olabiliyor ve NULL ≠ NULL — ON CONFLICT hiçbir
+-- satırla eşleşmez, yani her koşum yeni satır yazar ve damga hiç güncellenmezdi.
+--
+-- BUDAMA: tarafı artık canlı olmayan bulguya ait satır silinir
+-- (store/classify-stamps.ts: pruneClassifyStamps, gerekçe orada). Onsuz tablo
+-- not sayısında KARELİ büyürdü.
+--
+-- ESKİ `classify_cursors` TABLOSU BU DOSYADAN KALKTI ve var olan depolarda
+-- DÜŞÜRÜLMÜYOR: hiçbir kod onu okumuyor (ölü durum kodda kalmadı), satır sayısı
+-- proje başına en çok 3, ve tablo düşürmek geri dönüşü olmayan bir göç.
+-- Sıfır kazanç için gerçek bir risk — aynı gerekçe `findings.last_classified_at`
+-- sütunu için de yazılı (db.ts).
+CREATE TABLE IF NOT EXISTS classify_stamps (
+  project_id   INTEGER NOT NULL REFERENCES projects(id),
+  kind         TEXT NOT NULL,
+  a_id         INTEGER NOT NULL,
+  b_id         INTEGER NOT NULL,
+  selected_seq INTEGER NOT NULL,
+  PRIMARY KEY (project_id, kind, a_id, b_id)
 );
 
 -- Çapa öncelik sırası sembol > dosya yolu > satır no (M0-D4). Satır numarası

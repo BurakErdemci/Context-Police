@@ -81,8 +81,9 @@ function migrate(db: DatabaseSync): void {
 /**
  * BURADA `migrateFindings` YOK — bilerek. Aday rotasyonu bir gün
  * `findings.last_classified_at` sütununu kullanıyordu ve o sütun bu göç
- * listesindeydi; rotasyon yüzey başına bir imlece taşınınca (schema.sql:
- * `classify_cursors`, gerekçe orada) sütunu okuyan/yazan kod kalmadı.
+ * listesindeydi; rotasyon önce yüzey başına bir imlece, sonra aday kimliği
+ * başına bir damgaya taşınınca (schema.sql: `classify_stamps`, gerekçe orada)
+ * sütunu okuyan/yazan kod kalmadı.
  *
  * Var olan bir depoda sütun ARTIK DA DURUYOR ve kaldırılmıyor: kimse okumuyor,
  * INSERT'ler onu hiç anmıyor (NULL kalır), ve `findings` tablosunu yeniden
@@ -90,6 +91,9 @@ function migrate(db: DatabaseSync): void {
  * dışı bırakmak demekti — sıfır kazanç için gerçek bir risk. Yeni depolarda
  * sütun hiç yaratılmıyor. İki kuşak da açılıyor, çünkü hiçbir sorgu sütunu ADIYLA
  * anmıyor (`getFinding` SELECT * kullanıyor).
+ *
+ * Aynı gerekçe kaldırılan `classify_cursors` TABLOSU için de geçerli: var olan
+ * depolarda duruyor, düşürülmüyor, hiçbir sorgu onu anmıyor.
  *
  * Yeni tablo için ayrı bir göç adımına gerek yok: `schema.sql` HER açılışta
  * koşuyor ve `CREATE TABLE IF NOT EXISTS` var olan depoda eksik TABLOYU yaratır

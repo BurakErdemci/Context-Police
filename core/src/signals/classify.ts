@@ -25,114 +25,212 @@ export const MAX_CLASSIFY_ITEMS = 20; // koşum başına; taşan sayı raporlan�
  */
 export const CLASSIFY_SURFACE_QUOTA: Record<Candidate["kind"], number> = { cross: 8, intra: 6, frontmatter: 6 };
 
-/** Devir sırası: payını kullanmayan yüzeyin artığı bu sırayla dağıtılır. */
+/**
+ * Yüzey kotasının uygulanma sırası — aynı damga sınıfı içinde eşitlik bozucu
+ * ikinci ölçüt olarak kimlik sırası kullanıldığı için burada yalnız kotaların
+ * TANIMLI olduğu yüzey kümesini adlandırıyor.
+ */
 const SURFACE_ORDER: readonly Candidate["kind"][] = ["cross", "intra", "frontmatter"];
 
 /**
- * Yüzey başına rotasyon imleci: "bu yüzeyin kararlı aday sırasında bir sonraki
- * koşum nereden başlayacak". Eksik anahtar = 0 (baştan).
+ * `bId` olmayan (intra/frontmatter) adayın kimlik kodlamasındaki ikinci tarafı.
+ * NULL DEĞİL bir sentinel: kimlik hem bir metin anahtarı hem de bir SQL birincil
+ * anahtarı olarak kullanılıyor ve SQLite'ta NULL sütunlu birincil anahtarda
+ * NULL ≠ NULL — `ON CONFLICT` hiçbir satırla eşleşmez, yani her koşum yeni satır
+ * yazar ve damga hiç güncellenmezdi. Bulgu id'leri daima pozitif, çakışma yok.
  */
-export type ClassifyCursors = Readonly<Partial<Record<Candidate["kind"], number>>>;
+export const NO_SECOND_SIDE = -1;
 
-/** Seçim + bir sonraki koşumun imleçleri. İmleçler HER yüzey için doludur. */
+/**
+ * Adayın KİMLİĞİ: rotasyon durumunun bağlandığı şey. `(kind, aId, bId)` üçlüsü
+ * çiftin KENDİSİ — aday listesindeki konumundan, listenin uzunluğundan ve
+ * üretim sırasından bağımsız.
+ *
+ * Kodlama tek yerde, çünkü aynı dize hem bellek içi harita anahtarı hem de
+ * depodaki üç sütunun karşılığı; iki ayrı kodlama iki sessizce ayrışan kimlik
+ * demek olurdu.
+ */
+export function candidateIdentity(c: Candidate): string {
+  return `${c.kind}:${c.aId}:${c.bId ?? NO_SECOND_SIDE}`;
+}
+
+/** `candidateIdentity`nin tersi. Tanınmayan/bozuk anahtar için null (dış veri). */
+export function parseCandidateIdentity(
+  key: string,
+): { kind: Candidate["kind"]; aId: number; bId: number } | null {
+  const parts = key.split(":");
+  if (parts.length !== 3) return null;
+  const [kind, a, b] = parts as [string, string, string];
+  if (!SURFACE_ORDER.includes(kind as Candidate["kind"])) return null;
+  const aId = Number(a); const bId = Number(b);
+  if (!Number.isSafeInteger(aId) || !Number.isSafeInteger(bId)) return null;
+  return { kind: kind as Candidate["kind"], aId, bId };
+}
+
+/**
+ * Aday kimliği → o adayın EN SON SEÇİLDİĞİ koşumun sıra numarası. Anahtarı
+ * olmayan aday hiç seçilmemiştir (= en eski, mutlak öncelik).
+ *
+ * Neden saat değil sayaç: damga koşum başına bir artan tamsayı, yani sıralama
+ * deterministik. Saatle aynı milisaniyede biten iki koşum ayırt edilemezdi ve
+ * testler saate bağlı olurdu.
+ */
+export type CandidateStamps = Readonly<Record<string, number>>;
+
+/** Seçim + bir sonraki koşumun damga haritası. */
 export interface CandidateSelection {
   taken: Candidate[];
-  next: Record<Candidate["kind"], number>;
+  /** Girdi haritasının, bu koşumda seçilenlerin damgası `stamp` yapılmış hâli. */
+  next: Record<string, number>;
+  /** Bu koşumda seçilenlere yazılan damga (girdideki en büyük damga + 1). */
+  stamp: number;
 }
 
 /**
- * Adayın KİMLİĞİ üzerinden kararlı sıra. İmleç bir KONUM, ve konumun anlamı
- * ancak sıra koşumlar arasında aynı kaldığı sürece var. Üretim sırası
- * (`findCandidates`) bunu garanti etmiyor: çapa haritasının yineleme sırası not
- * kümesi değişince kayıyor. (aId, bId) ise çiftin kendisi — aynı çift her
- * koşumda aynı yere düşer.
+ * Aynı damga sınıfı içinde eşitliği bozan deterministik sıra. Yüzey adı da
+ * ölçüte giriyor, çünkü sıra artık yüzey başına değil KÜRESEL kuruluyor.
  */
 function byIdentity(a: Candidate, b: Candidate): number {
+  if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
   if (a.aId !== b.aId) return a.aId - b.aId;
-  return (a.bId ?? -1) - (b.bId ?? -1);
-}
-
-/** Depodan gelen imleç dış veri: negatif, kesirli ya da liste boyundan büyük olabilir. */
-function normalizeCursor(raw: number | undefined, length: number): number {
-  if (length === 0) return 0;
-  const n = Math.trunc(raw ?? 0);
-  if (!Number.isFinite(n)) return 0;
-  return ((n % length) + length) % length;
+  return (a.bId ?? NO_SECOND_SIDE) - (b.bId ?? NO_SECOND_SIDE);
 }
 
 /**
- * Bütçeyi yüzeylere bölerek aday seçer. İki tur: önce her yüzey kotası kadar
- * alır, sonra kalan boşluk öncelik sırasıyla artıklardan dolar — kota bütçeyi
- * KÜÇÜLTMEZ, yalnız tek bir yüzeyin hepsini yutmasını engeller.
+ * Depodan gelen damga dış veri: negatif, kesirli, NaN ya da devasa olabilir.
+ * 0 ve altı = "hiç seçilmemiş".
+ *
+ * GÜVENLİ TAMSAYI SINIRI ZORUNLU (bu testte ölçüldü, `1e18` durumu): yeni damga
+ * `en büyük + 1` olarak hesaplanıyor ve float64'te 1e18 + 1 === 1e18. Elle
+ * düzenlenmiş ya da bozulmuş tek bir devasa satır, damganın ARTMASINI durdurup
+ * rotasyonu tümden dondururdu — düzeltilen açlığın aynısı, bu kez veri yoluyla.
+ * Güvenli aralık dışındaki değer "hiç seçilmemiş" sayılıyor: hata yönü açlığa
+ * DEĞİL önceliğe doğru, yani en kötü hâlde bir kez fazladan ölçüm.
+ */
+function normalizeStamp(raw: number | undefined): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+  const n = Math.trunc(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Bütçeyi adaylara dağıtır. Kural tek cümle: **bütçe kesinlikle DAMGA SIRASINA
+ * göre harcanır; yüzey kotası yalnız aynı damga sınıfı içindeki yarışı böler.**
+ *
  * Çıktı, adayların özgün sırasını korur (kararlı prompt, kararlı index eşlemesi).
  *
- * ROTASYON KAYAN BİR PENCERE, damga sıralaması değil. Yüzeyin adayları kimlik
- * sırasına dizilir, seçim imlecin gösterdiği yerden başlar ve listede döner;
- * imleç seçilen sayı kadar ilerler. Adaletin ispatı bu yüzden YAPICI: N aday ve
- * M < N tavanla ardışık pencereler listeyi ⌈N/M⌉ koşumda tarar, yani hiçbir
- * aday süresiz atlanamaz.
+ * ### Neden kimlik, neden konum DEĞİL (üçüncü deneme, 12 Ağu 2026)
+ * Aynı sınıf üç turdur kanadı ve kök sebep her seferinde aynıydı: **türetilmiş
+ * ve DEĞİŞEN bir küme üzerinde KONUM tutmak.**
+ *  - D dalgası durumu NOT başına tuttu; oysa tavanlanan iş birimi ÇİFT. K7'de
+ *    (7 not, 21 çift) seçilen 20 kenar yedi notun HEPSİNE dokunduğu için 21.
+ *    çift de "ölçülmüş" damgasını alıyor ve her koşumda yeniden atlanıyordu.
+ *  - E dalgası çift bazına geçti ama durumu bir İMLEÇ (yüzeyin aday listesindeki
+ *    konum) olarak tuttu. Sabit listede adildi; aday listesi sabit DEĞİL.
+ *    Ölçüldü (probe `candidate-churn-coverage-bound.sh`, 6 koşum / 2 periyot):
+ *    diğer adaylar her koşumda değişince sabit bir çift pencerenin sürekli
+ *    arkasına düşüp sonsuza kadar aç kaldı.
  *
- * Bir gün önceki hâli (findings.last_classified_at, not başına ölçüm damgası)
- * bunu YAPAMIYORDU: tavanlanan iş birimi çift, durum ise nottaydı. Yedi notun
- * her ikilisi bir çapa paylaşınca 21 adaydan 20'si seçiliyor, ama o 20 kenar
- * yedi notun hepsine dokunduğu için 21.'si de "ölçülmüş" sayılıyor ve sıralama
- * onu her koşumda yeniden dışarıda bırakıyordu (denetim:
- * `classification-candidate-starvation`, 8 koşum boyunca ölçüldü).
+ * Doğru soyutlama konum değil KİMLİK: damga adayın kendisine yazılıyor,
+ * listede nerede durduğuna değil.
  *
- * Kaybedilen özellik ve kabul gerekçesi: "hiç ölçülmemiş aday önce gelir"
- * önceliği kalktı — yeni bir not, sırasına kadar en çok ⌈N/M⌉ koşum bekler.
- * O öncelik zaten not düzeyinde kurulabiliyordu, yani hatalıydı; ve amaçladığı
- * şeyi (hiçbir şey sonsuza kadar beklemesin) imleç daha sıkı bir sınırla
- * veriyor. Pahalı bir çift tablosu olmadan ikisi birden alınamıyor.
+ * ### Adaletin ispatı
+ * Seçilenler `max(mevcut damgalar)+1` alır; seçilmeyen her aday damgasını
+ * OLDUĞU GİBİ korur. Dolayısıyla bu koşumda seçilmeyen bir aday, seçilenlerin
+ * hepsinden **kesinlikle daha eski** bir damga taşır ve sonraki koşumda onların
+ * tamamının önüne geçer. Bu, aday listesinin uzunluğundan ve churn'den
+ * bağımsızdır — damga kimliğe bağlı, konuma değil.
+ *
+ * Hiç seçilmemişler (damga 0) arasında eşitliği kimlik sırası bozuyor; bu da
+ * açlık üretmez, çünkü bir adayın önüne yalnız ONDAN KÜÇÜK kimlikli ve HİÇ
+ * SEÇİLMEMİŞ adaylar geçebilir, ve her biri bunu en çok bir kez yapar (seçilince
+ * damgası büyür). Böyle adayların sayısı sonlu. Pratikte de sıra doğru yönde:
+ * bulgu id'leri monoton arttığı için yeni gelen aday zaten daha BÜYÜK kimlikli.
+ *
+ * ### Zehirli parti
+ * Damga SEÇİM anında yazılıyor, hükmün dönüp dönmediğine bakılmadan. Sonuca
+ * bağlansaydı hiç hüküm döndürmeyen bir parti sonsuza kadar en eski kalıp
+ * seçimi kilitlerdi (E dalgasının kimlik yolunu reddetme gerekçesi — itiraz
+ * damgayı SONUÇTA yazan tasarım için geçerliydi, seçimde yazan için değil).
+ *
+ * ### Kapsama sınırı
+ * Sabit bir aday kümesinde her aday en geç **⌈N_yüzey / kota_yüzey⌉** koşumda
+ * seçilir. Bu YÜZEY BAŞINA bir sınır: E dalgasının yazdığı küresel ⌈N/M⌉ iddiası
+ * yanlıştı (20/20/20 adayda cross 3 koşumda kapanır, intra ve frontmatter
+ * kotaları 6 olduğu için 4'te). Yanlış yazılmış bir iddia, yazılmamış olmasından
+ * kötüdür — sınır artık gerçek sınır.
  */
 export function selectCandidates(
   candidates: Candidate[],
   max: number,
-  cursors: ClassifyCursors = {},
+  stamps: CandidateStamps = {},
 ): CandidateSelection {
-  const byKind = new Map<Candidate["kind"], number[]>();
-  for (const [i, c] of candidates.entries()) {
-    const list = byKind.get(c.kind);
-    if (list === undefined) byKind.set(c.kind, [i]);
-    else list.push(i);
-  }
-  const pos = new Map<Candidate["kind"], number>();
-  for (const [kind, list] of byKind) {
-    list.sort((x, y) => byIdentity(candidates[x]!, candidates[y]!));
-    pos.set(kind, normalizeCursor(cursors[kind], list.length));
-  }
   // Kota MAX_CLASSIFY_ITEMS ölçeğinde tanımlı; farklı bir tavanla çağrılırsa
   // (audit --max-classify-items) oranı korunur. En az 1: küçük bir tavanda bile
   // hiçbir yüzey tümden kapanmasın.
   const quota = (k: Candidate["kind"]) =>
     Math.max(1, Math.floor((max * CLASSIFY_SURFACE_QUOTA[k]) / MAX_CLASSIFY_ITEMS));
+
+  const stampOf = new Map<number, number>();
+  for (const [i, c] of candidates.entries()) stampOf.set(i, normalizeStamp(stamps[candidateIdentity(c)]));
+
+  // KÜRESEL sıra: önce damga (eski → yeni), sonra kimlik.
+  const order = candidates.map((_, i) => i).sort((x, y) => {
+    const d = stampOf.get(x)! - stampOf.get(y)!;
+    return d !== 0 ? d : byIdentity(candidates[x]!, candidates[y]!);
+  });
+
   const chosen = new Set<number>();
   const takenCount = new Map<Candidate["kind"], number>();
   let budget = max;
-  const takeFrom = (kind: Candidate["kind"], limit: number) => {
-    const list = byKind.get(kind);
-    if (list === undefined) return;
-    let n = takenCount.get(kind) ?? 0;
-    const before = n;
-    // `n < list.length`: pencere bir koşumda listeyi en çok bir kez dolaşır,
-    // yani aynı aday iki kez seçilemez (ve budget boşa gitmez).
-    while (budget > 0 && n - before < limit && n < list.length) {
-      const p = pos.get(kind)!;
-      chosen.add(list[p]!);
-      pos.set(kind, (p + 1) % list.length);
-      n++; budget--;
-    }
-    takenCount.set(kind, n);
+  const take = (p: number) => {
+    const k = candidates[p]!.kind;
+    chosen.add(p);
+    takenCount.set(k, (takenCount.get(k) ?? 0) + 1);
+    budget--;
   };
-  for (const kind of SURFACE_ORDER) takeFrom(kind, quota(kind));
-  for (const kind of SURFACE_ORDER) takeFrom(kind, Infinity);
 
-  // Bu koşumda hiç adayı olmayan yüzeyin imleci OLDUĞU GİBİ korunur: yüzey geri
-  // geldiğinde kaldığı yerden devam etsin, sıfırlanıp baştaki adayları
-  // ayrıcalıklı hâle getirmesin.
-  const next = {} as Record<Candidate["kind"], number>;
-  for (const kind of SURFACE_ORDER) next[kind] = pos.get(kind) ?? Math.max(0, Math.trunc(cursors[kind] ?? 0));
-  return { taken: candidates.filter((_, i) => chosen.has(i)), next };
+  // Damga sınıfı sınıfı işleniyor: bir sonraki (daha TAZE) sınıfa geçmeden önce
+  // bu sınıfın artıkları da dağıtılıyor. Sıralama böyle olmasaydı kota, bütçeyi
+  // daha eski bir adayı bekletirken daha taze bir adayı YENİDEN ölçmeye
+  // harcayabilirdi — ölçüldü: 20/20/20 adayda cross'un kotası 8 ama 3. koşumda
+  // yalnız 4 ölçülmemiş cross kalıyor; kalan 4 slot eskiden taze cross'a
+  // gidiyordu, şimdi hâlâ hiç ölçülmemiş intra/frontmatter'a gidiyor.
+  let i = 0;
+  while (i < order.length && budget > 0) {
+    const s = stampOf.get(order[i]!)!;
+    let j = i;
+    while (j < order.length && stampOf.get(order[j]!)! === s) j++;
+    const cls = order.slice(i, j);
+    // (1) kota turu: her yüzey payını alır (sayaç koşum boyunca kümülatif).
+    for (const p of cls) {
+      if (budget === 0) break;
+      if ((takenCount.get(candidates[p]!.kind) ?? 0) >= quota(candidates[p]!.kind)) continue;
+      take(p);
+    }
+    // (2) artık turu: kalan bütçe AYNI sınıf içinde kimlik sırasıyla dağılır.
+    for (const p of cls) {
+      if (budget === 0) break;
+      if (!chosen.has(p)) take(p);
+    }
+    i = j;
+  }
+
+  // Yeni damga: girdideki en büyük + 1. Depoda hiç damga yoksa 1'den başlar
+  // (0 "hiç seçilmemiş" anlamına ayrılmış).
+  let highest = 0;
+  for (const v of Object.values(stamps)) {
+    const n = normalizeStamp(v);
+    if (n > highest) highest = n;
+  }
+  const stamp = highest + 1;
+  // Bu koşumun adaylarında OLMAYAN kimliklerin damgası korunuyor: aday kümesi
+  // churn ile daralıp genişliyor ve geri dönen bir aday sırasını kaybetmemeli.
+  // Sınırsız büyümenin cevabı budama; store/classify-stamps.ts'te, gerekçesiyle.
+  const next: Record<string, number> = { ...stamps };
+  for (const p of chosen) next[candidateIdentity(candidates[p]!)] = stamp;
+
+  return { taken: candidates.filter((_, i2) => chosen.has(i2)), next, stamp };
 }
 const EXCERPT_CHARS = 1500;
 /**
@@ -182,12 +280,14 @@ export interface ClassifyResult {
    */
   measured: Candidate[];
   /**
-   * Bir sonraki koşumun rotasyon imleçleri. Ölçüm BAŞARISIZ olsa da ilerler:
-   * imleç "nereye kadar SEÇİLDİ"yi tutuyor, "nereye kadar ölçüldü"yü değil.
-   * Sonuca bağlansaydı, hüküm döndürmeyen zehirli bir parti sonsuza kadar aynı
-   * yerde durup geri kalan adayların sırasını kilitlerdi.
+   * Bir sonraki koşumun aday damgaları. Ölçüm BAŞARISIZ olsa da ilerler: damga
+   * "en son ne zaman SEÇİLDİ"yi tutuyor, "ne zaman ölçüldü"yü değil. Sonuca
+   * bağlansaydı, hüküm döndürmeyen zehirli bir parti sonsuza kadar en eski
+   * kalıp geri kalan adayların sırasını kilitlerdi.
    */
-  nextCursors: Record<Candidate["kind"], number>;
+  nextStamps: Record<string, number>;
+  /** Bu koşumda seçilenlere yazılan damga; depoya yalnız bu değerli satırlar gider. */
+  rotationStamp: number;
   calls: number;
   dropped: number;
   error?: string;
@@ -308,10 +408,10 @@ export async function classifyCandidates(
   executor: ExecutorAdapter,
   candidates: Candidate[],
   notes: Map<number, NoteView>,
-  opts: { maxItems?: number; cursors?: ClassifyCursors } = {},
+  opts: { maxItems?: number; stamps?: CandidateStamps } = {},
 ): Promise<ClassifyResult> {
   const max = opts.maxItems ?? MAX_CLASSIFY_ITEMS;
-  const { taken, next: nextCursors } = selectCandidates(candidates, max, opts.cursors);
+  const { taken, next: nextStamps, stamp: rotationStamp } = selectCandidates(candidates, max, opts.stamps);
   const dropped = candidates.length - taken.length;
   const takenSet = new Set(taken);
   /** Bütçeye hiç girmemiş aday da ölçülmemiş bir adaydır. */
@@ -319,7 +419,7 @@ export async function classifyCandidates(
   if (taken.length === 0)
     return {
       ok: true, confirmed: [], kararsiz: 0, unclassified: 0,
-      unmeasured: droppedCandidates, measured: [], nextCursors, calls: 0, dropped,
+      unmeasured: droppedCandidates, measured: [], nextStamps, rotationStamp, calls: 0, dropped,
     };
 
   // item.index = adayın taken içindeki konumu (renderItems entries() index'i
@@ -339,7 +439,7 @@ export async function classifyCandidates(
   // Ölçüm HİÇ yapılamadı: adayların TAMAMI (bütçeye girmeyenler dahil) ölçülmemiş.
   const failed = (error: string): ClassifyResult => ({
     ok: false, confirmed: [], kararsiz: 0, unclassified: taken.length,
-    unmeasured: candidates, measured: [], nextCursors, calls, dropped, error,
+    unmeasured: candidates, measured: [], nextStamps, rotationStamp, calls, dropped, error,
   });
 
   let res = await runOnce(prompt);
@@ -373,6 +473,6 @@ export async function classifyCandidates(
     unclassified: undecided.length,
     unmeasured: [...droppedCandidates, ...undecided],
     measured: taken.filter((_, i) => decided.has(i)),
-    nextCursors, calls, dropped,
+    nextStamps, rotationStamp, calls, dropped,
   };
 }
