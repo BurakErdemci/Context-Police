@@ -34,19 +34,30 @@ const quotaOf = (k: Candidate["kind"], max = MAX_CLASSIFY_ITEMS) =>
   Math.max(1, Math.floor((max * CLASSIFY_SURFACE_QUOTA[k]) / MAX_CLASSIFY_ITEMS));
 
 /**
- * GERÇEK kapsama sınırı: ⌈N_toplam / max⌉ — kotanın değil BÜTÇENİN fonksiyonu.
- *
- * Buraya iki kuşak boyunca yanlış sınır yazıldı. E dalgası küresel ⌈N/M⌉ yazdı;
- * F dalgası bunu "yanlış" ilan edip yüzey başına ⌈N_yüzey / kota_yüzey⌉ ile
- * değiştirdi. G dalgasında ölçüldü (30 yapılandırma, bütçe 1/2/3/5/20): gerçek
- * kapsama HER yapılandırmada ⌈N/max⌉ çıktı ve bu sınır GEVŞEK değil TAM. Yüzey
- * ifadesi iki yönde birden hatalıydı — aşağıdaki iki test onu çürütüyor.
- *
- * Sınır kotayı anmıyor çünkü kota bir koşum İÇİNDEKİ payı böler, kaç koşum
- * gerektiğini değil. Kotanın kendi güvencesi ayrıca ölçülüyor (per-run taban).
+ * ⌈N_toplam / max⌉ — koşum başına en çok `max` aday seçildiği için kapsamanın
+ * ALT sınırı. G dalgasında bu aynı zamanda TAM sınırdı; H dalgasının rezervasyonu
+ * onu geçersiz kıldı (bkz. aşağıdaki grid testi): artık bir üst sınır DEĞİL.
  */
-function coverageBound(candidates: Candidate[], max = MAX_CLASSIFY_ITEMS): number {
+function globalFloor(candidates: Candidate[], max = MAX_CLASSIFY_ITEMS): number {
   return Math.ceil(candidates.length / max);
+}
+
+/** Bir yüzeyin koşum başına garantili payı: min(kota, o yüzeyin aday sayısı). */
+function reserveOf(candidates: Candidate[], k: Candidate["kind"], max: number): number {
+  return Math.min(quotaOf(k, max), candidates.filter((c) => c.kind === k).length);
+}
+
+/**
+ * Rezervasyon rejiminde ÖLÇÜLEN üst sınır — yalnız Σrezerv ≤ bütçe ön koşulunda
+ * geçerli (12 Ağu 2026: 402/402 yapılandırmada tuttu, 105'inde TAM).
+ */
+function reservationBound(candidates: Candidate[], max = MAX_CLASSIFY_ITEMS): number {
+  let per = 0;
+  for (const k of ["cross", "intra", "frontmatter"] as const) {
+    const n = candidates.filter((c) => c.kind === k).length;
+    if (n > 0) per = Math.max(per, Math.ceil(n / reserveOf(candidates, k, max)));
+  }
+  return Math.max(globalFloor(candidates, max), per);
 }
 
 /** Her adayın ölçülmesi GERÇEKTE kaç koşum sürdü — sınırın TAM olduğu iddiası. */
@@ -100,9 +111,13 @@ function k7(): Candidate[] {
 
 test("K7 (21 aday, tavan 20): aç kalan çift sınır içinde ölçülüyor", () => {
   const candidates = k7();
-  const bound = coverageBound(candidates); // ⌈21/20⌉ = 2
+  const bound = globalFloor(candidates); // ⌈21/20⌉ = 2
   assert.equal(bound, 2);
-  assert.equal(runsToCover(candidates, 20), bound, "sınır TAM değil");
+  // Tek yüzeyli küme: rezervasyon burada bir no-op (artık turu bütçenin kalanını
+  // aynı yüzeye geri veriyor), o yüzden kapsama alt sınıra oturuyor. Rezervasyon
+  // ifadesi ise burada GEVŞEK: max(2, ⌈21/8⌉) = 3 der, gerçek 2.
+  assert.equal(runsToCover(candidates, 20), bound, "tek yüzeyde kapsama alt sınıra oturmadı");
+  assert.ok(reservationBound(candidates) >= bound, "üst sınır alt sınırın altına düştü");
   const { firstSeen } = rotate(candidates, 20, bound);
   assert.deepEqual(missing(candidates, firstSeen), [], "sınırda kapsanmayan aday var");
   // D dalgasının probe'u 8 koşum sürüyordu ve 6-7 çifti sekizinde de atlanmıştı.
@@ -117,17 +132,55 @@ const mixed6060 = (): Candidate[] => [
   ...Array.from({ length: 20 }, (_, i) => cand(i + 601, null, "frontmatter")),
 ];
 
-test("sınır BÜTÇENİN fonksiyonu: 20/20/20 aday tam ⌈60/20⌉ = 3 koşumda kapanıyor", () => {
+test("H: rezervasyon kapsama sınırını DEĞİŞTİRDİ — 20/20/20 artık 3 değil 4 koşum", () => {
+  // G dalgasının ölçtüğü "⌈N/max⌉ TAM" iddiası rezervasyonla GEÇERSİZLEŞTİ, ve
+  // bu bir gerileme değil ÖDENEN BEDEL: koşum başına yüzey tabanı garanti
+  // edildiği anda, bir yüzeyin ölçülmemiş adayı biterken rezervi zaten ölçülmüş
+  // adayına gidebiliyor. 3. koşumda cross'un yalnız 4 ölçülmemiş adayı kalıyor
+  // ama rezervi 8; kalan 4 slot intra/frontmatter'a GEÇMİYOR, çünkü geçseydi
+  // taban da geçebilir olurdu — probe'un ölçtüğü açlık tam olarak buydu.
   const candidates = mixed6060();
-  assert.equal(coverageBound(candidates), 3);
-  // Bütçe hiçbir koşumda BOŞA gitmiyor: kimlik sırası küresel olduğu için, bir
-  // yüzeyin ölçülmemiş adayı bitince kalan slotlar hâlâ hiç ölçülmemiş başka bir
-  // yüzeye gidiyor. F dalgası buraya yüzey başına "4" yazmıştı — kendi testi de
-  // 3'te kapandığını gösteriyordu, yani sınır gevşekti.
-  assert.equal(runsToCover(candidates, 20), 3, "sınır TAM değil");
-  const { firstSeen } = rotate(candidates, 20, 3);
-  assert.deepEqual(missing(candidates, firstSeen), [],
-    "bütçe, ölçülmemiş aday beklerken yeniden ölçüme harcandı");
+  assert.equal(globalFloor(candidates), 3, "alt sınır değişmiş, test bayat");
+  assert.equal(runsToCover(candidates, 20), 4, "ölçülen kapsama değişti — sınır iddiası bayat");
+  assert.equal(reservationBound(candidates), 4, "rezervasyon ifadesi burada TAM olmalıydı");
+  const { firstSeen } = rotate(candidates, 20, 4);
+  assert.deepEqual(missing(candidates, firstSeen), [], "ölçülen sınırda bile kapsanmayan aday var");
+  // Ve alt sınır gerçekten AŞILIYOR: ⌈N/max⌉ artık bir güvence değil.
+  assert.ok(runsToCover(candidates, 20) > globalFloor(candidates),
+    "⌈N/max⌉ hâlâ tutuyorsa yukarıdaki tüm gerekçe yanlış yazılmış");
+});
+
+test("H: kapsama sınırı GRID'i — iddia ölçümle yazıldı, 30 yapılandırma", () => {
+  // G dalgasının yöntemi (30 yapılandırma) rezervasyon rejiminde tekrarlandı.
+  // İki ölçülmüş iddia çivileniyor:
+  //   (1) ⌈N/max⌉ artık ÜST SINIR DEĞİL — en az bir yapılandırmada aşılıyor.
+  //   (2) Σrezerv ≤ bütçe ön koşulunda max(⌈N/max⌉, maks ⌈N_yüzey/rezerv⌉) tutuyor.
+  // Σrezerv > bütçe rejimi için kapalı formül ÖLÇÜLMEDİ; oradaki tek ölçülmüş
+  // gözlem kapsamanın sonlu olduğu (aşağıda `Infinity` olmadığı da sınanıyor).
+  const dists: [number, number, number][] = [
+    [20, 20, 20], [30, 20, 20], [60, 0, 0], [21, 0, 0], [0, 0, 25], [40, 5, 5],
+  ];
+  const build = ([nc, ni, nf]: [number, number, number]) => [
+    ...Array.from({ length: nc }, (_, i) => cand(i + 1, 1000 + i, "cross")),
+    ...Array.from({ length: ni }, (_, i) => cand(3000 + i, null, "intra")),
+    ...Array.from({ length: nf }, (_, i) => cand(6000 + i, null, "frontmatter")),
+  ];
+  let floorExceeded = 0, fitChecked = 0;
+  for (const d of dists) for (const max of [1, 2, 3, 5, 20]) {
+    const candidates = build(d);
+    const actual = runsToCover(candidates, max, 500);
+    assert.ok(Number.isFinite(actual), `açlık: ${d.join("/")} @ ${max} kapanmadı`);
+    if (actual > globalFloor(candidates, max)) floorExceeded++;
+    const sumReserve = (["cross", "intra", "frontmatter"] as const)
+      .reduce((s, k) => s + reserveOf(candidates, k, max), 0);
+    if (sumReserve <= max) {
+      fitChecked++;
+      assert.ok(actual <= reservationBound(candidates, max),
+        `${d.join("/")} @ ${max}: ölçülen ${actual} > ifade ${reservationBound(candidates, max)}`);
+    }
+  }
+  assert.ok(floorExceeded > 0, "⌈N/max⌉ hiç aşılmadıysa 'üst sınır değil' iddiası yanlış yazılmış");
+  assert.ok(fitChecked >= 10, `ön koşulu sağlayan yapılandırma az (${fitChecked}): grid iddiayı taşımıyor`);
 });
 
 test("çürütme: yüzey başına ⌈N_yüzey/kota⌉ iddiası bütçe < yüzey sayısı iken İHLAL ediliyor", () => {
@@ -138,8 +191,11 @@ test("çürütme: yüzey başına ⌈N_yüzey/kota⌉ iddiası bütçe < yüzey 
   const perSurface = Math.max(...(["cross", "intra", "frontmatter"] as const)
     .map((k) => Math.ceil(20 / quotaOf(k, 1))));
   assert.equal(perSurface, 20, "çürütülen ifade değişmiş, test bayat");
-  assert.equal(runsToCover(candidates, 1), 60, "bütçe 1'de kapanma ⌈N/max⌉ değil");
-  assert.equal(coverageBound(candidates, 1), 60, "gerçek sınır ⌈60/1⌉ olmalıydı");
+  assert.equal(runsToCover(candidates, 1), 60, "bütçe 1'de kapanma ölçülen değerden saptı");
+  // Bütçe 1'de alt sınır ile ölçülen değer ÇAKIŞIYOR (koşum başına tam 1 aday, hiç
+  // yeniden ölçüm yok). Bu çakışma bütçe 1'e özgü; H dalgası ⌈N/max⌉'in genel bir
+  // üst sınır OLMADIĞINI ölçtü — yukarıdaki grid testi.
+  assert.equal(globalFloor(candidates, 1), 60, "bütçe 1'de alt sınır ⌈60/1⌉ olmalıydı");
   assert.ok(perSurface < 60, "yüzey ifadesi burada FAZLA KÜÇÜK: ihlal edilebilir bir güvence");
 });
 
@@ -162,7 +218,7 @@ test("kota, koşum içi bir taban — ama yalnız kotaların toplamı bütçeye 
 
 test("varyant (yıldız grafiği): merkez not her çiftte, uçlar aç kalmıyor", () => {
   const candidates = Array.from({ length: 24 }, (_, i) => cand(1, i + 2));
-  const { firstSeen } = rotate(candidates, 20, coverageBound(candidates));
+  const { firstSeen } = rotate(candidates, 20, globalFloor(candidates));
   assert.deepEqual(missing(candidates, firstSeen), [], "yıldızın uçları aç kaldı");
 });
 
@@ -172,7 +228,7 @@ test("varyant (yüzeyler karışık): kota rotasyonu EZMİYOR, ikisi birden geç
     ...Array.from({ length: 20 }, (_, i) => cand(300 + i, null, "intra")),
     ...Array.from({ length: 20 }, (_, i) => cand(400 + i, null, "frontmatter")),
   ];
-  const bound = coverageBound(candidates); // ⌈70/20⌉ = 4
+  const bound = globalFloor(candidates); // ⌈70/20⌉ = 4
   assert.equal(bound, 4);
   const { firstSeen, perRun } = rotate(candidates, 20, bound);
   assert.deepEqual(missing(candidates, firstSeen), [], "karışık yüzeyde aç kalan aday var");
@@ -213,7 +269,7 @@ test("seçim, prompt için özgün sırayı korur (damga sırayı DEĞİL seçim
 
 test("depodan gelen bozuk damga seçimi kilitlemiyor (negatif, kesirli, NaN, taşkın)", () => {
   const candidates = k7();
-  const bound = coverageBound(candidates);
+  const bound = globalFloor(candidates);
   for (const bozuk of [-7, 1.9, 1e18, Number.NaN, Number.POSITIVE_INFINITY]) {
     const stamps: Record<string, number> = {};
     for (const c of candidates) stamps[candidateIdentity(c)] = bozuk;
@@ -339,6 +395,93 @@ test("kapanış (iii): aynı id çiftinin iki yüzeyi (GERÇEK eşitlik) determi
   // Ve ikisi ayrı kimlik olduğu için ikinci koşumda diğeri geliyor: açlık yok.
   const { firstSeen } = rotate([ic, fm], 1, 2);
   assert.deepEqual(missing([ic, fm], firstSeen), [], "gerçek eşitlikte bir taraf aç kaldı");
+});
+
+// --- 2c. H dalgası: kota SIRALAMANIN İÇİNDE değil, REZERVASYON --------------
+//
+// Açlık sınıfının beşinci biçimi: kota bütçeyi damga sırasına göre harcayan tek
+// bir listenin İÇİNDE uygulanıyordu, yani "hiç ölçülmemiş" damga sınıfı bütçeyi
+// kota devreye girmeden tüketebiliyordu. Ölçüldü (probe churned-surface-
+// starvation, 12 koşum): 10 kalıcı intra + 10 kalıcı frontmatter damgalıyken her
+// koşuma 20 taze cross eklendiğinde 12/12 koşumda cross=20, intra=0, frontmatter=0.
+//
+// Yapısal düzeltme: önce SLOT REZERVE et, sonra doldur. Rezerv yalnız kendi
+// yüzeyinin öncelik kuyruğundan dolar; artan slotlar küresel sırayla dağılır.
+
+/** Bir koşumun yüzey dağılımı — taban iddialarının tek okuma noktası. */
+const spread = (taken: Candidate[]) => ({
+  cross: taken.filter((c) => c.kind === "cross").length,
+  intra: taken.filter((c) => c.kind === "intra").length,
+  frontmatter: taken.filter((c) => c.kind === "frontmatter").length,
+});
+
+test("H taban: taze cross seli altında kalıcı intra/frontmatter kotasını HER koşum alıyor", () => {
+  // probes/churned-surface-starvation.sh terfisi (rc=1 → rc=0).
+  const persistent = [
+    ...Array.from({ length: 10 }, (_, i) => cand(i + 1, null, "intra")),
+    ...Array.from({ length: 10 }, (_, i) => cand(i + 11, null, "frontmatter")),
+  ];
+  // Kalıcılar bir kez ölçülüp damgalanıyor: bundan sonra her taze cross onlardan
+  // "daha eski" (damga 0) sayılır — kusurun tetikleyicisi tam olarak bu.
+  let stamps: CandidateStamps = selectCandidates(persistent, 20, {}).next;
+  for (let run = 1; run <= 12; run++) {
+    const fresh = Array.from({ length: 20 }, (_, i) =>
+      cand(1000 + run * 100 + i, 100_000 + run * 100 + i, "cross"));
+    const r = selectCandidates([...persistent, ...fresh], 20, stamps);
+    stamps = r.next;
+    const s = spread(r.taken);
+    assert.equal(r.taken.length, 20, `koşum ${run}: bütçe boşa gitti`);
+    for (const k of ["cross", "intra", "frontmatter"] as const)
+      assert.ok(s[k] >= quotaOf(k), `koşum ${run}: ${k} tabanı tutmadı (${JSON.stringify(s)})`);
+  }
+});
+
+test("H kapanış (a): İKİ yüzey taze selle gelirken üçüncüsü (kalıcı) tabanını koruyor", () => {
+  const persistent = Array.from({ length: 10 }, (_, i) => cand(i + 1, null, "frontmatter"));
+  let stamps: CandidateStamps = selectCandidates(persistent, 20, {}).next;
+  for (let run = 1; run <= 12; run++) {
+    const fresh = [
+      ...Array.from({ length: 20 }, (_, i) => cand(2000 + run * 100 + i, 200_000 + run * 100 + i, "cross")),
+      ...Array.from({ length: 20 }, (_, i) => cand(5000 + run * 100 + i, null, "intra")),
+    ];
+    const r = selectCandidates([...persistent, ...fresh], 20, stamps);
+    stamps = r.next;
+    const s = spread(r.taken);
+    assert.equal(r.taken.length, 20, `koşum ${run}: bütçe boşa gitti`);
+    assert.ok(s.frontmatter >= quotaOf("frontmatter"),
+      `koşum ${run}: iki selin arasında kalan yüzey aç kaldı (${JSON.stringify(s)})`);
+  }
+});
+
+test("H kapanış (b): TÜM adaylar tek yüzeyde — kota anlamsız, davranış hâlâ doğru", () => {
+  // Rezervasyon burada bir no-op olmalı: rezerv 6 slot verse de artık turu kalan
+  // 14'ü aynı yüzeye geri veriyor, yani seçim küresel damga sırasının aynısı.
+  const only = Array.from({ length: 25 }, (_, i) => cand(i + 1, null, "intra"));
+  const { taken } = selectCandidates(only, 20, {});
+  assert.equal(taken.length, 20, "tek yüzeyde rezervasyon bütçeyi kilitledi");
+  assert.deepEqual(taken.map((c) => c.aId), Array.from({ length: 20 }, (_, i) => i + 1),
+    "tek yüzeyde sıra küresel damga/kimlik sırasından koptu");
+  assert.equal(runsToCover(only, 20), 2, "tek yüzeyde kapsama ⌈25/20⌉ olmalıydı");
+});
+
+test("H kapanış (c): aday sayısı bütçenin çok altında — hepsi seçiliyor, rezerv kilitlemiyor", () => {
+  const few = [cand(1, 2, "cross"), cand(3, null, "intra"), cand(4, null, "frontmatter")];
+  const { taken } = selectCandidates(few, 20, {});
+  assert.deepEqual(taken, few, "az adayda rezervasyon bir şeyi dışarıda bıraktı");
+});
+
+test("H: bir yüzeyin adayı yokken rezervi ARTIK havuzuna dönüyor (bütçe boşa gitmiyor)", () => {
+  // intra hiç yok, frontmatter kotasının altında (3 < 6): ikisinin de kullanılmayan
+  // rezervi cross'a gitmeli, yoksa 20 bütçenin 11'i harcanıp 9'u çöpe giderdi.
+  const candidates = [
+    ...Array.from({ length: 20 }, (_, i) => cand(i + 1, 100 + i, "cross")),
+    ...Array.from({ length: 3 }, (_, i) => cand(500 + i, null, "frontmatter")),
+  ];
+  const { taken } = selectCandidates(candidates, 20, {});
+  assert.equal(taken.length, 20, "artan rezerv havuza dönmedi");
+  const s = spread(taken);
+  assert.equal(s.frontmatter, 3, "adayı olan yüzey tamamını alamadı");
+  assert.equal(s.cross, 17, "artan slotlar cross'a geçmedi");
 });
 
 // --- 3. sınıf kapanışı: aynı kusurun başka biçimleri -----------------------

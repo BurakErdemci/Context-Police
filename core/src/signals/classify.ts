@@ -26,9 +26,9 @@ export const MAX_CLASSIFY_ITEMS = 20; // koşum başına; taşan sayı raporlan�
 export const CLASSIFY_SURFACE_QUOTA: Record<Candidate["kind"], number> = { cross: 8, intra: 6, frontmatter: 6 };
 
 /**
- * Yüzey kotasının uygulanma sırası — aynı damga sınıfı içinde eşitlik bozucu
- * ikinci ölçüt olarak kimlik sırası kullanıldığı için burada yalnız kotaların
- * TANIMLI olduğu yüzey kümesini adlandırıyor.
+ * Kotası TANIMLI yüzeylerin kümesi. Sıra bir öncelik DEĞİL (öncelik damga +
+ * kimlik); yalnız rezervasyon turunun yüzeyleri deterministik bir düzende
+ * gezmesini ve `parseCandidateIdentity`nin geçerli yüzeyi tanımasını sağlıyor.
  */
 const SURFACE_ORDER: readonly Candidate["kind"][] = ["cross", "intra", "frontmatter"];
 
@@ -129,10 +129,35 @@ function normalizeStamp(raw: number | undefined): number {
 }
 
 /**
- * Bütçeyi adaylara dağıtır. Kural tek cümle: **bütçe kesinlikle DAMGA SIRASINA
- * göre harcanır; yüzey kotası yalnız aynı damga sınıfı içindeki yarışı böler.**
+ * Bütçeyi adaylara dağıtır. Kural tek cümle: **önce her yüzeye slot REZERVE
+ * edilir, sonra rezervler kendi yüzeylerinin öncelik kuyruğundan doldurulur;
+ * artan slotlar küresel öncelikle dağıtılır.**
  *
  * Çıktı, adayların özgün sırasını korur (kararlı prompt, kararlı index eşlemesi).
+ *
+ * ### Neden rezervasyon, neden "sırala sonra kes" DEĞİL (H dalgası, 12 Ağu 2026)
+ * Açlık sınıfı bu tarihe kadar BEŞ kez kanadı ve son ikisinin kökü aynıydı:
+ * kota SIRALAMANIN İÇİNDE uygulanıyordu — her şey tek bir listeye diziliyor,
+ * sonra kesiliyordu. Öyle bir yapıda tek bir yüzey listeyi domine edebiliyor:
+ *  - G dalgası (küçük bütçe): eşitliği bozan ölçüt yüzey ADI olduğu için bütçe
+ *    sözlükte önde gelen yüzeye gidiyordu. Kimlik sırasıyla kapandı.
+ *  - H dalgası (normal bütçe): "hiç ölçülmemiş" damga sınıfı bütçeyi kota
+ *    devreye girmeden tüketiyordu. Ölçüldü (probe `churned-surface-starvation`,
+ *    12 koşum): 10 kalıcı intra + 10 kalıcı frontmatter damgalıyken her koşuma
+ *    20 TAZE cross eklendiğinde 12/12 koşumda `cross=20, intra=0, frontmatter=0`.
+ *    Kalıcı adaylar hiç yeniden ölçülmedi.
+ *
+ * Kural olarak "hiç ölçülmemiş önce gelir" YANLIŞ değil; yanlış olan, o kuralın
+ * kotayı EZMESİ. Kota keyfi bir sayı değil: altın setin 1. turunda 20 slotun
+ * tamamı cross'a gitti ve onaylanan çelişki 0 çıktı — M0'ın saha örneği verdiği
+ * iki yüzey (intra, frontmatter) sınıflamaya hiç girmemişti. Kota tam bu tekeli
+ * kırmak için var; taze bir cross selinin aynı tekeli geri getirmesi kotanın
+ * varlık sebebini delmek olurdu.
+ *
+ * Doğru yapı, kotayı sıralamadan ÇIKARMAK: bütçe önce yüzeylere bölünür
+ * (rezervasyon), her rezerv yalnız kendi yüzeyinin kuyruğundan dolar, kimsenin
+ * kullanmadığı rezerv havuza döner. Böylece bir yüzeyin aday sayısı ne kadar
+ * şişerse şişsin diğerlerinin tabanına dokunamaz.
  *
  * ### Neden kimlik, neden konum DEĞİL (üçüncü deneme, 12 Ağu 2026)
  * Aynı sınıf üç turdur kanadı ve kök sebep her seferinde aynıydı: **türetilmiş
@@ -171,29 +196,41 @@ function normalizeStamp(raw: number | undefined): number {
  * seçimi kilitlerdi (E dalgasının kimlik yolunu reddetme gerekçesi — itiraz
  * damgayı SONUÇTA yazan tasarım için geçerliydi, seçimde yazan için değil).
  *
- * ### Kapsama sınırı
- * Sabit bir aday kümesinde her aday en geç **⌈N_toplam / max⌉** koşumda seçilir,
- * ve bu sınır GEVŞEK DEĞİL TAM: son adayın ölçüldüğü koşum tam olarak bu sayı.
- * İspatı yukarıdaki adalet argümanının doğrudan sonucu — her koşum bütçeyi
- * kesinlikle en eski damgalılara harcıyor ve hiç boşa harcamıyor (kota turundan
- * artan bütçe aynı damga sınıfı içinde dağıtılıyor), yani her koşum kalan
- * ölçülmemiş kümeyi `max` kadar küçültüyor.
+ * ### Kapsama sınırı — REZERVASYONLA DEĞİŞTİ, yeniden ölçüldü
+ * Bu satırlara üç kuşak boyunca üç ayrı sınır yazıldı (E: küresel ⌈N/max⌉,
+ * F: yüzey başına ⌈N_yüzey/kota⌉, G: ölçümle yine küresel ⌈N/max⌉ ve "TAM").
+ * H dalgası kotayı sıralamadan çıkarıp rezervasyona çevirince G'nin ölçtüğü
+ * sınır GEÇERSİZLEŞTİ; aşağıdakiler yeniden ölçülmüş değerlerdir
+ * (12 Ağu 2026, 450 + 51 yapılandırma; bütçe 1–25 × rastgele yüzey dağılımları).
  *
- * Yüzey kotası bu sınıra GİRMEZ; kota bir koşum İÇİNDEKİ payı belirler, kaç
- * koşum gerektiğini değil.
+ * 1. **⌈N/max⌉ artık bir ÜST SINIR DEĞİL, yalnız alt sınır.** Koşum başına en
+ *    çok `max` aday seçildiği için altta kalır, ama ölçümde 450 yapılandırmanın
+ *    **346'sında aşıldı**. Somut: 20/20/20 aday, max=20 → G'nin sınırı 3 diyor,
+ *    gerçek **4**. Sebep yapısal ve kabul edilmiş bir bedel: koşum başına yüzey
+ *    tabanı garanti edilince, bir yüzeyin ölçülmemiş adayı biterken rezervi
+ *    zaten ölçülmüş adayına gidebiliyor. Taban ile "ölçülmemiş bekliyorken
+ *    yeniden ölçüm yapma" kuralı GENEL OLARAK BAĞDAŞMAZ; kotanın ölçülmüş
+ *    varlık sebebi (yukarıdaki 20/20 cross, 0 çelişki) tabanı seçtiriyor.
+ * 2. **Σrezerv ≤ bütçe iken** (normal çalışma: 8+6+6 = 20 = MAX_CLASSIFY_ITEMS)
+ *    ölçülen üst sınır `max(⌈N/max⌉, maks_yüzey ⌈N_yüzey / rezerv_yüzey⌉)` —
+ *    402 yapılandırmanın **402'sinde tuttu**, 105'inde TAM, kalanında gevşek
+ *    (artık turu yardım ettiği için; ör. 21 cross / max 20 → ifade 3, gerçek 2).
+ * 3. **Σrezerv > bütçe iken** (bütçe aktif yüzey sayısının altında) kapalı bir
+ *    formül ÖLÇÜLMEDİ. Bu rejimde 51 yapılandırmada kapsama sonlu çıktı ve
+ *    hepsinde `N`'i aşmadı, ama bu ölçülmüş bir gözlem, ispatlanmış bir sınır
+ *    değil.
+ * 4. **Açlık yok:** ölçülen 501 yapılandırmanın hiçbirinde kapsama sonsuz
+ *    değil — her aday sonlu koşumda ölçülüyor.
  *
- * İki kuşak boyunca buraya yanlış sınır yazıldı, ikisi de düzeltildi:
- *  - E dalgası küresel ⌈N/M⌉ yazdı, F dalgası bunu "yanlış" ilan edip yüzey
- *    başına **⌈N_yüzey / kota_yüzey⌉** ile değiştirdi.
- *  - Ölçüldü (G dalgası, 12 Ağu 2026, 30 yapılandırma — bütçe 1/2/3/5/20 ×
- *    çeşitli yüzey dağılımları): gerçek kapsama HER yapılandırmada ⌈N/max⌉'e
- *    eşit çıktı. Yüzey ifadesi ise iki yönde birden hatalı: bütçe < aktif yüzey
- *    sayısı iken FAZLA KÜÇÜK (max=1, 20/20/20 adayda "20" diyor, gerçek 60 —
- *    yani ihlal edilebilir bir güvence), tek yüzeyli kümede ise gereksiz büyük
- *    (max=20, 21 cross'ta "3" diyor, gerçek 2).
+ * Bu projede yanlış yazılmış bir iddia yazılmamış olmasından kötüdür: yukarıda
+ * ölçülmeyen tek şey (3) ve orada "ölçülmedi" yazıyor.
  *
- * Ders: doğru sınır kotanın değil BÜTÇENİN fonksiyonu. Bu projede yanlış
- * yazılmış bir iddia yazılmamış olmasından kötüdür — sınır artık ölçülmüş sınır.
+ * ### Bilinen ve KAPANMAMIŞ biçim: yüzey İÇİ sel
+ * Rezervasyon yüzeyler ARASI tekeli kapatıyor, yüzey İÇİNDEKİNİ değil. Bir
+ * yüzeye her koşum rezervinden fazla TAZE aday giriyorsa (damga 0 mutlak
+ * öncelikli), o yüzeyin daha önce ölçülmüş adayları süresiz bekler. Bu, düzeltilen
+ * kusurun bir yüzey içine daralmış hâli ve bugünkü tasarımda açık: çözümü
+ * damganın mutlak önceliğini yaşlandırmakta, rezervasyonda değil.
  */
 export function selectCandidates(
   candidates: Candidate[],
@@ -202,53 +239,67 @@ export function selectCandidates(
 ): CandidateSelection {
   // Kota MAX_CLASSIFY_ITEMS ölçeğinde tanımlı; farklı bir tavanla çağrılırsa
   // (audit --max-classify-items) oranı korunur. En az 1: küçük bir tavanda bile
-  // hiçbir yüzey tümden kapanmasın.
+  // hiçbir yüzey tümden kapanmasın (G dalgasının kapattığı küçük-bütçe tekeli).
   const quota = (k: Candidate["kind"]) =>
     Math.max(1, Math.floor((max * CLASSIFY_SURFACE_QUOTA[k]) / MAX_CLASSIFY_ITEMS));
 
   const stampOf = new Map<number, number>();
   for (const [i, c] of candidates.entries()) stampOf.set(i, normalizeStamp(stamps[candidateIdentity(c)]));
 
-  // KÜRESEL sıra: önce damga (eski → yeni), sonra kimlik.
-  const order = candidates.map((_, i) => i).sort((x, y) => {
+  /** KÜRESEL öncelik: önce damga (eski → yeni), sonra kimlik. */
+  const byPriority = (x: number, y: number) => {
     const d = stampOf.get(x)! - stampOf.get(y)!;
     return d !== 0 ? d : byIdentity(candidates[x]!, candidates[y]!);
-  });
-
-  const chosen = new Set<number>();
-  const takenCount = new Map<Candidate["kind"], number>();
-  let budget = max;
-  const take = (p: number) => {
-    const k = candidates[p]!.kind;
-    chosen.add(p);
-    takenCount.set(k, (takenCount.get(k) ?? 0) + 1);
-    budget--;
   };
 
-  // Damga sınıfı sınıfı işleniyor: bir sonraki (daha TAZE) sınıfa geçmeden önce
-  // bu sınıfın artıkları da dağıtılıyor. Sıralama böyle olmasaydı kota, bütçeyi
-  // daha eski bir adayı bekletirken daha taze bir adayı YENİDEN ölçmeye
-  // harcayabilirdi — ölçüldü: 20/20/20 adayda cross'un kotası 8 ama 3. koşumda
-  // yalnız 4 ölçülmemiş cross kalıyor; kalan 4 slot eskiden taze cross'a
-  // gidiyordu, şimdi hâlâ hiç ölçülmemiş intra/frontmatter'a gidiyor.
-  let i = 0;
-  while (i < order.length && budget > 0) {
-    const s = stampOf.get(order[i]!)!;
-    let j = i;
-    while (j < order.length && stampOf.get(order[j]!)! === s) j++;
-    const cls = order.slice(i, j);
-    // (1) kota turu: her yüzey payını alır (sayaç koşum boyunca kümülatif).
-    for (const p of cls) {
-      if (budget === 0) break;
-      if ((takenCount.get(candidates[p]!.kind) ?? 0) >= quota(candidates[p]!.kind)) continue;
-      take(p);
+  // Her yüzeyin KENDİ öncelik kuyruğu: rezerv başka hiçbir yüzeyin adayından
+  // dolamaz — kotanın sıralamadan çıkarılması pratikte bu ayrı kuyruk demek.
+  const queue = new Map<Candidate["kind"], number[]>(SURFACE_ORDER.map((k) => [k, []]));
+  for (const [i, c] of candidates.entries()) queue.get(c.kind)?.push(i);
+  for (const q of queue.values()) q.sort(byPriority);
+
+  const chosen = new Set<number>();
+  let budget = max;
+
+  // (1) REZERVASYON TURU. Rezerv = min(kota, o yüzeyin aday sayısı); adayı
+  // kotasından az olan yüzeyin fazlası kullanılmadan kalır ve (2)'de havuza
+  // döner, yani taban asla bütçe İSRAFINA dönüşmez.
+  //
+  // Rezervler arasındaki DOLDURMA sırası küresel öncelik: her adımda, rezervi
+  // kalan yüzeyler içinde kuyruk başı en eski olan alınır. İki sonucu var:
+  //  - Σrezerv ≤ bütçe iken sıra sonucu değiştirmez, herkes tabanını alır.
+  //  - Σrezerv > bütçe iken (küçük bütçe: max < aktif yüzey sayısı) seçim tam
+  //    olarak küresel damga sırasına düşer — G dalgasının düzeltmesi aynen
+  //    korunuyor, çünkü kuyrukların önceliğe göre birleştirilmesi küresel
+  //    sıranın ta kendisi.
+  const head = new Map<Candidate["kind"], number>(SURFACE_ORDER.map((k) => [k, 0]));
+  const reserve = new Map<Candidate["kind"], number>(
+    SURFACE_ORDER.map((k) => [k, Math.min(quota(k), queue.get(k)!.length)]),
+  );
+  while (budget > 0) {
+    let best: Candidate["kind"] | null = null;
+    for (const k of SURFACE_ORDER) {
+      if (reserve.get(k)! <= 0 || head.get(k)! >= queue.get(k)!.length) continue;
+      if (best === null || byPriority(queue.get(k)![head.get(k)!]!, queue.get(best)![head.get(best)!]!) < 0)
+        best = k;
     }
-    // (2) artık turu: kalan bütçe AYNI sınıf içinde kimlik sırasıyla dağılır.
-    for (const p of cls) {
+    if (best === null) break;
+    const h = head.get(best)!;
+    chosen.add(queue.get(best)![h]!);
+    head.set(best, h + 1);
+    reserve.set(best, reserve.get(best)! - 1);
+    budget--;
+  }
+
+  // (2) ARTIK TURU: kullanılmayan rezervler + kotaların üstündeki bütçe, kalan
+  // TÜM adaylar arasında küresel öncelikle dağılır. Yüzeyler burada yarışabilir,
+  // çünkü taban (1)'de zaten garanti edildi.
+  if (budget > 0) {
+    for (const p of candidates.map((_, i) => i).filter((i) => !chosen.has(i)).sort(byPriority)) {
       if (budget === 0) break;
-      if (!chosen.has(p)) take(p);
+      chosen.add(p);
+      budget--;
     }
-    i = j;
   }
 
   // Yeni damga: girdideki en büyük + 1. Depoda hiç damga yoksa 1'den başlar
