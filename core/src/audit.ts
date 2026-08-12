@@ -10,6 +10,7 @@
 // tahmin edilmez, `classifyCalls`tan okunur.
 
 import type { Store } from "./store/db.ts";
+import { nowIso } from "./store/db.ts";
 import type { ExecutorAdapter } from "./adapters/executor.ts";
 import { importMemoryDir, type ImportSummary } from "./importer/import.ts";
 import { openGit } from "./signals/git.ts";
@@ -20,7 +21,7 @@ import {
 import { hasStatusPattern } from "./signals/status-pattern.ts";
 import { findCandidates, type NoteView } from "./signals/contradiction.ts";
 import { classifyCandidates, MAX_CLASSIFY_ITEMS } from "./signals/classify.ts";
-import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect } from "./store/findings.ts";
+import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect, markClassified } from "./store/findings.ts";
 import { parseNote } from "./importer/parse.ts";
 import { logEvent, type EventKind } from "./store/events.ts";
 
@@ -328,11 +329,22 @@ export async function auditProject(
      * aşırı-koruma da bir yanlış karardır.
      */
     const unmeasuredFindings = new Set<number>();
+    /**
+     * Çelişki boyutu bu koşumda ÖLÇÜLEN notlar; rotasyon damgası (§classify.ts
+     * `selectCandidates`) yalnız bunlara yazılır. Ölçülmemiş bir adayı damgalamak
+     * onu sıranın sonuna atardı — yani rotasyonun tam tersini yapardı.
+     */
+    const classifiedFindings = new Set<number>();
 
     if (candidates.length > 0 && opts.executor !== null) {
       const notesById = new Map(views.map((v) => [v.findingId, v]));
-      const res = await classifyCandidates(opts.executor, candidates, notesById,
-        { maxItems: opts.maxClassifyItems ?? MAX_CLASSIFY_ITEMS });
+      const lastClassified = new Map(all.map((f) => [f.id, f.lastClassifiedAt]));
+      const res = await classifyCandidates(opts.executor, candidates, notesById, {
+        maxItems: opts.maxClassifyItems ?? MAX_CLASSIFY_ITEMS,
+        lastClassifiedAt: (id) => lastClassified.get(id) ?? null,
+      });
+      for (const c of res.measured)
+        for (const id of [c.aId, c.bId]) if (id !== null) classifiedFindings.add(id);
       sum.classifyCalls = res.calls;
       sum.classifyDropped = res.dropped;
       sum.classifyUnclassified = res.unclassified;
@@ -384,6 +396,11 @@ export async function auditProject(
     // Yazım: skor SIFIRDAN (D-M3-3), geçiş active↔suspect (D-M3-9), her şey olaylı.
     store.tx(() => {
       for (const c of pendingContradictionEvents) ev("contradiction_confirmed", c);
+      // Rotasyon damgası skorlarla AYNI tx'te: damga ilerleyip skor yazılmazsa
+      // (arada ölüm) aday sıranın sonuna gider ve ölçülmemiş hükmü korunmuş
+      // olarak bir sonraki koşumda da atlanırdı — tam da düzeltilen donmanın
+      // kendisi, bu sefer görünmez bir yoldan.
+      markClassified(store, classifiedFindings, nowIso());
       for (const f of all) {
         // Skor kaydı olmayan tek küme: hiç çelişkiye girmemiş `unanchored` not.
         // Yukarıdaki skor döngüsü onu atladı (M0-D5: çapa sinyali çapasız nota

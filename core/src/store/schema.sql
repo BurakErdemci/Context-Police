@@ -106,7 +106,18 @@ CREATE TABLE IF NOT EXISTS findings (
   status        TEXT NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active','suspect','superseded','born_invalid','unanchored')),
   superseded_by INTEGER REFERENCES findings(id),
-  suspicion     REAL NOT NULL DEFAULT 0 CHECK (suspicion >= 0 AND suspicion <= 1)
+  suspicion     REAL NOT NULL DEFAULT 0 CHECK (suspicion >= 0 AND suspicion <= 1),
+  -- Bu notun ÇELİŞKİ boyutu en son ne zaman ölçüldü (NULL = hiç). Karar alanı
+  -- değil ROTASYON anahtarı: sınıflama bütçesi (MAX_CLASSIFY_ITEMS) aşıldığında
+  -- adaylar bu damgaya göre sıralanıyor, en eski/hiç ölçülmemiş öne geliyor.
+  --
+  -- Neden gerekti (denetim: doğrulama turu, `classification-cap-permanent-hold`):
+  -- seçim deterministikti ve her koşumda AYNI ilk N adayı alıyordu; atılan
+  -- adayların tarafları "ölçülemedi" sayılıp önceki hükmü korurken, o adaylar
+  -- bir daha hiç ölçülmüyordu. 20'den fazla adayı olan bir projede bir not
+  -- SONSUZA KADAR ölçülmeden suspect kalabiliyordu — koruma, kalıcı bir cezaya
+  -- dönüşüyordu. Damga o döngüyü kırar: ölçülen aday sıranın sonuna gider.
+  last_classified_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_project_status ON findings(project_id, status);

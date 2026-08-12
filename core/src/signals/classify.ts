@@ -29,13 +29,59 @@ export const CLASSIFY_SURFACE_QUOTA: Record<Candidate["kind"], number> = { cross
 const SURFACE_ORDER: readonly Candidate["kind"][] = ["cross", "intra", "frontmatter"];
 
 /**
+ * Bir notun çelişki boyutunun EN SON ölçülme damgası; null = hiç ölçülmedi.
+ * Rotasyon anahtarı bu (depo sütunu: findings.last_classified_at).
+ */
+export type LastClassifiedAt = (findingId: number) => string | null;
+
+/**
+ * Adayın rotasyon önceliği: taraflarının EN YENİ ölçüm damgası. Küçük olan
+ * önce ölçülür, hiç ölçülmemiş (null) en önde.
+ *
+ * Neden "en yeni" (max) ve "en eski" değil: bir tarafı az önce ölçülmüş bir
+ * çift, iki tarafı da aylardır ölçülmemiş bir çiftten daha taze bilgiye sahiptir.
+ * min alınsaydı, hiç ölçülmeyen tek bir not kendi bulunduğu TÜM çiftleri sürekli
+ * öne taşır ve rotasyon o notun etrafında kilitlenirdi.
+ */
+function rotationKey(c: Candidate, lastClassifiedAt: LastClassifiedAt): string | null {
+  const a = lastClassifiedAt(c.aId);
+  if (a === null) return null;
+  if (c.bId === null) return a;
+  const b = lastClassifiedAt(c.bId);
+  if (b === null) return null;
+  return a >= b ? a : b; // ISO-8601 UTC: sözlük sırası = zaman sırası
+}
+
+/**
  * Bütçeyi yüzeylere bölerek aday seçer. İki tur: önce her yüzey kotası kadar
  * alır, sonra kalan boşluk öncelik sırasıyla artıklardan dolar — kota bütçeyi
  * KÜÇÜLTMEZ, yalnız tek bir yüzeyin hepsini yutmasını engeller.
  * Çıktı, adayların özgün sırasını korur (kararlı prompt, kararlı index eşlemesi).
+ *
+ * Kota İÇİNDE rotasyon var: yüzey payları aynen korunur, o payı hangi adayların
+ * dolduracağı ise koşumlar arasında döner. Denetim (doğrulama turu,
+ * `classification-cap-permanent-hold`) ölçtü: seçim her koşumda AYNI ilk N adayı
+ * alıyordu, kırpılan adayın tarafları "ölçülemedi" sayılıp önceki suspect hükmünü
+ * koruyordu, ve o aday bir daha HİÇ ölçülmüyordu — koruma kalıcı bir cezaya
+ * dönüşüyordu. Rotasyon o döngüyü kırar: kırpılan aday bir sonraki koşumda önde.
  */
-export function selectCandidates(candidates: Candidate[], max: number): Candidate[] {
+export function selectCandidates(
+  candidates: Candidate[],
+  max: number,
+  lastClassifiedAt: LastClassifiedAt = () => null,
+): Candidate[] {
   if (candidates.length <= max) return candidates;
+  // Rotasyon sırası: hiç ölçülmemiş → en eski ölçülmüş → en yeni. Eşitlikte
+  // özgün sıra (kararlı, deterministik: aynı depo aynı seçimi verir).
+  const order = candidates.map((_, i) => i);
+  const keys = candidates.map((c) => rotationKey(c, lastClassifiedAt));
+  order.sort((x, y) => {
+    const kx = keys[x]!, ky = keys[y]!;
+    if (kx === ky) return x - y;
+    if (kx === null) return -1;
+    if (ky === null) return 1;
+    return kx < ky ? -1 : 1;
+  });
   // Kota MAX_CLASSIFY_ITEMS ölçeğinde tanımlı; farklı bir tavanla çağrılırsa
   // (audit --max-classify-items) oranı korunur. En az 1: küçük bir tavanda bile
   // hiçbir yüzey tümden kapanmasın.
@@ -45,9 +91,9 @@ export function selectCandidates(candidates: Candidate[], max: number): Candidat
   let budget = max;
   const takeFrom = (kind: Candidate["kind"], limit: number) => {
     let n = 0;
-    for (const [i, c] of candidates.entries()) {
+    for (const i of order) { // özgün sıra DEĞİL rotasyon sırası
       if (budget === 0 || n === limit) break;
-      if (c.kind !== kind || chosen.has(i)) continue;
+      if (candidates[i]!.kind !== kind || chosen.has(i)) continue;
       chosen.add(i); n++; budget--;
     }
   };
@@ -96,6 +142,12 @@ export interface ClassifyResult {
    * korumak için kullanır.
    */
   unmeasured: Candidate[];
+  /**
+   * Çelişki boyutu bu adaylar için GERÇEKTEN ölçüldü (gösterildi ve hüküm
+   * döndü). `unmeasured`ın tümleyeni; `audit.ts` bununla rotasyon damgasını
+   * yazar — ölçülmemiş adayın damgası ilerlerse rotasyon kendi amacını yıkardı.
+   */
+  measured: Candidate[];
   calls: number;
   dropped: number;
   error?: string;
@@ -216,16 +268,19 @@ export async function classifyCandidates(
   executor: ExecutorAdapter,
   candidates: Candidate[],
   notes: Map<number, NoteView>,
-  opts: { maxItems?: number } = {},
+  opts: { maxItems?: number; lastClassifiedAt?: LastClassifiedAt } = {},
 ): Promise<ClassifyResult> {
   const max = opts.maxItems ?? MAX_CLASSIFY_ITEMS;
-  const taken = selectCandidates(candidates, max);
+  const taken = selectCandidates(candidates, max, opts.lastClassifiedAt);
   const dropped = candidates.length - taken.length;
   const takenSet = new Set(taken);
   /** Bütçeye hiç girmemiş aday da ölçülmemiş bir adaydır. */
   const droppedCandidates = candidates.filter((c) => !takenSet.has(c));
   if (taken.length === 0)
-    return { ok: true, confirmed: [], kararsiz: 0, unclassified: 0, unmeasured: droppedCandidates, calls: 0, dropped };
+    return {
+      ok: true, confirmed: [], kararsiz: 0, unclassified: 0,
+      unmeasured: droppedCandidates, measured: [], calls: 0, dropped,
+    };
 
   // item.index = adayın taken içindeki konumu (renderItems entries() index'i
   // kullanır); nota erişilemeyen aday atlanmış olsa da index'ler taken'a işaret
@@ -244,7 +299,7 @@ export async function classifyCandidates(
   // Ölçüm HİÇ yapılamadı: adayların TAMAMI (bütçeye girmeyenler dahil) ölçülmemiş.
   const failed = (error: string): ClassifyResult => ({
     ok: false, confirmed: [], kararsiz: 0, unclassified: taken.length,
-    unmeasured: candidates, calls, dropped, error,
+    unmeasured: candidates, measured: [], calls, dropped, error,
   });
 
   let res = await runOnce(prompt);
@@ -277,6 +332,7 @@ export async function classifyCandidates(
     ok: true, confirmed, kararsiz,
     unclassified: undecided.length,
     unmeasured: [...droppedCandidates, ...undecided],
+    measured: taken.filter((_, i) => decided.has(i)),
     calls, dropped,
   };
 }

@@ -63,17 +63,32 @@ export function setSuspicion(store: Store, id: number, suspicion: number): void 
   store.run("UPDATE findings SET suspicion = ? WHERE id = ?", clamped, id);
 }
 
+/**
+ * Çelişki boyutu ÖLÇÜLEN notları damgalar (aday rotasyonu — schema.sql).
+ * `content` değişmediği için append-only tetikleyicisi bu UPDATE'i geçirir:
+ * damga notun İDDİASI değil, o iddianın ne zaman ölçüldüğü.
+ *
+ * Yalnız GERÇEKTEN hüküm dönen adayların tarafları damgalanır; bütçeye
+ * girmeyen ya da cevapsız kalan aday ölçülmemiştir ve sıranın önünde kalmalıdır.
+ */
+export function markClassified(store: Store, ids: Iterable<number>, at: string): void {
+  for (const id of ids) store.run("UPDATE findings SET last_classified_at = ? WHERE id = ?", at, id);
+}
+
 export function getFinding(store: Store, id: number): Finding | undefined {
   const r = store.get<{
     id: number; project_id: number; source: FindingSource; content: string;
     source_ref: string | null; created_at: string; status: FindingStatus;
-    superseded_by: number | null; suspicion: number;
+    superseded_by: number | null; suspicion: number; last_classified_at: string | null;
   }>("SELECT * FROM findings WHERE id = ?", id);
   if (!r) return undefined;
   return {
     id: r.id, projectId: r.project_id, source: r.source, content: r.content,
     sourceRef: r.source_ref, createdAt: r.created_at, status: r.status,
     supersededBy: r.superseded_by, suspicion: r.suspicion,
+    // Göç edilmemiş bir depodan (ya da eski bir satırdan) undefined gelebilir;
+    // rotasyon açısından "hiç sınıflanmadı" ile aynı anlama gelir.
+    lastClassifiedAt: r.last_classified_at ?? null,
   };
 }
 

@@ -76,6 +76,35 @@ function migrate(db: DatabaseSync): void {
   migrateCursors(db);
   migrateWatermarks(db);
   migrateScanLock(db);
+  migrateFindings(db);
+}
+
+/**
+ * `last_classified_at` sütunu (aday rotasyonu — gerekçe schema.sql'de). Var olan
+ * depolarda yok ve `CREATE TABLE IF NOT EXISTS` onu EKLEMEZ; sütunsuz bir depoda
+ * her denetim, rotasyon damgasını yazarken "no such column" ile patlardı.
+ *
+ * Tablo yeniden kurulmuyor: eklenen sütun nullable, kaldırılacak bir CHECK
+ * kısıtı yok. Ve findings tablosunu yeniden kurmak append-only tetikleyicilerini
+ * (findings_no_delete) devre dışı bırakmadan yapılamazdı — yani kalıbı burada
+ * kullanmak, korumayı göç süresince kaldırmak demekti. ALTER o riski hiç açmıyor.
+ *
+ * NULL doğru varsayılan: "bu not hiç sınıflanmadı" = rotasyonda en öncelikli.
+ * Göç sonrası ilk koşumda tüm notlar eşit önceliğe düşer, sıra özgün sırasıdır —
+ * uydurma bir damga yazmak, ölçülmemiş adayları sıranın sonuna atardı.
+ *
+ * SCHEMA_GENERATION artırılMADI, bilerek: damga yalnız İKİ kuşağın aynı depoya
+ * yazmasının VERİ BOZDUĞU durumlar için var (lock.ts vakası). Burada eski kod
+ * yeni depoya yazabilir — yalnız rotasyon damgasını güncellemez, yani rotasyon
+ * körelir, hiçbir şey bozulmaz. Kuşağı artırmak eski sürümlere gereksiz bir
+ * kapı kapatırdı.
+ */
+function migrateFindings(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(findings)").all() as { name: string }[];
+  if (cols.length === 0) return; // tablo yok: şema henüz koşmamış
+  if (!cols.some((c) => c.name === "last_classified_at")) {
+    db.exec("ALTER TABLE findings ADD COLUMN last_classified_at TEXT");
+  }
 }
 
 /**
