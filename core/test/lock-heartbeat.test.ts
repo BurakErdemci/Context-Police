@@ -227,3 +227,36 @@ test("heartbeat_at'sız eski şemalı depo açılınca kolon gelir ve kilit alı
   yeni.close();
 });
 
+// --- 5) eşzamanlı devralma: ham SQLite hatası sızmaz -------------------------
+
+test("SQLITE_BUSY yarışı ScanLockBusy'ye çevrilir, ham depo hatası sızmaz", () => {
+  const path = tmpStorePath();
+  const kur = openStore(path);
+  kur.run("INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)", "bayat", "2000-01-01T00:00:00.000Z");
+  kur.close();
+
+  // İki devralıcı aynı anda: A okur, B okur+yazar+commit eder, A yazmaya
+  // kalkınca SQLITE_BUSY_SNAPSHOT (errcode 517) alır. Kaybeden taraf "başkası
+  // tarıyor" mesajı almalı — yığın izi değil.
+  const a = openStore(path);
+  const b = openStore(path);
+
+  // Yarış deterministik kuruluyor: A'nın DEFERRED işlemi bir okuma anlık
+  // görüntüsü alır, ARADA B devralıp commit eder, sonra A yazmaya kalkar.
+  // Gerçek yarışta bu sıra %50 civarı üretiyordu (probe ölçümü); burada elle
+  // dizilerek her koşumda üretilir.
+  let hata: unknown;
+  try {
+    a.tx(() => {
+      a.get("SELECT holder FROM scan_lock WHERE id = 1"); // anlık görüntü sabitlenir
+      acquireScanLock(b, newLockHolder()); // B araya girer, devralır, commit eder
+      acquireScanLock(a, newLockHolder()); // A yazmaya kalkar → SQLITE_BUSY
+    });
+  } catch (err) {
+    hata = err;
+  }
+  assert.ok(hata instanceof ScanLockBusy,
+    `kaybeden ham depo hatası aldı: ${hata instanceof Error ? `${hata.name}: ${hata.message}` : String(hata)}`);
+  a.close();
+  b.close();
+});

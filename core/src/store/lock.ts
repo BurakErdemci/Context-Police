@@ -100,6 +100,31 @@ export class ScanLockStolen extends Error {
 }
 
 /**
+ * Eşzamanlı devralmada kaybeden tarafın aldığı depo hatası mı?
+ *
+ * `Store.tx` derinlik 0'da DEFERRED `BEGIN` açıyor: iki devralıcı aynı anlık
+ * görüntüyü okuyup ikisi de devralmaya karar verebiliyor, sonra biri yazıyor ve
+ * diğeri yazmaya kalkınca SQLITE_BUSY_SNAPSHOT alıyor. Node'un yerleşik SQLite
+ * sürücüsüyle ölçüldü: `errcode = 517`, `errstr = "database is locked"`.
+ *
+ * NEDEN DAR YAKALAMA, NEDEN `BEGIN IMMEDIATE` DEĞİL: IMMEDIATE'e geçmek TÜM
+ * işlemlerin davranışını değiştirir (her tarama/denetim/import tx'i baştan yazma
+ * kilidi alır ve okuyucular birbirini beklemeye başlar) — kilit alımındaki bir
+ * hata sunumu için ödenecek bedel değil. Serileşme zaten DOĞRU çalışıyor: tam
+ * olarak bir devralıcı kazanıyor, kaybeden hiçbir şey yazamıyor. Kusur yalnız
+ * SUNUMDU — kaybeden ham yığın izi + rc=1 (yani "argümanın yanlış") alıyordu,
+ * oysa doğru tepki "başkası tarıyor, bekle ve tekrar dene" (rc=5).
+ *
+ * Düşük bayt maskesi: SQLite genişletilmiş kodları alt bayta birincil kodu
+ * koyuyor (517 & 0xff == 5 == SQLITE_BUSY). Metin kontrolü yalnız yedek.
+ */
+function isBusyError(err: unknown): boolean {
+  const e = err as { errcode?: unknown; message?: unknown };
+  if (typeof e?.errcode === "number" && (e.errcode & 0xff) === 5) return true;
+  return typeof e?.message === "string" && /database is locked|SQLITE_BUSY/i.test(e.message);
+}
+
+/**
  * Uzun tutulan kilidi görünür kılar. ÇALMAZ — yalnız yazar.
  *
  * Gürültü engeli: aynı kilit satırı (sahip + alınma zamanı) için EN FAZLA bir
@@ -145,54 +170,68 @@ type Busy = { holder: string; acquiredAt: string; longHeld: boolean; age: number
 
 export function acquireScanLock(store: Store, holder: string): void {
   let busy: Busy | null = null;
-  store.tx(() => {
-    const cur = store.get<{ holder: string; acquired_at: string; heartbeat_at: string | null }>(
-      "SELECT holder, acquired_at, heartbeat_at FROM scan_lock WHERE id = 1",
-    );
-    if (cur) {
-      // Atış yoksa `acquired_at`'e düşülür. NULL iki durumdan gelir: satırı bu
-      // kuşaktan ÖNCEKİ bir yazıcı bıraktı (göç), ya da sahip aldıktan hemen
-      // sonra ilk atışa varmadan bakıldı — ikisinde de alınma zamanı doğru
-      // alt sınır. Okunamayan damga tazelik KANITI sayılmaz: bizim yazdığımız
-      // her satırda geçerli ISO damga var, dolayısıyla ayrıştırılamayan bir
-      // damga yabancı bir yazıcıdandır ve süresiz tutma hakkı doğurmaz.
-      const sinceBeat = Date.now() - Date.parse(cur.heartbeat_at ?? cur.acquired_at);
-      const age = Date.now() - Date.parse(cur.acquired_at);
-      const stale = !Number.isFinite(sinceBeat) || sinceBeat >= HEARTBEAT_STALE_MS;
-      if (!stale) {
-        // MEŞGUL: burada FIRLATILMIYOR. Fırlatmak tx'i ROLLBACK'e sürükler ve
-        // aynı tx içinde yazılacak uzun-tutma olayını da geri alırdı — olayın
-        // yazıldığını görüp diskte bulamamak, tam olarak önlemeye çalıştığımız
-        // sessiz kayıp. Meşgul hâli veri olarak dışarı çıkar, kayıt ve
-        // fırlatma tx kapandıktan sonra yapılır.
-        busy = {
-          holder: cur.holder,
-          acquiredAt: cur.acquired_at,
-          longHeld: Number.isFinite(age) && age >= LONG_HELD_MS,
-          age,
-        };
-        return;
-      }
-      // Devralma sessiz değil ize düşerek: `reason` olmadan "canlı sahibin
-      // kilidi mi çalındı" sorusu günlükten cevaplanamıyor.
-      store.run(
-        "INSERT INTO events (project_id, at, kind, detail) VALUES (NULL,?,?,?)",
-        nowIso(),
-        "scan_lock_stolen",
-        JSON.stringify({
-          previousHolder: cur.holder,
-          ageMs: Number.isFinite(age) ? age : null,
-          reason: "heartbeat_stale",
-        }),
+  try {
+    store.tx(() => {
+      const cur = store.get<{ holder: string; acquired_at: string; heartbeat_at: string | null }>(
+        "SELECT holder, acquired_at, heartbeat_at FROM scan_lock WHERE id = 1",
       );
-      store.run("DELETE FROM scan_lock WHERE id = 1");
+      if (cur) {
+        // Atış yoksa `acquired_at`'e düşülür. NULL iki durumdan gelir: satırı bu
+        // kuşaktan ÖNCEKİ bir yazıcı bıraktı (göç), ya da sahip aldıktan hemen
+        // sonra ilk atışa varmadan bakıldı — ikisinde de alınma zamanı doğru
+        // alt sınır. Okunamayan damga tazelik KANITI sayılmaz: bizim yazdığımız
+        // her satırda geçerli ISO damga var, dolayısıyla ayrıştırılamayan bir
+        // damga yabancı bir yazıcıdandır ve süresiz tutma hakkı doğurmaz.
+        const sinceBeat = Date.now() - Date.parse(cur.heartbeat_at ?? cur.acquired_at);
+        const age = Date.now() - Date.parse(cur.acquired_at);
+        const stale = !Number.isFinite(sinceBeat) || sinceBeat >= HEARTBEAT_STALE_MS;
+        if (!stale) {
+          // MEŞGUL: burada FIRLATILMIYOR. Fırlatmak tx'i ROLLBACK'e sürükler ve
+          // aynı tx içinde yazılacak uzun-tutma olayını da geri alırdı — olayın
+          // yazıldığını görüp diskte bulamamak, tam olarak önlemeye çalıştığımız
+          // sessiz kayıp. Meşgul hâli veri olarak dışarı çıkar, kayıt ve
+          // fırlatma tx kapandıktan sonra yapılır.
+          busy = {
+            holder: cur.holder,
+            acquiredAt: cur.acquired_at,
+            longHeld: Number.isFinite(age) && age >= LONG_HELD_MS,
+            age,
+          };
+          return;
+        }
+        // Devralma sessiz değil ize düşerek: `reason` olmadan "canlı sahibin
+        // kilidi mi çalındı" sorusu günlükten cevaplanamıyor.
+        store.run(
+          "INSERT INTO events (project_id, at, kind, detail) VALUES (NULL,?,?,?)",
+          nowIso(),
+          "scan_lock_stolen",
+          JSON.stringify({
+            previousHolder: cur.holder,
+            ageMs: Number.isFinite(age) ? age : null,
+            reason: "heartbeat_stale",
+          }),
+        );
+        store.run("DELETE FROM scan_lock WHERE id = 1");
+      }
+      const now = nowIso();
+      // İlk atış alımla birlikte yazılıyor: aksi hâlde alım ile ilk zamanlayıcı
+      // turu arasındaki pencerede satır NULL kalır ve tazelik `acquired_at`'e
+      // düşerdi — doğru ama gereksiz bir dolaylılık.
+      store.run("INSERT INTO scan_lock (id, holder, acquired_at, heartbeat_at) VALUES (1,?,?,?)", holder, now, now);
+    });
+  } catch (err) {
+    if (!isBusyError(err)) throw err;
+    // Kaybeden taraf hiçbir şey yazamadı; kazananın kim olduğunu en iyi çabayla
+    // okuyup mesaja koyuyoruz. Okuma da patlarsa mesaj sahipsiz kalır ama
+    // SINIF doğru kalır — çağıranın kararı (bekle ve tekrar dene) buna bağlı.
+    let winner = "bilinmiyor";
+    try {
+      winner = store.get<{ holder: string }>("SELECT holder FROM scan_lock WHERE id = 1")?.holder ?? winner;
+    } catch {
+      // yut: sınıflandırma zaten yapıldı
     }
-    const now = nowIso();
-    // İlk atış alımla birlikte yazılıyor: aksi hâlde alım ile ilk zamanlayıcı
-    // turu arasındaki pencerede satır NULL kalır ve tazelik `acquired_at`'e
-    // düşerdi — doğru ama gereksiz bir dolaylılık.
-    store.run("INSERT INTO scan_lock (id, holder, acquired_at, heartbeat_at) VALUES (1,?,?,?)", holder, now, now);
-  });
+    throw new ScanLockBusy(winner);
+  }
   if (busy) {
     const b: Busy = busy;
     if (b.longHeld) noteLongHeldLock(store, b.holder, b.acquiredAt, b.age);
