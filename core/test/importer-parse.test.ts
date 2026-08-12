@@ -101,6 +101,24 @@ test("extractAnchors: dört tür de kotasından pay alır, öncelik sırası kor
   assert.equal(anchors.at(-1)!.kind, "commit_sha");
 });
 
+test("parseNote: metadata altındaki girintili alanlar okunur, üst seviye kazanır", () => {
+  // Ölçüm (altın set §5.4): gerçek Claude Code not biçiminde `modified` alanı
+  // `metadata:` altında girintili duruyor; okunamayınca 28 notun 28'inde
+  // noteTimestamp import anına düştü ve churn penceresi kullanılamaz oldu.
+  const raw = "---\nname: n\ndescription: \"d\"\nmetadata: \n" +
+    "  node_type: memory\n  modified: 2026-08-11T21:57:39.156Z\n---\n\ngövde";
+  const p = parseNote(raw);
+  assert.equal(p.frontmatter.modified, "2026-08-11T21:57:39.156Z");
+  assert.equal(p.frontmatter.node_type, "memory");
+  assert.equal(p.frontmatter.metadata, undefined); // eşleme başlığı hâlâ değer değil
+  assert.equal(p.body.trim(), "gövde");
+  assert.equal(noteTimestamp(p.frontmatter, "2026-01-01T00:00:00Z"), "2026-08-11T21:57:39.156Z");
+
+  // Çakışmada üst seviye kazanır: girintili alan onu EZEMEZ.
+  const cakisma = parseNote("---\nmodified: 2026-01-02T00:00:00Z\nmetadata:\n  modified: 2020-01-01T00:00:00Z\n---\nx");
+  assert.equal(cakisma.frontmatter.modified, "2026-01-02T00:00:00Z");
+});
+
 test("noteTimestamp: frontmatter modified > created > geri düşüş, geçerli tarih ISO'ya normalize edilir", () => {
   assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00.000Z" }, "2026-08-11T00:00:00Z"), "2026-08-01T10:00:00.000Z");
   assert.equal(noteTimestamp({}, "2026-08-11T00:00:00Z"), "2026-08-11T00:00:00Z");

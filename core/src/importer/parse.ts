@@ -5,7 +5,11 @@
 import type { Anchor } from "../types.ts";
 
 export interface ParsedNote {
-  /** Yalnız düz (girintisiz) string alanlar — description bunların içinde. */
+  /**
+   * Düz string alanlar + `metadata:` gibi bir eşleme başlığı altındaki TEK
+   * seviye (2 boşluk) girintili alanlar, tek düzleme haritada. Üst seviye
+   * çakışmada kazanır.
+   */
   frontmatter: Record<string, string>;
   body: string;
 }
@@ -14,12 +18,27 @@ export function parseNote(raw: string): ParsedNote {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
   if (!m) return { frontmatter: {}, body: raw };
   const fm: Record<string, string> = {};
+  // Girintili alanlar ayrı toplanır ve SONRA düzleştirilir: üst seviye bir alan
+  // aynı adı taşıyorsa o kazanmalı, yoksa `metadata.modified` gerçek `modified`
+  // alanını ezebilirdi.
+  const nested: Record<string, string> = {};
+  const unquote = (v: string) => v.replace(/^["']|["']$/g, "");
   for (const line of m[1]!.split(/\r?\n/)) {
-    // Girintili satırlar (iç içe yaml) atlanır: tam yaml ayrıştırıcı bağımlılık
-    // demek (K12) ve tek ihtiyacımız düz description/modified alanları.
     const kv = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
-    if (kv && kv[2] !== "") fm[kv[1]!] = kv[2]!.replace(/^["']|["']$/g, "");
+    if (kv !== null) {
+      if (kv[2] !== "") fm[kv[1]!] = unquote(kv[2]!);
+      continue;
+    }
+    // Tam YAML ayrıştırıcı hâlâ YOK (K12: bağımlılık yasak) — yalnız tek seviye
+    // `key: value`. Ölçüm (altın set §5.4): gerçek Claude Code not biçiminde
+    // `modified` alanı `metadata:` altında girintili duruyor ve okunamadığı için
+    // 28 notun 28'inde noteTimestamp import anına düştü; churn'ün `--since`
+    // penceresi tümden kullanılamaz oldu. İç içe listeler ve daha derin
+    // girintiler bilerek kapsam dışı: ihtiyaç modified/created/date ile sınırlı.
+    const sub = /^ {2}([A-Za-z_][\w-]*):\s*(.+)$/.exec(line);
+    if (sub !== null && nested[sub[1]!] === undefined) nested[sub[1]!] = unquote(sub[2]!);
   }
+  for (const [k, v] of Object.entries(nested)) if (fm[k] === undefined) fm[k] = v;
   return { frontmatter: fm, body: raw.slice(m[0].length) };
 }
 
