@@ -79,7 +79,23 @@ export interface ClassifyVerdict { index: number; verdict: "celiski" | "uyumlu" 
 export interface ClassifyResult {
   ok: boolean;
   confirmed: Candidate[];
+  /** Model AÇIKÇA "kararsiz" dedi — bir hüküm, bilgisizlik değil. */
   kararsiz: number;
+  /**
+   * Prompt'ta gösterildi ama HİÇBİR hüküm dönmedi (ya da hiç gösterilemedi).
+   * `kararsiz`ten ayrı: orada model ölçüp karar veremediğini söyledi, burada
+   * ölçüm hiç yapılmadı. Denetim (2026-08-12, `incomplete-classification-clean`):
+   * şema-geçerli BOŞ bir `verdicts` dizisi bile `ok: true` dönüyordu, yani
+   * "sınıflanmadı" ile "sınıflandı, çelişki yok" ayırt edilemiyordu — ve
+   * ayırt edilemeyen fark, `audit.ts`te sessiz bir AKLAMAYA dönüşüyordu.
+   */
+  unclassified: number;
+  /**
+   * Çelişki boyutu bu adaylar için ÖLÇÜLMEDİ: bütçeye girmeyenler (dropped) +
+   * hüküm dönmeyenler. `audit.ts` bunu, ilgili notların önceki hükmünü
+   * korumak için kullanır.
+   */
+  unmeasured: Candidate[];
   calls: number;
   dropped: number;
   error?: string;
@@ -144,8 +160,15 @@ ${DATA_FENCE_RULE}
 ${rendered}`;
 }
 
+/**
+ * @param shown Prompt'ta GERÇEKTEN gösterilen index kümesi. Sınır eskiden
+ *   `taken.length` üzerinden kuruluyordu; oysa `renderItems` notu bulunamayan
+ *   adayı ATLIYOR, yani aralık içinde ama hiç gösterilmemiş index'ler vardı.
+ *   Model öyle bir index döndürdüğünde hüküm, modelin hiç görmediği bir adaya
+ *   bağlanıyordu (denetim 2026-08-12, eşleme açığı). Sınır artık kümenin kendisi.
+ */
 export function parseClassifyOutput(
-  raw: string, itemCount: number,
+  raw: string, shown: ReadonlySet<number>,
 ): { ok: true; verdicts: ClassifyVerdict[] } | { ok: false; error: string } {
   // Düzyazıya sarılı JSON kurtarma — gözlemcide ölçülen aynı sınıf (prompt.ts).
   const start = raw.indexOf("{");
@@ -163,7 +186,7 @@ export function parseClassifyOutput(
   const out: ClassifyVerdict[] = [];
   for (const v of verdicts) {
     const c = v as ClassifyVerdict;
-    if (typeof c?.index !== "number" || c.index < 0 || c.index >= itemCount || seen.has(c.index)) continue;
+    if (typeof c?.index !== "number" || !shown.has(c.index) || seen.has(c.index)) continue;
     if (c.verdict !== "celiski" && c.verdict !== "uyumlu" && c.verdict !== "kararsiz") continue;
     seen.add(c.index);
     out.push({ index: c.index, verdict: c.verdict, evidence: typeof c.evidence === "string" ? c.evidence : "" });
@@ -198,12 +221,18 @@ export async function classifyCandidates(
   const max = opts.maxItems ?? MAX_CLASSIFY_ITEMS;
   const taken = selectCandidates(candidates, max);
   const dropped = candidates.length - taken.length;
-  if (taken.length === 0) return { ok: true, confirmed: [], kararsiz: 0, calls: 0, dropped };
+  const takenSet = new Set(taken);
+  /** Bütçeye hiç girmemiş aday da ölçülmemiş bir adaydır. */
+  const droppedCandidates = candidates.filter((c) => !takenSet.has(c));
+  if (taken.length === 0)
+    return { ok: true, confirmed: [], kararsiz: 0, unclassified: 0, unmeasured: droppedCandidates, calls: 0, dropped };
 
   // item.index = adayın taken içindeki konumu (renderItems entries() index'i
   // kullanır); nota erişilemeyen aday atlanmış olsa da index'ler taken'a işaret
-  // eder — verdict eşlemesi bu yüzden doğrudan taken[v.index].
+  // eder — verdict eşlemesi bu yüzden doğrudan taken[v.index]. `shown` tam da
+  // atlananları dışarıda bırakır: gösterilmemiş index'e hüküm bağlanamaz.
   const items = renderItems(taken, notes);
+  const shown = new Set(items.map((it) => it.index));
   const prompt = buildClassifyPrompt(items);
   let calls = 0;
 
@@ -212,25 +241,42 @@ export async function classifyCandidates(
     return executor.run({ prompt: p, outputSchema: CLASSIFY_OUTPUT_SCHEMA });
   };
 
+  // Ölçüm HİÇ yapılamadı: adayların TAMAMI (bütçeye girmeyenler dahil) ölçülmemiş.
+  const failed = (error: string): ClassifyResult => ({
+    ok: false, confirmed: [], kararsiz: 0, unclassified: taken.length,
+    unmeasured: candidates, calls, dropped, error,
+  });
+
   let res = await runOnce(prompt);
   if (!res.ok) { res = await runOnce(prompt); } // geçici hata tekrarı (spec §3.3)
-  if (!res.ok) return { ok: false, confirmed: [], kararsiz: 0, calls, dropped, error: `yürütücü: ${res.error}` };
+  if (!res.ok) return failed(`yürütücü: ${res.error}`);
 
-  let parsed = parseClassifyOutput(res.output, taken.length);
+  let parsed = parseClassifyOutput(res.output, shown);
   if (!parsed.ok) {
     const retry = await runOnce(
       `${prompt}\n\nÖNCEKİ ÇIKTIN GEÇERSİZDİ: ${parsed.error}. Yalnız şemaya uyan JSON döndür.`,
     );
-    if (!retry.ok) return { ok: false, confirmed: [], kararsiz: 0, calls, dropped, error: `yürütücü: ${retry.error}` };
-    parsed = parseClassifyOutput(retry.output, taken.length);
-    if (!parsed.ok) return { ok: false, confirmed: [], kararsiz: 0, calls, dropped, error: `geçersiz JSON (iki deneme): ${parsed.error}` };
+    if (!retry.ok) return failed(`yürütücü: ${retry.error}`);
+    parsed = parseClassifyOutput(retry.output, shown);
+    if (!parsed.ok) return failed(`geçersiz JSON (iki deneme): ${parsed.error}`);
   }
 
   const confirmed: Candidate[] = [];
   let kararsiz = 0;
+  const decided = new Set<number>();
   for (const v of parsed.verdicts) {
+    decided.add(v.index);
     if (v.verdict === "celiski") confirmed.push(taken[v.index]!);
     else if (v.verdict === "kararsiz") kararsiz++;
   }
-  return { ok: true, confirmed, kararsiz, calls, dropped };
+  // Hüküm dönmeyen aday "uyumlu" DEĞİL: prompt'ta gösterilip cevapsız kalan da,
+  // notu bulunamadığı için hiç gösterilemeyen de ölçülmemiş sayılır. Sessizce
+  // temiz saymak, ürünün "ölçemedim ≠ temiz" sözleşmesinin ihlali.
+  const undecided = taken.filter((_, i) => !decided.has(i));
+  return {
+    ok: true, confirmed, kararsiz,
+    unclassified: undecided.length,
+    unmeasured: [...droppedCandidates, ...undecided],
+    calls, dropped,
+  };
 }

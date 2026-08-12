@@ -14,8 +14,8 @@ import type { ExecutorAdapter } from "./adapters/executor.ts";
 import { importMemoryDir, type ImportSummary } from "./importer/import.ts";
 import { openGit } from "./signals/git.ts";
 import {
-  checkAnchors, scoreDrift, SUSPICION_THRESHOLD,
-  type AnchorState, type AnchorVerdict,
+  checkAnchors, scoreDrift, createGitBudget, SUSPICION_THRESHOLD,
+  type AnchorState, type AnchorVerdict, type GitBudget,
 } from "./signals/anchor-drift.ts";
 import { hasStatusPattern } from "./signals/status-pattern.ts";
 import { findCandidates, type NoteView } from "./signals/contradiction.ts";
@@ -65,6 +65,12 @@ export interface AuditOptions {
   originRef?: string;
   maxClassifyItems?: number;
   /**
+   * Koşumun git alt süreç tavanı. Verilmezse çapa sayısından türetilir
+   * (anchor-drift.ts `createGitBudget` — sayının ölçüm gerekçesi orada).
+   * Testte küçük bir değerle kapıyı açıkça sınamak için var.
+   */
+  maxGitCalls?: number;
+  /**
    * Koşum kimliği. Olay günlüğü append-only ve KOŞUMLAR ARASI idempotent değil:
    * ölçüldü (2026-08-11), üç ardışık başarılı koşum `contradiction_confirmed`
    * olayını 1→2→3 yazıyor. Altın set ölçümü bu günlükten okunduğu için
@@ -93,6 +99,20 @@ export interface AuditSummary {
   contradictions: number;
   classifyDropped: number;
   classifyCalls: number;
+  /**
+   * Sınıflamaya girip HÜKÜM DÖNMEYEN aday sayısı. `contradictions` (onaylanan)
+   * ve `classifyDropped` (bütçeye girmeyen) ile birlikte okunur: üçü de sıfırsa
+   * çelişki boyutu gerçekten ölçüldü ve temiz çıktı.
+   */
+  classifyUnclassified: number;
+  /**
+   * Çelişki boyutu ÖLÇÜLEMEDİĞİ için önceki `suspect` hükmü korunan not sayısı.
+   * "Bu not hâlâ suspect çünkü çelişki var" ile "…çünkü ölçüm yapılamadı"
+   * ayrımının özetteki karşılığı.
+   */
+  heldUnmeasured: number;
+  /** Git bütçesi dolduğu için HİÇ ölçülmemiş çapa sayısı (arıza değil, maliyet sınırı). */
+  budgetExhaustedAnchors: number;
   /**
    * Koşumdaki TÜM çapaların durum dağılımı. Şüphe skoru bunun yalnız bir
    * kısmından üretiliyor (WEIGHT üç duruma bakıyor); `unverifiable` ve
@@ -141,6 +161,7 @@ export async function auditProject(
   const sum: AuditSummary = {
     runId, import: null, gitAvailable: false, checked: 0, suspects: 0, cleared: 0,
     candidates: 0, classified: false, contradictions: 0, classifyDropped: 0, classifyCalls: 0,
+    classifyUnclassified: 0, heldUnmeasured: 0, budgetExhaustedAnchors: 0,
     anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
   };
 
@@ -199,11 +220,20 @@ export async function auditProject(
     const pendingContradictionEvents: Record<string, unknown>[] = [];
     let measurementEvents = 0;
 
+    // Çapalar TEK seferde okunuyor: bütçe koşumun tamamı için kurulacağı için
+    // toplam çapa sayısı döngüden ÖNCE bilinmeli, ve aşağıdaki `views` zaten
+    // aynı okumayı ikinci kez yapıyordu.
+    const anchorsById = new Map(all.map((f) => [f.id, getAnchors(store, f.id)]));
+    const anchorCount = [...anchorsById.values()].reduce((n, a) => n + a.length, 0);
+    const budget: GitBudget = opts.maxGitCalls !== undefined
+      ? { limit: opts.maxGitCalls, used: 0 }
+      : createGitBudget(anchorCount);
+
     for (const f of all) {
       if (f.status === "unanchored") continue;
-      const anchors = getAnchors(store, f.id);
+      const anchors = anchorsById.get(f.id)!;
       const statusPattern = hasStatusPattern(f.content);
-      const verdicts = ctx !== null ? await checkAnchors(ctx, anchors, f.createdAt) : [];
+      const verdicts = ctx !== null ? await checkAnchors(ctx, anchors, f.createdAt, budget) : [];
       const drift = scoreDrift(verdicts, statusPattern);
       const states = countStates(verdicts);
       for (const [state, n] of Object.entries(states)) sum.anchorStates[state as AnchorState] += n;
@@ -212,6 +242,7 @@ export async function auditProject(
       // değil, ve arızanın kendisi (bozuk klon, erişilemez promisor) düzeltilebilir
       // bir durum. Bilgi şu ana kadar yalnız dönüş değerinde taşınıyordu.
       for (const v of verdicts) {
+        if (v.budgetExhausted === true) sum.budgetExhaustedAnchors++;
         if (v.measurementFailed === undefined) continue;
         sum.measurementFailures++;
         if (measurementEvents >= MAX_MEASUREMENT_EVENTS_PER_AUDIT) continue;
@@ -237,11 +268,23 @@ export async function auditProject(
         suppressed: sum.measurementFailures - measurementEvents, logged: measurementEvents,
       });
 
+    // Bütçe tükenişi arıza DEĞİL maliyet sınırı (bu yüzden measurementFailures'a
+    // yazılmıyor), ama sessiz de kalamaz: kalan çapalar hiç ölçülmedi ve bu,
+    // "ölçüldü, temiz çıktı"dan ayırt edilebilmeli. Koşum başına TEK satır —
+    // çapa başına yazmak, maliyet sınırını yüzlerce arıza gibi gösterirdi
+    // (aynı gerekçe: observer_budget_halt).
+    if (sum.budgetExhaustedAnchors > 0)
+      ev("anchor_signal_disabled", {
+        path: project.path, reason: "git_budget_exhausted",
+        limit: budget.limit, used: budget.used,
+        unmeasuredAnchors: sum.budgetExhaustedAnchors, totalAnchors: anchorCount,
+      });
+
     // Çelişki: mekanik adaylar → tek toplu sınıflama.
     const views: NoteView[] = all.map((f) => ({
       findingId: f.id,
       content: f.content,
-      anchors: getAnchors(store, f.id),
+      anchors: anchorsById.get(f.id)!,
       description: f.source === "imported" ? (parseNote(f.content).frontmatter["description"] ?? null) : null,
       hasStatus: hasStatusPattern(f.content),
     }));
@@ -250,16 +293,41 @@ export async function auditProject(
     if (skippedAnchors > 0)
       ev("classify_overflow", { skippedAnchors, note: "ayırt edici olmayan ortak çapalar çift üretmedi" });
 
+    /**
+     * Çelişki boyutu ÖLÇÜLEMEYEN notlar. Ölçüm arızası suçlamaya dönmez —
+     * ama AKLAMAYA da dönmemeli: bu notların önceki `suspect` hükmü, yeni bir
+     * ölçüm olmadığı için düşürülmez (aşağıdaki yazım döngüsü).
+     *
+     * Küme aday BAZINDA kuruluyor, koşum bazında değil: hiç adaya girmemiş bir
+     * not sınıflama çökse de normal temizleme geçişini görür. Aksi hâlde bir
+     * sınıflama arızası, çelişkiyle hiç ilgisi olmayan notları da dondururdu —
+     * aşırı-koruma da bir yanlış karardır.
+     */
+    const unmeasuredFindings = new Set<number>();
+
     if (candidates.length > 0 && opts.executor !== null) {
       const notesById = new Map(views.map((v) => [v.findingId, v]));
       const res = await classifyCandidates(opts.executor, candidates, notesById,
         { maxItems: opts.maxClassifyItems ?? MAX_CLASSIFY_ITEMS });
       sum.classifyCalls = res.calls;
       sum.classifyDropped = res.dropped;
+      sum.classifyUnclassified = res.unclassified;
+      for (const c of res.unmeasured)
+        for (const id of [c.aId, c.bId]) if (id !== null) unmeasuredFindings.add(id);
       if (res.dropped > 0)
         ev("classify_overflow", { droppedCandidates: res.dropped });
+      // Hüküm dönmeyen aday sessiz kalamaz: "sınıflandı, temiz çıktı" ile
+      // "karar verilmedi" ayrımı yalnız burada görünüyor.
+      if (res.unclassified > 0)
+        ev("classify_overflow", {
+          unclassified: res.unclassified,
+          note: "gösterilen adaya hüküm dönmedi — temiz sayılmadı",
+        });
       if (!res.ok) {
-        ev("classify_failed", { error: res.error, calls: res.calls });
+        ev("classify_failed", {
+          error: res.error, calls: res.calls,
+          unmeasuredFindings: [...unmeasuredFindings],
+        });
       } else {
         sum.classified = true;
         sum.contradictions = res.confirmed.length;
@@ -301,6 +369,25 @@ export async function auditProject(
         // sinyaline özgüdür, içsel sinyale değil (mimar kararı, düzeltme turu).
         const s = scores.get(f.id);
         if (s === undefined) continue;
+        // "Ölçemedim" ile "temiz" aynı şey değil — ürünün en temel ayrımı.
+        // Denetim (2026-08-12, `classify-failure-clears-suspect`) ölçtü: ilk
+        // denetim çelişkiyi onaylayıp suspect/0,7 yazıyor, ikinci denetimde
+        // yürütücü çökünce not `active`/0'a DÖNÜYORDU. Yeni skor yalnız çapa
+        // boyutundan geliyor; çelişki boyutu ölçülemediği için o boyutun
+        // ürettiği şüphe DÜŞÜRÜLEMEZ. Çapa katkısı yine de yükseltebilir,
+        // o yüzden max.
+        if (unmeasuredFindings.has(f.id) && f.status === "suspect" && s.score < SUSPICION_THRESHOLD) {
+          const held = Math.max(s.score, f.suspicion);
+          setSuspicion(store, f.id, held);
+          ev("signal_scored", {
+            findingId: f.id, score: held, states: s.states, heldUnmeasured: true,
+            reasons: [...s.reasons,
+              `çelişki boyutu ÖLÇÜLEMEDİ — önceki hüküm korundu (çapa skoru: ${s.score})`],
+          });
+          sum.suspects++;
+          sum.heldUnmeasured++;
+          continue;
+        }
         setSuspicion(store, f.id, s.score);
         ev("signal_scored", { findingId: f.id, score: s.score, reasons: s.reasons, states: s.states });
         if (s.score >= SUSPICION_THRESHOLD && (f.status === "active" || f.status === "unanchored")) {
@@ -322,6 +409,8 @@ export async function auditProject(
       checked: sum.checked, suspects: sum.suspects, cleared: sum.cleared,
       candidates: sum.candidates, contradictions: sum.contradictions,
       classifyCalls: sum.classifyCalls, measurementFailures: sum.measurementFailures,
+      classifyUnclassified: sum.classifyUnclassified, heldUnmeasured: sum.heldUnmeasured,
+      budgetExhaustedAnchors: sum.budgetExhaustedAnchors,
       fetchFailed: sum.fetchFailed,
       importErrors: sum.import?.errors ?? 0, importRejected: sum.import?.rejected ?? 0,
     });

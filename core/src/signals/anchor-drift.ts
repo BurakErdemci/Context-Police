@@ -40,7 +40,46 @@ export interface AnchorVerdict {
    * yapıldı" diyebilsin — aksi hâlde çözümleme sessiz bir varsayım olurdu.
    */
   resolvedPath?: string;
+  /**
+   * Koşumun git alt süreç bütçesi dolduğu için bu çapa HİÇ ölçülmedi.
+   * `measurementFailed`ten AYRI tutuluyor: orada bir komut koşup arızalandı
+   * (kullanıcının düzeltebileceği bir bozukluk), burada komut hiç koşmadı
+   * (aracın kendi maliyet sınırı). İkisini aynı sayaçta toplamak, maliyet
+   * sınırını bir arıza gibi gösterirdi — aynı ayrımın gerekçesi `observer_budget_halt`
+   * olayında da yazılı. Skor açısından ikisi de nötr: state `unverifiable`.
+   */
+  budgetExhausted?: true;
 }
+
+/**
+ * Koşum çapında git alt süreç bütçesi.
+ *
+ * Neden var (denetim 2026-08-12, `git-process-fanout`, İKİ denetimde tekrar eden
+ * sınıf): çapa başına en kötü hâl 9 git süreci (sonek çözümlemesi, çözülen yolu
+ * iki ref'e karşı BAŞTAN ölçüyor), not başına 16 çapa sınırı var ama koşum
+ * çapında hiçbir tavan yoktu. Uçtan uca ölçüldü: tek notlu bir denetim 147 git
+ * süreci doğurdu, hepsi sıralı. Tek sınır süreç başına 15 sn zaman aşımıydı,
+ * yani 500 notluk bir depoda üst sınır saatlerle ifade ediliyordu.
+ *
+ * Sayı ÖLÇÜMDEN türedi (2026-08-12, gerçek 28 notluk altın-set silosu
+ * `~/.context-police/golden/2026-08-11-gamachine`, 260 çapa, iki ref'li koşum):
+ * **548 git süreci / 8,4 sn** → çapa başına **2,11**. Bütçe çapa başına 3
+ * veriyor (~%42 pay) artı sabit bir taban; yani gerçek bir koşum bütçeyi
+ * görmüyor bile. Tavan en kötü hâlden (9) türetilmedi bilerek: amaç patolojik
+ * bir notun koşumun tamamını yutmasını engellemek, ve 9'dan türetilen bir tavan
+ * tam da o durumu serbest bırakırdı.
+ *
+ * Taban 20: `openGit`in üç çağrısı bütçeye girmiyor (bütçe ondan sonra kuruluyor)
+ * ve çok küçük depolarda yuvarlama payı gerekiyor.
+ */
+export const GIT_BUDGET_BASE = 20;
+export const GIT_BUDGET_PER_ANCHOR = 3;
+
+/** Sayaç + tavan. `used` yalnız GERÇEKTEN koşulan git çağrısıyla artar. */
+export interface GitBudget { limit: number; used: number }
+
+export const createGitBudget = (anchorCount: number, perAnchor = GIT_BUDGET_PER_ANCHOR): GitBudget =>
+  ({ limit: GIT_BUDGET_BASE + anchorCount * perAnchor, used: 0 });
 
 export interface DriftScore { score: number; reasons: string[] }
 
@@ -84,25 +123,39 @@ const failureOf = (m: Measured<unknown>): MeasurementFailure | undefined =>
 
 interface FileState { state: AnchorState; commits?: number; failure?: MeasurementFailure }
 
+/**
+ * Bütçeden bir git çağrısı düşer ve çağrıyı koşar. Kapı ÇAPA sınırındadır
+ * (checkAnchors), burada değil: başlanmış bir çapayı yarıda kesmek "iki ref'ten
+ * yalnız biri ölçüldü" gibi yarım bir hüküm üretirdi — yani bütçe, tam da
+ * engellemeye çalıştığı şeyi (ölçüme dayanmayan karar) üretirdi. Bedeli, çapa
+ * başına en kötü 9 çağrılık aşım; tavanın payı bunu kapsıyor.
+ */
+function spend<T>(budget: GitBudget | null, run: () => Promise<Measured<T>>): Promise<Measured<T>> {
+  if (budget !== null) budget.used++;
+  return run();
+}
+
 // Çapa yolları ZATEN repo köküne göreli. Burada hiçbir yol birleştirmesi
 // yapılmaz, `path` git'e olduğu gibi geçer: `ctx.repoRoot` çağıranın verdiği
 // dizinle aynı olmayabilir (macOS /var → /private/var) ve kendi birleştirmemiz
 // o farkı sessizce yanlış yola çevirirdi.
-async function fileStateAt(ctx: GitContext, ref: string, path: string, sinceIso: string): Promise<FileState> {
-  const exists = await fileExistsAt(ctx, ref, path);
+async function fileStateAt(
+  ctx: GitContext, ref: string, path: string, sinceIso: string, budget: GitBudget | null,
+): Promise<FileState> {
+  const exists = await spend(budget, () => fileExistsAt(ctx, ref, path));
   // Varlık ölçülemedi → hiçbir şey bilmiyoruz. Eskiden burası `missing_now`'a
   // düşüyordu (ağırlık 0.5) ve DURUM kalıplı notu tek başına suçlu yapıyordu.
   if (!exists.ok) return { state: "unverifiable", failure: failureOf(exists) };
 
   if (exists.value) {
-    const churn = await commitsTouching(ctx, ref, path, sinceIso);
+    const churn = await spend(budget, () => commitsTouching(ctx, ref, path, sinceIso));
     // Ters yön: dosya DURUYOR, yalnız churn ölçülemedi. 0 saymak kaçırılan
     // çürüme demek — skoru şişirmiyoruz ama arızayı görünür bırakıyoruz.
     if (!churn.ok) return { state: "ok", failure: failureOf(churn) };
     return { state: churn.value >= 3 ? "churned" : "ok", commits: churn.value };
   }
 
-  const ever = await fileEverExisted(ctx, path);
+  const ever = await spend(budget, () => fileEverExisted(ctx, path));
   // "Hiç var olmuş mu" ölçülemedi: missing_now (0.5) ile never_existed (0.3)
   // arasında seçim yapamayız, ikisi de suçlama. Bilgisizliği suçlamaya çevirmek
   // yerine nötr kalınır.
@@ -110,12 +163,22 @@ async function fileStateAt(ctx: GitContext, ref: string, path: string, sinceIso:
   return { state: ever.value ? "missing_now" : "never_existed", commits: 0 };
 }
 
-export async function checkAnchors(ctx: GitContext, anchors: Anchor[], sinceIso: string): Promise<AnchorVerdict[]> {
+export async function checkAnchors(
+  ctx: GitContext, anchors: Anchor[], sinceIso: string, budget: GitBudget | null = null,
+): Promise<AnchorVerdict[]> {
   const out: AnchorVerdict[] = [];
   for (const anchor of anchors) {
     if (anchor.kind === "external_path") { out.push({ anchor, state: "unverifiable" }); continue; } // D-M3-7
+    // Bütçe kapısı: dolduysa ölçüm YAPILMAZ. Ölçmemek asla suçlamaya dönmez
+    // (dosya başındaki temel sözleşme) → unverifiable, ağırlık 0. Kapı
+    // `external_path`ten SONRA: o dal zaten git çağırmıyor, bütçeye takılması
+    // yalnız sayıyı bulandırırdı.
+    if (budget !== null && budget.used >= budget.limit) {
+      out.push({ anchor, state: "unverifiable", budgetExhausted: true });
+      continue;
+    }
     if (anchor.kind === "commit_sha") {
-      const r = await commitExists(ctx, anchor.value);
+      const r = await spend(budget, () => commitExists(ctx, anchor.value));
       // "sha yok" da "ölçemedim" de unverifiable; ama ikisi ayrı sebep, ve
       // yalnız ikincisi olay yazdırır. Skor açısından fark yok (ağırlık 0).
       out.push({ anchor, state: r.ok && r.value ? "ok" : "unverifiable", ...(r.ok ? {} : { measurementFailed: failureOf(r)! }) });
@@ -125,29 +188,29 @@ export async function checkAnchors(ctx: GitContext, anchors: Anchor[], sinceIso:
       // Dikkat: `symbolExists` ALT-DİZE eşleşmesidir (git grep -F). Buradaki "ok"
       // "sembol kesin duruyor" değil "adı bir yerde hâlâ geçiyor" demektir —
       // yorumda kaldığı yer, skorda suçlama üretmediği için zararsız.
-      const here = await symbolExists(ctx, null, anchor.value);
+      const here = await spend(budget, () => symbolExists(ctx, null, anchor.value));
       if (!here.ok) { out.push({ anchor, state: "unverifiable", measurementFailed: failureOf(here)! }); continue; }
       if (here.value) { out.push({ anchor, state: "ok" }); continue; }
-      const ever = await symbolEverExisted(ctx, anchor.value);
+      const ever = await spend(budget, () => symbolEverExisted(ctx, anchor.value));
       if (!ever.ok) { out.push({ anchor, state: "unverifiable", measurementFailed: failureOf(ever)! }); continue; }
       out.push({ anchor, state: ever.value ? "symbol_lost" : "unverifiable" });
       continue;
     }
     // file_path: iki ref birden (M0-D7), skor kötüsünden (D-M3-5).
-    let v = await filePathVerdict(ctx, anchor, anchor.value, sinceIso);
+    let v = await filePathVerdict(ctx, anchor, anchor.value, sinceIso, budget);
 
     // Sonek çözümlemesi (altın set §5.2): `never_existed` demeden ÖNCE, nottaki
     // kısa yol repoda gerçekten var mı diye bakılır. Yalnız bu dalda ödenir —
     // duran, silinmiş ya da ölçülemeyen çapa ek git çağrısı görmez.
     if (v.state === "never_existed") {
-      const matches = await filesMatchingSuffix(ctx, anchor.value);
+      const matches = await spend(budget, () => filesMatchingSuffix(ctx, anchor.value));
       if (!matches.ok) {
         // Ölçüm arızası ASLA suçlamaya dönmez (dosya başındaki temel sözleşme):
         // eşleşmeyi göremediysek "hiç var olmamış" diyemeyiz.
         v = { anchor, state: "unverifiable", measurementFailed: failureOf(matches)! };
       } else if (matches.value.length === 1) {
         const resolved = matches.value[0]!;
-        v = { ...(await filePathVerdict(ctx, anchor, resolved, sinceIso)), resolvedPath: resolved };
+        v = { ...(await filePathVerdict(ctx, anchor, resolved, sinceIso, budget)), resolvedPath: resolved };
       } else if (matches.value.length > 1) {
         // Hangi dosyanın kastedildiği ÖLÇÜLEMİYOR. Rastgele birini seçmek sahte
         // bir kesinlik, hepsini suçlamak uydurma bir kayma olurdu.
@@ -163,10 +226,10 @@ export async function checkAnchors(ctx: GitContext, anchors: Anchor[], sinceIso:
 /** Bir yolun iki ref'e karşı hükmü. Sonek çözümlemesinde çözülmüş yolla TEKRAR
  *  çağrılır — çözülen çapa normal akışın (exists/churn) tamamından geçsin diye. */
 async function filePathVerdict(
-  ctx: GitContext, anchor: Anchor, path: string, sinceIso: string,
+  ctx: GitContext, anchor: Anchor, path: string, sinceIso: string, budget: GitBudget | null,
 ): Promise<AnchorVerdict> {
-  const head = await fileStateAt(ctx, "HEAD", path, sinceIso);
-  const origin = ctx.originRef !== null ? await fileStateAt(ctx, ctx.originRef, path, sinceIso) : null;
+  const head = await fileStateAt(ctx, "HEAD", path, sinceIso, budget);
+  const origin = ctx.originRef !== null ? await fileStateAt(ctx, ctx.originRef, path, sinceIso, budget) : null;
   // Ölçülemeyen taraf hükme KATILMAZ: bir ref'te arıza, diğerinde başarılı
   // ölçüm varsa hüküm ölçülenden çıkar. Aksi hâlde tek bir arıza, çalışan
   // ölçümü de nötrleştirip gerçek çürümeyi kaçırırdı.
@@ -197,6 +260,7 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
   let neverExistedRaw = 0;   // kırpma ÖNCESİ toplam — tavana değip değmediği buradan
   let neverExistedCount = 0;
   let resolvedCount = 0;     // sonekle çözülen çapa sayısı (born_invalid göstergesi)
+  let budgetExhausted = 0;   // bütçe dolduğu için HİÇ ölçülmemiş çapa
 
   for (const v of verdicts) {
     const w = WEIGHT[v.state];
@@ -224,9 +288,20 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
     // (ağırlıksız dal) ve o hâlde HİÇ gerekçe üretmezdi — yani bir varsayım
     // sessizce hükme girerdi. Kullanıcı hangi yolun ölçüldüğünü görmeli.
     if (v.resolvedPath !== undefined) {
-      resolvedCount++;
+      // Sayım yalnız GERÇEKTEN çözülmüş çapaya: çözümleme sonrası hükmü hâlâ
+      // `never_existed` olan çapa "kısaltma kullanılmış" kanıtı DEĞİL — o yol
+      // yeni ölçülen konumda da yok, yani ortada tek bir olgu var.
+      //
+      // Denetim (2026-08-12, `suffix-index-double-count`): `filesMatchingSuffix`
+      // INDEX'e bakıyor (`git ls-files`), hüküm ise AĞAÇLARA (HEAD/origin).
+      // Index'te olup ağaçta olmayan bir dosya (yeni staged) tek olgudan iki
+      // "bağımsız sınıf" üretiyordu: never_existed toplamı 0,5 (tavanda) +
+      // born_invalid 0,2 = 0,7 → tek sinyal sınıfı tek başına mahkûm ediyordu.
+      // Bu, 4fa874d ile yazılan tavanın açık gerekçesinin ihlaliydi.
+      if (v.state !== "never_existed") resolvedCount++;
       reasons.push(`${v.anchor.kind} ${v.anchor.value}: sonek çözümlendi → ${v.resolvedPath} (durum: ${v.state})`);
     }
+    if (v.budgetExhausted === true) budgetExhausted++;
     if (v.measurementFailed !== undefined) {
       reasons.push(
         `${v.anchor.kind} ${v.anchor.value}: ölçülemedi — ${v.measurementFailed.command}` +
@@ -241,6 +316,11 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
   if (neverExistedRaw > NEVER_EXISTED_CAP) {
     reasons.push(`never_existed katkısı ${NEVER_EXISTED_CAP} tavanında kırpıldı (${neverExistedCount} çapa)`);
   }
+
+  // Tek satır, çapa başına değil: bütçe dolduğunda yüzlerce çapa etkilenebilir
+  // ve gerekçe listesi olay günlüğüne yazılıyor (audit.ts signal_scored).
+  if (budgetExhausted > 0)
+    reasons.push(`${budgetExhausted} çapa git bütçesi dolduğu için ÖLÇÜLMEDİ; skora katkı yok`);
 
   if (resolvedCount >= BORN_INVALID_MIN_RESOLVED) {
     score += BORN_INVALID_WEIGHT;

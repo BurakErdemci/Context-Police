@@ -38,7 +38,8 @@ test("aday gerekçesi de kırpılır: uzun bir çapa promptu şişiremez", () =>
 
 test("parseClassifyOutput: düzyazıya sarılı JSON kurtarılır, aralık dışı index atılır", () => {
   const raw = 'Sonuç:\n{"verdicts":[{"index":0,"verdict":"celiski","evidence":"e"},{"index":9,"verdict":"uyumlu","evidence":"e"}]}\nbitti';
-  const r = parseClassifyOutput(raw, 1);
+  // Sınır artık GÖSTERİLEN index kümesi (denetim: eşleme açığı) — tek aday gösterildi.
+  const r = parseClassifyOutput(raw, new Set([0]));
   assert.equal(r.ok, true);
   if (r.ok) { assert.equal(r.verdicts.length, 1); assert.equal(r.verdicts[0]!.verdict, "celiski"); }
 });
