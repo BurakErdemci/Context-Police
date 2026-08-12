@@ -87,13 +87,28 @@ export interface CandidateSelection {
 }
 
 /**
- * Aynı damga sınıfı içinde eşitliği bozan deterministik sıra. Yüzey adı da
- * ölçüte giriyor, çünkü sıra artık yüzey başına değil KÜRESEL kuruluyor.
+ * Aynı damga sınıfı içinde eşitliği bozan deterministik sıra: ÖNCE monoton artan
+ * bulgu id'leri, EN SON yüzey adı.
+ *
+ * Sıra neden bu (G dalgası, 12 Ağu 2026): yüzey adı başta olduğunda eşitliği
+ * bozan ölçüt zamanla ilgisiz bir SÖZLÜK sırasıydı ve "cross" < "frontmatter".
+ * Bütçe aktif yüzey sayısından küçükken kota turu bütçenin tamamını sözlükte
+ * önde gelen yüzeye harcıyordu; ölçüldü (probe small-budget-cross-surface-
+ * starvation, bütçe 1, 20 koşum): her koşumda YENİ doğan bir cross adayı, hiç
+ * seçilmemiş sabit bir frontmatter adayının önüne geçti ve sabit aday 20/20
+ * koşumda atlandı — açlığın ta kendisi, yalnız damga değil sıra üzerinden.
+ *
+ * Bulgu id'leri monoton arttığı için id sırası "eski → yeni" demektir: eski aday
+ * yeni adayın önüne yapısal olarak geçer ve sonradan gelen hiçbir aday bekleyeni
+ * geriye itemez. Yüzey adı yalnız GERÇEK eşitlikte (aynı id çifti, iki farklı
+ * yüzey) ayraç olarak kalıyor — orada tek işi determinizm.
  */
 function byIdentity(a: Candidate, b: Candidate): number {
-  if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
   if (a.aId !== b.aId) return a.aId - b.aId;
-  return (a.bId ?? NO_SECOND_SIDE) - (b.bId ?? NO_SECOND_SIDE);
+  const bDiff = (a.bId ?? NO_SECOND_SIDE) - (b.bId ?? NO_SECOND_SIDE);
+  if (bDiff !== 0) return bDiff;
+  if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
+  return 0;
 }
 
 /**
@@ -144,8 +159,11 @@ function normalizeStamp(raw: number | undefined): number {
  * Hiç seçilmemişler (damga 0) arasında eşitliği kimlik sırası bozuyor; bu da
  * açlık üretmez, çünkü bir adayın önüne yalnız ONDAN KÜÇÜK kimlikli ve HİÇ
  * SEÇİLMEMİŞ adaylar geçebilir, ve her biri bunu en çok bir kez yapar (seçilince
- * damgası büyür). Böyle adayların sayısı sonlu. Pratikte de sıra doğru yönde:
- * bulgu id'leri monoton arttığı için yeni gelen aday zaten daha BÜYÜK kimlikli.
+ * damgası büyür). Böyle adayların sayısı sonlu. Kimlik sırasının bulgu id'siyle
+ * BAŞLAMASI bu ispatın taşıyıcısı (bkz. `byIdentity`): id monoton arttığı için
+ * sonradan gelen aday daima daha büyük kimliklidir, yani bekleyeni geriye
+ * itemez. Yüzey adı sırada önce gelseydi ölçüt zamanla ilgisiz bir sözlük
+ * sırasına düşerdi ve ispat çökerdi — G dalgasında ölçülen açlık tam buydu.
  *
  * ### Zehirli parti
  * Damga SEÇİM anında yazılıyor, hükmün dönüp dönmediğine bakılmadan. Sonuca
@@ -154,11 +172,28 @@ function normalizeStamp(raw: number | undefined): number {
  * damgayı SONUÇTA yazan tasarım için geçerliydi, seçimde yazan için değil).
  *
  * ### Kapsama sınırı
- * Sabit bir aday kümesinde her aday en geç **⌈N_yüzey / kota_yüzey⌉** koşumda
- * seçilir. Bu YÜZEY BAŞINA bir sınır: E dalgasının yazdığı küresel ⌈N/M⌉ iddiası
- * yanlıştı (20/20/20 adayda cross 3 koşumda kapanır, intra ve frontmatter
- * kotaları 6 olduğu için 4'te). Yanlış yazılmış bir iddia, yazılmamış olmasından
- * kötüdür — sınır artık gerçek sınır.
+ * Sabit bir aday kümesinde her aday en geç **⌈N_toplam / max⌉** koşumda seçilir,
+ * ve bu sınır GEVŞEK DEĞİL TAM: son adayın ölçüldüğü koşum tam olarak bu sayı.
+ * İspatı yukarıdaki adalet argümanının doğrudan sonucu — her koşum bütçeyi
+ * kesinlikle en eski damgalılara harcıyor ve hiç boşa harcamıyor (kota turundan
+ * artan bütçe aynı damga sınıfı içinde dağıtılıyor), yani her koşum kalan
+ * ölçülmemiş kümeyi `max` kadar küçültüyor.
+ *
+ * Yüzey kotası bu sınıra GİRMEZ; kota bir koşum İÇİNDEKİ payı belirler, kaç
+ * koşum gerektiğini değil.
+ *
+ * İki kuşak boyunca buraya yanlış sınır yazıldı, ikisi de düzeltildi:
+ *  - E dalgası küresel ⌈N/M⌉ yazdı, F dalgası bunu "yanlış" ilan edip yüzey
+ *    başına **⌈N_yüzey / kota_yüzey⌉** ile değiştirdi.
+ *  - Ölçüldü (G dalgası, 12 Ağu 2026, 30 yapılandırma — bütçe 1/2/3/5/20 ×
+ *    çeşitli yüzey dağılımları): gerçek kapsama HER yapılandırmada ⌈N/max⌉'e
+ *    eşit çıktı. Yüzey ifadesi ise iki yönde birden hatalı: bütçe < aktif yüzey
+ *    sayısı iken FAZLA KÜÇÜK (max=1, 20/20/20 adayda "20" diyor, gerçek 60 —
+ *    yani ihlal edilebilir bir güvence), tek yüzeyli kümede ise gereksiz büyük
+ *    (max=20, 21 cross'ta "3" diyor, gerçek 2).
+ *
+ * Ders: doğru sınır kotanın değil BÜTÇENİN fonksiyonu. Bu projede yanlış
+ * yazılmış bir iddia yazılmamış olmasından kötüdür — sınır artık ölçülmüş sınır.
  */
 export function selectCandidates(
   candidates: Candidate[],

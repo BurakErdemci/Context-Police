@@ -34,19 +34,32 @@ const quotaOf = (k: Candidate["kind"], max = MAX_CLASSIFY_ITEMS) =>
   Math.max(1, Math.floor((max * CLASSIFY_SURFACE_QUOTA[k]) / MAX_CLASSIFY_ITEMS));
 
 /**
- * GERÇEK kapsama sınırı: YÜZEY BAŞINA ⌈N_yüzey / kota_yüzey⌉.
+ * GERÇEK kapsama sınırı: ⌈N_toplam / max⌉ — kotanın değil BÜTÇENİN fonksiyonu.
  *
- * E dalgası buraya küresel ⌈N/M⌉ yazmıştı ve test etmişti — yüzey kotası varken
- * o sınır YANLIŞ (doğrulama turu 3'ün low bulgusu): 20/20/20 adayda cross 3
- * koşumda kapanıyor ama kotası 6 olan intra ve frontmatter 4'te. Bu projede
- * yanlış yazılmış bir iddia, yazılmamış olmasından kötüdür.
+ * Buraya iki kuşak boyunca yanlış sınır yazıldı. E dalgası küresel ⌈N/M⌉ yazdı;
+ * F dalgası bunu "yanlış" ilan edip yüzey başına ⌈N_yüzey / kota_yüzey⌉ ile
+ * değiştirdi. G dalgasında ölçüldü (30 yapılandırma, bütçe 1/2/3/5/20): gerçek
+ * kapsama HER yapılandırmada ⌈N/max⌉ çıktı ve bu sınır GEVŞEK değil TAM. Yüzey
+ * ifadesi iki yönde birden hatalıydı — aşağıdaki iki test onu çürütüyor.
+ *
+ * Sınır kotayı anmıyor çünkü kota bir koşum İÇİNDEKİ payı böler, kaç koşum
+ * gerektiğini değil. Kotanın kendi güvencesi ayrıca ölçülüyor (per-run taban).
  */
 function coverageBound(candidates: Candidate[], max = MAX_CLASSIFY_ITEMS): number {
-  const counts = new Map<Candidate["kind"], number>();
-  for (const c of candidates) counts.set(c.kind, (counts.get(c.kind) ?? 0) + 1);
-  let bound = 0;
-  for (const [kind, n] of counts) bound = Math.max(bound, Math.ceil(n / quotaOf(kind, max)));
-  return bound;
+  return Math.ceil(candidates.length / max);
+}
+
+/** Her adayın ölçülmesi GERÇEKTE kaç koşum sürdü — sınırın TAM olduğu iddiası. */
+function runsToCover(candidates: Candidate[], max: number, cap = 200): number {
+  const seen = new Set<string>();
+  let stamps: CandidateStamps = {};
+  for (let run = 1; run <= cap; run++) {
+    const { taken, next } = selectCandidates(candidates, max, stamps);
+    stamps = next;
+    for (const c of taken) seen.add(candidateIdentity(c));
+    if (seen.size === candidates.length) return run;
+  }
+  return Infinity;
 }
 
 /**
@@ -87,8 +100,9 @@ function k7(): Candidate[] {
 
 test("K7 (21 aday, tavan 20): aç kalan çift sınır içinde ölçülüyor", () => {
   const candidates = k7();
-  const bound = coverageBound(candidates); // cross tek yüzey, kota 8 → ⌈21/8⌉ = 3
-  assert.equal(bound, 3);
+  const bound = coverageBound(candidates); // ⌈21/20⌉ = 2
+  assert.equal(bound, 2);
+  assert.equal(runsToCover(candidates, 20), bound, "sınır TAM değil");
   const { firstSeen } = rotate(candidates, 20, bound);
   assert.deepEqual(missing(candidates, firstSeen), [], "sınırda kapsanmayan aday var");
   // D dalgasının probe'u 8 koşum sürüyordu ve 6-7 çifti sekizinde de atlanmıştı.
@@ -96,23 +110,54 @@ test("K7 (21 aday, tavan 20): aç kalan çift sınır içinde ölçülüyor", ()
   assert.ok(Math.max(...uzun.firstSeen.values()) <= bound, "bir aday sınırdan geç ölçüldü");
 });
 
-test("gerçek sınır YÜZEY BAŞINA: 20/20/20 aday küresel ⌈N/M⌉'de kapanmıyor, yüzey sınırında kapanıyor", () => {
-  // Doğrulama turu 3'ün low bulgusunun testi. Küresel iddia ⌈60/20⌉ = 3 diyordu.
-  const candidates = [
-    ...Array.from({ length: 20 }, (_, i) => cand(i + 1, i + 101, "cross")),
-    ...Array.from({ length: 20 }, (_, i) => cand(i + 301, null, "intra")),
-    ...Array.from({ length: 20 }, (_, i) => cand(i + 601, null, "frontmatter")),
-  ];
-  assert.equal(coverageBound(candidates), 4, "yüzey sınırı ⌈20/6⌉ = 4 olmalıydı");
-  const { firstSeen } = rotate(candidates, 20, 4);
-  assert.deepEqual(missing(candidates, firstSeen), [], "yüzey sınırında aç kalan aday var");
+/** 20/20/20 — üç yüzey eşit dolu, sınır iddialarının ayrıştığı yer. */
+const mixed6060 = (): Candidate[] => [
+  ...Array.from({ length: 20 }, (_, i) => cand(i + 1, i + 101, "cross")),
+  ...Array.from({ length: 20 }, (_, i) => cand(i + 301, null, "intra")),
+  ...Array.from({ length: 20 }, (_, i) => cand(i + 601, null, "frontmatter")),
+];
 
-  // Ve bütçe hiçbir koşumda BOŞA gitmiyor: kimlik sırası küresel olduğu için,
-  // bir yüzeyin ölçülmemiş adayı bitince kalan slotlar hâlâ hiç ölçülmemiş
-  // başka bir yüzeye gidiyor — bu yüzden 60 adayın 60'ı tam 3 koşumda kapanır.
-  const uc = rotate(candidates, 20, 3);
-  assert.deepEqual(missing(candidates, uc.firstSeen), [],
+test("sınır BÜTÇENİN fonksiyonu: 20/20/20 aday tam ⌈60/20⌉ = 3 koşumda kapanıyor", () => {
+  const candidates = mixed6060();
+  assert.equal(coverageBound(candidates), 3);
+  // Bütçe hiçbir koşumda BOŞA gitmiyor: kimlik sırası küresel olduğu için, bir
+  // yüzeyin ölçülmemiş adayı bitince kalan slotlar hâlâ hiç ölçülmemiş başka bir
+  // yüzeye gidiyor. F dalgası buraya yüzey başına "4" yazmıştı — kendi testi de
+  // 3'te kapandığını gösteriyordu, yani sınır gevşekti.
+  assert.equal(runsToCover(candidates, 20), 3, "sınır TAM değil");
+  const { firstSeen } = rotate(candidates, 20, 3);
+  assert.deepEqual(missing(candidates, firstSeen), [],
     "bütçe, ölçülmemiş aday beklerken yeniden ölçüme harcandı");
+});
+
+test("çürütme: yüzey başına ⌈N_yüzey/kota⌉ iddiası bütçe < yüzey sayısı iken İHLAL ediliyor", () => {
+  // G dalgasının doğrudan sorusu. Bütçe 1 iken her yüzeyin kotası max(1, …) = 1'e
+  // düşüyor, yani kotaların TOPLAMI (3) bütçeyi (1) aşıyor ve yüzey kotası artık
+  // koşum başına bir güvence VERMİYOR. Yüzey ifadesi "20" derdi; gerçek 60.
+  const candidates = mixed6060();
+  const perSurface = Math.max(...(["cross", "intra", "frontmatter"] as const)
+    .map((k) => Math.ceil(20 / quotaOf(k, 1))));
+  assert.equal(perSurface, 20, "çürütülen ifade değişmiş, test bayat");
+  assert.equal(runsToCover(candidates, 1), 60, "bütçe 1'de kapanma ⌈N/max⌉ değil");
+  assert.equal(coverageBound(candidates, 1), 60, "gerçek sınır ⌈60/1⌉ olmalıydı");
+  assert.ok(perSurface < 60, "yüzey ifadesi burada FAZLA KÜÇÜK: ihlal edilebilir bir güvence");
+});
+
+test("kota, koşum içi bir taban — ama yalnız kotaların toplamı bütçeye sığarken", () => {
+  // Kotanın gerçek sözleşmesi bu: koşum İÇİNDEKİ payı böler, kaç koşum
+  // gerektiğini değil. Sözleşme ancak Σkota ≤ bütçe iken uygulanabilir.
+  const candidates = mixed6060();
+  const kinds = ["cross", "intra", "frontmatter"] as const;
+  for (const max of [20, 15]) {
+    const sumQuota = kinds.reduce((s, k) => s + quotaOf(k, max), 0);
+    assert.ok(sumQuota <= max, `ön koşul tutmuyor (max=${max}, Σkota=${sumQuota})`);
+    const { taken } = selectCandidates(candidates, max, {});
+    for (const k of kinds)
+      assert.ok(taken.filter((c) => c.kind === k).length >= quotaOf(k, max), `${k} payını alamadı`);
+  }
+  // Ve ön koşul tutmadığında kota bir taban DEĞİL: bütçe tek yüzeye gider.
+  assert.equal(kinds.reduce((s, k) => s + quotaOf(k, 1), 0), 3, "Σkota bütçeyi aşmıyor sanıldı");
+  assert.equal(selectCandidates(candidates, 1, {}).taken.length, 1);
 });
 
 test("varyant (yıldız grafiği): merkez not her çiftte, uçlar aç kalmıyor", () => {
@@ -127,7 +172,7 @@ test("varyant (yüzeyler karışık): kota rotasyonu EZMİYOR, ikisi birden geç
     ...Array.from({ length: 20 }, (_, i) => cand(300 + i, null, "intra")),
     ...Array.from({ length: 20 }, (_, i) => cand(400 + i, null, "frontmatter")),
   ];
-  const bound = coverageBound(candidates); // max(⌈30/8⌉, ⌈20/6⌉) = 4
+  const bound = coverageBound(candidates); // ⌈70/20⌉ = 4
   assert.equal(bound, 4);
   const { firstSeen, perRun } = rotate(candidates, 20, bound);
   assert.deepEqual(missing(candidates, firstSeen), [], "karışık yüzeyde aç kalan aday var");
@@ -235,6 +280,65 @@ test("churn: hiç seçilmemiş aday, sonradan gelen adaylar tarafından geriye i
   const feed = () => [waiting, ...Array.from({ length: 10 }, () => { nextId += 2; return cand(nextId, nextId + 1); })];
   const { firstSeen } = rotate(feed, 1, 3);
   assert.equal(firstSeen.get(candidateIdentity(waiting)), 1, "bekleyen aday ilk koşumda seçilmeliydi");
+});
+
+// --- 2b. G dalgası: küçük bütçede YÜZEY sırası kaynaklı açlık --------------
+
+test("küçük bütçe + churn: sabit frontmatter adayı, her koşum yeni doğan cross'a yenilmiyor", () => {
+  // probes/small-budget-cross-surface-starvation.sh terfisi (rc=1 → rc=0).
+  // Eski sırada eşitliği önce YÜZEY ADI bozuyordu ve "cross" < "frontmatter":
+  // bütçe 1 iken kota turu bütçenin tamamını sözlükte önde gelen yüzeye
+  // harcıyor, sabit aday 20/20 koşumda atlanıyordu. Sıra artık id ile başlıyor.
+  const waiting = cand(1, null, "frontmatter");
+  const feed = (run: number) => [waiting, cand(1000 + run * 2, 1001 + run * 2, "cross")];
+  const { firstSeen } = rotate(feed, 1, 20);
+  assert.equal(firstSeen.get(candidateIdentity(waiting)), 1,
+    "sabit aday, sonradan doğan cross adayına yenildi");
+});
+
+test("kapanış (i): bütçe 2 (yüzey sayısından hâlâ küçük) — bekleyenler yine öne geçiyor", () => {
+  // Aynı sınıfın başka biçimi: bütçe > 1 ama aktif yüzey sayısından küçük, yani
+  // kotaların toplamı bütçeyi hâlâ aşıyor. Sıra id ile başladığı için ölçüt
+  // yüzeyden bağımsız: iki eski aday, üç taze adayın önünde.
+  const eskiler = [cand(1, null, "frontmatter"), cand(2, null, "intra")];
+  const feed = (run: number) => [
+    ...eskiler,
+    cand(500 + run * 3, 501 + run * 3, "cross"),
+    cand(700 + run, null, "intra"),
+    cand(900 + run, null, "frontmatter"),
+  ];
+  const { firstSeen } = rotate(feed, 2, 10);
+  assert.deepEqual(missing(eskiler, firstSeen), [], "küçük bütçede eski aday aç kaldı");
+  for (const c of eskiler)
+    assert.equal(firstSeen.get(candidateIdentity(c)), 1, "eski adaylar ilk koşumda alınmalıydı");
+});
+
+test("kapanış (ii): tüm adaylar AYNI yüzeyde, bütçe 1 — sıra hâlâ eski → yeni", () => {
+  // Yüzey ayracı devreden çıktığında da sıra doğru: tek ayırt edici ölçüt id.
+  const waiting = cand(1, 2, "cross");
+  // Taze aday listede ÖNDE: üretim sırası hiçbir garanti taşımıyor.
+  const feed = (run: number) => [cand(5000 + run * 2, 5001 + run * 2, "cross"), waiting];
+  const { firstSeen } = rotate(feed, 1, 5);
+  assert.equal(firstSeen.get(candidateIdentity(waiting)), 1, "tek yüzeyde bile bekleyen atlandı");
+
+  // Ve sabit bir tek-yüzey kümesinde sıra kesinlikle artan id: 5 aday, bütçe 1.
+  const sabit = [cand(9, 10), cand(3, 4), cand(7, 8), cand(1, 2), cand(5, 6)];
+  const { perRun } = rotate(sabit, 1, 5);
+  assert.deepEqual(perRun.map((t) => t[0]!.aId), [1, 3, 5, 7, 9], "eşitlik id sırasında bozulmadı");
+});
+
+test("kapanış (iii): aynı id çiftinin iki yüzeyi (GERÇEK eşitlik) deterministik", () => {
+  // Burada id'ler ayırt etmiyor; ayraç olarak geriye yalnız yüzey adı kalıyor.
+  // İddia doğruluk değil DETERMİNİZM: girdi sırası ne olursa olsun aynı seçim.
+  const ic = cand(9, null, "intra"), fm = cand(9, null, "frontmatter");
+  const ileri = selectCandidates([ic, fm], 1, {}).taken;
+  const geri = selectCandidates([fm, ic], 1, {}).taken;
+  assert.deepEqual(ileri.map((c) => c.kind), geri.map((c) => c.kind),
+    "gerçek eşitlikte seçim girdi sırasına bağlı — deterministik değil");
+  assert.deepEqual(ileri.map((c) => c.kind), ["frontmatter"], "ayraç sözlük sırası olmalıydı");
+  // Ve ikisi ayrı kimlik olduğu için ikinci koşumda diğeri geliyor: açlık yok.
+  const { firstSeen } = rotate([ic, fm], 1, 2);
+  assert.deepEqual(missing([ic, fm], firstSeen), [], "gerçek eşitlikte bir taraf aç kaldı");
 });
 
 // --- 3. sınıf kapanışı: aynı kusurun başka biçimleri -----------------------
