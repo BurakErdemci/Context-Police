@@ -39,6 +39,17 @@ export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): 
 
 export const MAX_ANCHORS_PER_NOTE = 16;
 
+/**
+ * Tavanın tür başına ilk turda ayırdığı pay. Ölçüm (altın set §5.1): tavan
+ * TÜRLER ARASI TAM SIRALI uygulandığı için 260 çapanın %81'i sembol oldu ve
+ * 28 notun 18'inde SIFIR file_path kaldı — `missing_now` ve `churned` sinyalleri
+ * (yalnız file_path yüzeyinde çalışırlar) altın sette hiç ateşlenmedi. Bir notta
+ * (`bekleyen-isler`) atılan 138 çapanın içinde, penceresinde GERÇEKTEN değişmiş
+ * bir yol vardı. 6 seçildi çünkü 16/4 türden biraz fazlası: az türlü notta tavanı
+ * kısıtlamıyor (artık dolduruluyor), çok türlü notta tek türün seli %38'de kalıyor.
+ */
+export const PER_KIND_QUOTA = 6;
+
 /** Tavan kırpmasının sırası (M0-D4); satır no çapası hiç üretilmediği için listede yok. */
 const ANCHOR_PRIORITY: readonly Anchor["kind"][] = ["symbol", "file_path", "commit_sha", "external_path"];
 
@@ -93,10 +104,27 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
     push("symbol", v);
   }
 
-  // Tavana kimin gireceği M0-D4 önceliğiyle belirlenir: sembol çapası kayma
-  // tespitinde en güçlü sinyal, yol seli onu kurban etmemeli. Tür içinde metindeki
-  // geçiş sırası korunur (kararlı çıktı). Tavan: sessiz kırpma yok — çağıran
-  // dropped'ı olaya yazar (Görev 4).
-  const ordered = ANCHOR_PRIORITY.flatMap((kind) => all.filter((a) => a.kind === kind));
-  return { anchors: ordered.slice(0, MAX_ANCHORS_PER_NOTE), dropped: Math.max(0, ordered.length - MAX_ANCHORS_PER_NOTE) };
+  // Tavan iki turlu: önce her tür kotası kadar pay alır (bir türün seli diğerini
+  // boğamasın), sonra kalan boşluk M0-D4 önceliğiyle artıklardan doldurulur (az
+  // türlü notta tavan kısıtlanmasın). Tür içinde metindeki geçiş sırası korunur
+  // (kararlı çıktı), çıktı sırası tür önceliğine göre. Sessiz kırpma yok —
+  // çağıran dropped'ı olaya yazar (Görev 4).
+  const byKind = new Map<Anchor["kind"], Anchor[]>(ANCHOR_PRIORITY.map((k) => [k, all.filter((a) => a.kind === k)]));
+  const kept = new Map<Anchor["kind"], Anchor[]>(ANCHOR_PRIORITY.map((k) => [k, []]));
+  let budget = MAX_ANCHORS_PER_NOTE;
+  for (const kind of ANCHOR_PRIORITY) {
+    if (budget === 0) break;
+    const take = Math.min(PER_KIND_QUOTA, byKind.get(kind)!.length, budget);
+    kept.get(kind)!.push(...byKind.get(kind)!.slice(0, take));
+    budget -= take;
+  }
+  for (const kind of ANCHOR_PRIORITY) {
+    if (budget === 0) break;
+    const rest = byKind.get(kind)!.slice(kept.get(kind)!.length);
+    const take = Math.min(rest.length, budget);
+    kept.get(kind)!.push(...rest.slice(0, take));
+    budget -= take;
+  }
+  const anchors = ANCHOR_PRIORITY.flatMap((kind) => kept.get(kind)!);
+  return { anchors, dropped: all.length - anchors.length };
 }
