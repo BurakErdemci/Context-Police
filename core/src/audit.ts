@@ -106,9 +106,10 @@ export interface AuditSummary {
    */
   classifyUnclassified: number;
   /**
-   * Çelişki boyutu ÖLÇÜLEMEDİĞİ için önceki `suspect` hükmü korunan not sayısı.
+   * Bir BOYUTU ölçülemediği için önceki `suspect` hükmü korunan not sayısı.
    * "Bu not hâlâ suspect çünkü çelişki var" ile "…çünkü ölçüm yapılamadı"
-   * ayrımının özetteki karşılığı.
+   * ayrımının özetteki karşılığı. İki boyut da sayılır: çelişki (sınıflama
+   * arızası/kırpması) ve çapa (git bütçesi tükendi ya da git söyleyemedi).
    */
   heldUnmeasured: number;
   /** Git bütçesi dolduğu için HİÇ ölçülmemiş çapa sayısı (arıza değil, maliyet sınırı). */
@@ -223,6 +224,24 @@ export async function auditProject(
     // Çapalar TEK seferde okunuyor: bütçe koşumun tamamı için kurulacağı için
     // toplam çapa sayısı döngüden ÖNCE bilinmeli, ve aşağıdaki `views` zaten
     // aynı okumayı ikinci kez yapıyordu.
+    /**
+     * ÇAPA boyutu bu notlar için eksik ölçüldü: bütçe tükendiği için hiç
+     * koşmayan ya da koşup arızalanan bir git çağrısı var.
+     *
+     * Neden küme (denetim: doğrulama turu, `budget-exhaustion-acquits-existing-suspect`):
+     * bütçe kapısı ölçülmeyen çapayı `unverifiable`/sıfır ağırlığa çeviriyor,
+     * yani düşük bir skor üretiyor — ve o düşük skor, sınıflama tarafında zaten
+     * kurulmuş olan "ölçemedim ≠ temiz" korumasının OLMADIĞI bu yolda var olan
+     * bir `suspect` hükmünü temizleyebiliyordu. Ölçüldü: çapa SIRASI hangi
+     * kanıtın kaybolacağını belirliyordu — 15 var olmamış yolun ardındaki
+     * silinmiş `victim.ts` bütçeye takılınca 0,9'luk suspect aklanıyor, geniş
+     * bütçeyle aynı koşum suspect tutuyordu.
+     *
+     * Koruma NOT BAZINDA: bütçe tükendi diye koşumun tamamı dondurulmaz —
+     * çapaları tam ölçülmüş notlar normal temizleme geçişini görür (aynı gerekçe
+     * `unmeasuredFindings`te yazılı: aşırı-koruma da bir yanlış karardır).
+     */
+    const unmeasuredAnchorFindings = new Set<number>();
     const anchorsById = new Map(all.map((f) => [f.id, getAnchors(store, f.id)]));
     const anchorCount = [...anchorsById.values()].reduce((n, a) => n + a.length, 0);
     const budget: GitBudget = opts.maxGitCalls !== undefined
@@ -242,8 +261,13 @@ export async function auditProject(
       // değil, ve arızanın kendisi (bozuk klon, erişilemez promisor) düzeltilebilir
       // bir durum. Bilgi şu ana kadar yalnız dönüş değerinde taşınıyordu.
       for (const v of verdicts) {
-        if (v.budgetExhausted === true) sum.budgetExhaustedAnchors++;
+        // Bütçe tükenmesi (komut hiç koşmadı) ile ölçüm arızası (komut koştu,
+        // cevap vermedi) maliyet/arıza ayrımı gereği ayrı sayaçlarda durur; ama
+        // ikisi de AYNI şeyi söylüyor: bu çapa hakkında bilgimiz yok. Hüküm
+        // korumasında bu yüzden birlikte ele alınıyorlar.
+        if (v.budgetExhausted === true) { sum.budgetExhaustedAnchors++; unmeasuredAnchorFindings.add(f.id); }
         if (v.measurementFailed === undefined) continue;
+        unmeasuredAnchorFindings.add(f.id);
         sum.measurementFailures++;
         if (measurementEvents >= MAX_MEASUREMENT_EVENTS_PER_AUDIT) continue;
         measurementEvents++;
@@ -376,13 +400,22 @@ export async function auditProject(
         // boyutundan geliyor; çelişki boyutu ölçülemediği için o boyutun
         // ürettiği şüphe DÜŞÜRÜLEMEZ. Çapa katkısı yine de yükseltebilir,
         // o yüzden max.
-        if (unmeasuredFindings.has(f.id) && f.status === "suspect" && s.score < SUSPICION_THRESHOLD) {
+        // Aynı koruma İKİ boyut için de geçerli. Çapa boyutu sonradan eklendi
+        // (denetim: `budget-exhaustion-acquits-existing-suspect`): ölçülmeyen
+        // çapa yolu, sınıflama yolunda çoktan kurulmuş olan bu korumanın dışında
+        // kalmıştı ve tek başına aklama üretiyordu.
+        const missing = [
+          ...(unmeasuredFindings.has(f.id) ? ["çelişki"] : []),
+          ...(unmeasuredAnchorFindings.has(f.id) ? ["çapa"] : []),
+        ];
+        if (missing.length > 0 && f.status === "suspect" && s.score < SUSPICION_THRESHOLD) {
           const held = Math.max(s.score, f.suspicion);
           setSuspicion(store, f.id, held);
           ev("signal_scored", {
             findingId: f.id, score: held, states: s.states, heldUnmeasured: true,
+            unmeasuredDimensions: missing,
             reasons: [...s.reasons,
-              `çelişki boyutu ÖLÇÜLEMEDİ — önceki hüküm korundu (çapa skoru: ${s.score})`],
+              `${missing.join(" + ")} boyutu ÖLÇÜLEMEDİ — önceki hüküm korundu (yeni skor: ${s.score})`],
           });
           sum.suspects++;
           sum.heldUnmeasured++;
