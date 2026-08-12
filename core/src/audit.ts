@@ -19,9 +19,10 @@ import {
   type AnchorState, type AnchorVerdict, type GitBudget,
 } from "./signals/anchor-drift.ts";
 import { hasStatusPattern } from "./signals/status-pattern.ts";
-import { findCandidates, type NoteView } from "./signals/contradiction.ts";
+import { findCandidates, type NoteView, type CandidateKind } from "./signals/contradiction.ts";
 import { classifyCandidates, MAX_CLASSIFY_ITEMS } from "./signals/classify.ts";
-import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect, markClassified } from "./store/findings.ts";
+import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect } from "./store/findings.ts";
+import { readClassifyCursors, writeClassifyCursors } from "./store/classify-cursors.ts";
 import { parseNote } from "./importer/parse.ts";
 import { logEvent, type EventKind } from "./store/events.ts";
 
@@ -330,28 +331,28 @@ export async function auditProject(
      */
     const unmeasuredFindings = new Set<number>();
     /**
-     * Çelişki boyutu bu koşumda ÖLÇÜLEN notlar; rotasyon damgası (§classify.ts
-     * `selectCandidates`) yalnız bunlara yazılır. Ölçülmemiş bir adayı damgalamak
-     * onu sıranın sonuna atardı — yani rotasyonun tam tersini yapardı.
+     * Bir sonraki koşumun aday rotasyon imleçleri; null = bu koşumda sınıflama
+     * hiç çalışmadı, imleçlere dokunulmaz.
      */
-    const classifiedFindings = new Set<number>();
+    let nextCursors: Record<CandidateKind, number> | null = null;
 
     if (candidates.length > 0 && opts.executor !== null) {
       const notesById = new Map(views.map((v) => [v.findingId, v]));
-      const lastClassified = new Map(all.map((f) => [f.id, f.lastClassifiedAt]));
       const res = await classifyCandidates(opts.executor, candidates, notesById, {
         maxItems: opts.maxClassifyItems ?? MAX_CLASSIFY_ITEMS,
-        lastClassifiedAt: (id) => lastClassified.get(id) ?? null,
+        cursors: readClassifyCursors(store, project.id),
       });
-      for (const c of res.measured)
-        for (const id of [c.aId, c.bId]) if (id !== null) classifiedFindings.add(id);
+      nextCursors = res.nextCursors;
       sum.classifyCalls = res.calls;
       sum.classifyDropped = res.dropped;
       sum.classifyUnclassified = res.unclassified;
       for (const c of res.unmeasured)
         for (const id of [c.aId, c.bId]) if (id !== null) unmeasuredFindings.add(id);
+      // Rotasyon imleci kırpma olayının İÇİNDE: "20 aday atıldı" tek başına
+      // okunduğunda hep aynı 20'sinin atıldığı sanılabilir — pencerenin
+      // ilerlediği ancak burada görünür. (Kırpma görünürlüğü, D dalgası.)
       if (res.dropped > 0)
-        ev("classify_overflow", { droppedCandidates: res.dropped });
+        ev("classify_overflow", { droppedCandidates: res.dropped, rotation: res.nextCursors });
       // Hüküm dönmeyen aday sessiz kalamaz: "sınıflandı, temiz çıktı" ile
       // "karar verilmedi" ayrımı yalnız burada görünüyor.
       if (res.unclassified > 0)
@@ -396,11 +397,9 @@ export async function auditProject(
     // Yazım: skor SIFIRDAN (D-M3-3), geçiş active↔suspect (D-M3-9), her şey olaylı.
     store.tx(() => {
       for (const c of pendingContradictionEvents) ev("contradiction_confirmed", c);
-      // Rotasyon damgası skorlarla AYNI tx'te: damga ilerleyip skor yazılmazsa
-      // (arada ölüm) aday sıranın sonuna gider ve ölçülmemiş hükmü korunmuş
-      // olarak bir sonraki koşumda da atlanırdı — tam da düzeltilen donmanın
-      // kendisi, bu sefer görünmez bir yoldan.
-      markClassified(store, classifiedFindings, nowIso());
+      // Rotasyon imleci skorlarla AYNI tx'te: imleç ilerleyip skor yazılmazsa
+      // (arada ölüm) pencere, sonucu hiç yazılmamış bir ölçümün üstünden atlardı.
+      if (nextCursors !== null) writeClassifyCursors(store, project.id, nextCursors);
       for (const f of all) {
         // Skor kaydı olmayan tek küme: hiç çelişkiye girmemiş `unanchored` not.
         // Yukarıdaki skor döngüsü onu atladı (M0-D5: çapa sinyali çapasız nota

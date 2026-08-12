@@ -8,7 +8,6 @@ import type { Finding } from "../src/types.ts";
 const finding = (id: number, content: string): Finding => ({
   id, projectId: 1, source: "observed", content, sourceRef: null,
   createdAt: "2026-08-11T00:00:00.000Z", status: "active", supersededBy: null, suspicion: 0,
-  lastClassifiedAt: null,
 });
 
 test("başlık ilk satırdır ve 80 karakterde kesilir", () => {

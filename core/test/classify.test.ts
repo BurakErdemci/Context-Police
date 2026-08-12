@@ -68,7 +68,7 @@ test("selectCandidates: bütçe yüzeylere bölünür, cross seli diğer ikisini
     ...Array.from({ length: 10 }, () => cand(1, null, "intra")),
     ...Array.from({ length: 28 }, () => cand(1, null, "frontmatter")),
   ];
-  const taken = selectCandidates(many, MAX_CLASSIFY_ITEMS);
+  const { taken } = selectCandidates(many, MAX_CLASSIFY_ITEMS);
   const count = (k: Candidate["kind"]) => taken.filter((c) => c.kind === k).length;
   assert.equal(taken.length, MAX_CLASSIFY_ITEMS);
   assert.equal(count("cross"), CLASSIFY_SURFACE_QUOTA.cross);
@@ -83,14 +83,14 @@ test("selectCandidates: kullanılmayan pay öncelik sırasıyla devredilir, büt
     cand(1, null, "intra"),
     ...Array.from({ length: 3 }, () => cand(1, null, "frontmatter")),
   ];
-  const taken = selectCandidates(many, MAX_CLASSIFY_ITEMS);
+  const { taken } = selectCandidates(many, MAX_CLASSIFY_ITEMS);
   const count = (k: Candidate["kind"]) => taken.filter((c) => c.kind === k).length;
   assert.equal(taken.length, MAX_CLASSIFY_ITEMS);
   assert.equal(count("intra"), 1);
   assert.equal(count("frontmatter"), 3); // hepsi girdi
   assert.equal(count("cross"), MAX_CLASSIFY_ITEMS - 4);
   // Tavanın altında kalan liste hiç kırpılmaz.
-  assert.equal(selectCandidates([cand(1, 2), cand(2, null, "intra")], MAX_CLASSIFY_ITEMS).length, 2);
+  assert.equal(selectCandidates([cand(1, 2), cand(2, null, "intra")], MAX_CLASSIFY_ITEMS).taken.length, 2);
 });
 
 test("classifyCandidates: kota atlanan adayı sessizleştirmez, dropped doğru kalır", async () => {

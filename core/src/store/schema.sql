@@ -106,21 +106,39 @@ CREATE TABLE IF NOT EXISTS findings (
   status        TEXT NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active','suspect','superseded','born_invalid','unanchored')),
   superseded_by INTEGER REFERENCES findings(id),
-  suspicion     REAL NOT NULL DEFAULT 0 CHECK (suspicion >= 0 AND suspicion <= 1),
-  -- Bu notun ÇELİŞKİ boyutu en son ne zaman ölçüldü (NULL = hiç). Karar alanı
-  -- değil ROTASYON anahtarı: sınıflama bütçesi (MAX_CLASSIFY_ITEMS) aşıldığında
-  -- adaylar bu damgaya göre sıralanıyor, en eski/hiç ölçülmemiş öne geliyor.
-  --
-  -- Neden gerekti (denetim: doğrulama turu, `classification-cap-permanent-hold`):
-  -- seçim deterministikti ve her koşumda AYNI ilk N adayı alıyordu; atılan
-  -- adayların tarafları "ölçülemedi" sayılıp önceki hükmü korurken, o adaylar
-  -- bir daha hiç ölçülmüyordu. 20'den fazla adayı olan bir projede bir not
-  -- SONSUZA KADAR ölçülmeden suspect kalabiliyordu — koruma, kalıcı bir cezaya
-  -- dönüşüyordu. Damga o döngüyü kırar: ölçülen aday sıranın sonuna gider.
-  last_classified_at TEXT
+  suspicion     REAL NOT NULL DEFAULT 0 CHECK (suspicion >= 0 AND suspicion <= 1)
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_project_status ON findings(project_id, status);
+
+-- Sınıflama bütçesinin (MAX_CLASSIFY_ITEMS) YÜZEY BAŞINA rotasyon imleci:
+-- "bu yüzeyin kararlı aday sırasında bir sonraki koşum nereden başlayacak".
+--
+-- Neden konum, neden not damgası DEĞİL (denetim: `classification-candidate-
+-- starvation`, 12 Ağu 2026): rotasyon durumu bir gün önce NOT başına tutuluyordu
+-- (findings.last_classified_at), oysa tavanlanan iş birimi ÇİFT. Yedi notun her
+-- ikilisi bir çapa paylaştığında 21 aday çıkıyor; tavan 20'yi alıyor ama o 20
+-- kenar yedi notun HEPSİNE dokunuyor, dolayısıyla ölçüm damgası bütün notlara
+-- yazılıyordu. Ölçülmemiş 21. çift, ölçülmüşlerle aynı anahtarı alıyor ve
+-- kararlı sıralama onu her koşumda yeniden dışarıda bırakıyordu — 8 koşum
+-- boyunca ölçüldü, hep atlandı. Durum çift bazında olmalıydı ya da hiç
+-- olmamalıydı; imleç ikincisini seçiyor.
+--
+-- İmlecin ispatı YAPICI: her koşum imleci SEÇİLEN aday sayısı kadar ilerletiyor
+-- ve pencere listede dönüyor, dolayısıyla N aday ve M<N tavanla ⌈N/M⌉ koşumda
+-- her aday en az bir kez seçiliyor. İlerleme ölçümün SONUCUNA bağlı değil
+-- (seçildi mi, ilerledi): sürekli hüküm döndürmeyen zehirli bir parti, geri
+-- kalan adayların sırasını kilitleyemesin.
+--
+-- Satır sayısı sınırlı: proje başına en çok yüzey sayısı kadar (3). Budama
+-- sorusu yok — çift başına durum tutan alternatifin (aday tablosu) getirdiği
+-- kareli büyüme ve "bulgu süpersede olunca satır ne olacak" sorusu da yok.
+CREATE TABLE IF NOT EXISTS classify_cursors (
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  kind       TEXT NOT NULL,
+  next_index INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, kind)
+);
 
 -- Çapa öncelik sırası sembol > dosya yolu > satır no (M0-D4). Satır numarası
 -- bilerek bir çapa TİPİ değil: kaydı kayınca içerik hâlâ doğru olabiliyor,

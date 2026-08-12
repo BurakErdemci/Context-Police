@@ -84,10 +84,4 @@ export interface Finding {
   status: FindingStatus;
   supersededBy: number | null;
   suspicion: number;
-  /**
-   * Bu notun çelişki boyutu EN SON ne zaman ölçüldü; null = hiç. Sınıflama
-   * bütçesi aday rotasyonunu buradan sürüyor (signals/classify.ts) — gerekçe
-   * schema.sql'deki sütun yorumunda.
-   */
-  lastClassifiedAt: string | null;
 }

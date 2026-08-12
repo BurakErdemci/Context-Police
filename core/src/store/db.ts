@@ -76,36 +76,26 @@ function migrate(db: DatabaseSync): void {
   migrateCursors(db);
   migrateWatermarks(db);
   migrateScanLock(db);
-  migrateFindings(db);
 }
 
 /**
- * `last_classified_at` sütunu (aday rotasyonu — gerekçe schema.sql'de). Var olan
- * depolarda yok ve `CREATE TABLE IF NOT EXISTS` onu EKLEMEZ; sütunsuz bir depoda
- * her denetim, rotasyon damgasını yazarken "no such column" ile patlardı.
+ * BURADA `migrateFindings` YOK — bilerek. Aday rotasyonu bir gün
+ * `findings.last_classified_at` sütununu kullanıyordu ve o sütun bu göç
+ * listesindeydi; rotasyon yüzey başına bir imlece taşınınca (schema.sql:
+ * `classify_cursors`, gerekçe orada) sütunu okuyan/yazan kod kalmadı.
  *
- * Tablo yeniden kurulmuyor: eklenen sütun nullable, kaldırılacak bir CHECK
- * kısıtı yok. Ve findings tablosunu yeniden kurmak append-only tetikleyicilerini
- * (findings_no_delete) devre dışı bırakmadan yapılamazdı — yani kalıbı burada
- * kullanmak, korumayı göç süresince kaldırmak demekti. ALTER o riski hiç açmıyor.
+ * Var olan bir depoda sütun ARTIK DA DURUYOR ve kaldırılmıyor: kimse okumuyor,
+ * INSERT'ler onu hiç anmıyor (NULL kalır), ve `findings` tablosunu yeniden
+ * kurmadan sütun düşürmek append-only tetikleyicilerini göç süresince devre
+ * dışı bırakmak demekti — sıfır kazanç için gerçek bir risk. Yeni depolarda
+ * sütun hiç yaratılmıyor. İki kuşak da açılıyor, çünkü hiçbir sorgu sütunu ADIYLA
+ * anmıyor (`getFinding` SELECT * kullanıyor).
  *
- * NULL doğru varsayılan: "bu not hiç sınıflanmadı" = rotasyonda en öncelikli.
- * Göç sonrası ilk koşumda tüm notlar eşit önceliğe düşer, sıra özgün sırasıdır —
- * uydurma bir damga yazmak, ölçülmemiş adayları sıranın sonuna atardı.
- *
- * SCHEMA_GENERATION artırılMADI, bilerek: damga yalnız İKİ kuşağın aynı depoya
- * yazmasının VERİ BOZDUĞU durumlar için var (lock.ts vakası). Burada eski kod
- * yeni depoya yazabilir — yalnız rotasyon damgasını güncellemez, yani rotasyon
- * körelir, hiçbir şey bozulmaz. Kuşağı artırmak eski sürümlere gereksiz bir
- * kapı kapatırdı.
+ * Yeni tablo için ayrı bir göç adımına gerek yok: `schema.sql` HER açılışta
+ * koşuyor ve `CREATE TABLE IF NOT EXISTS` var olan depoda eksik TABLOYU yaratır
+ * — yapamadığı şey var olan bir tabloya SÜTUN eklemek (CLAUDE.md §7'nin vakası).
+ * Yine de var olan bir depo dosyasına karşı testle doğrulandı.
  */
-function migrateFindings(db: DatabaseSync): void {
-  const cols = db.prepare("PRAGMA table_info(findings)").all() as { name: string }[];
-  if (cols.length === 0) return; // tablo yok: şema henüz koşmamış
-  if (!cols.some((c) => c.name === "last_classified_at")) {
-    db.exec("ALTER TABLE findings ADD COLUMN last_classified_at TEXT");
-  }
-}
 
 /**
  * Kilit kimliği PID'den kalp atışına geçti (lock.ts). Var olan depolarda
