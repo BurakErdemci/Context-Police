@@ -342,6 +342,13 @@ export function renewScanLock(store: Store, holder: string): boolean {
  * Bu tek okuma, atışın hiç koşmamış ya da her turda fırlamış olmasını da
  * yapısal olarak zararsız kılıyor: sonuç atışın çalışmasına DEĞİL satırın
  * kendisine dayanıyor.
+ *
+ * SONUCU: iş kilidi KENDİ ELİYLE bırakıp (lock.release()) sonra normal dönerse
+ * bu da reddedilir. İstenen davranış — bırakma anından sonraki yazımlar
+ * gerçekten korumasız. Bugün böyle bir çağıran yok: CLI'ın kancaları
+ * release()'i yalnız sinyal yolunda, hemen ardından process.exit ile çağırıyor.
+ * Bir gün "bırak ve devam et" gerekirse çözüm bu kontrolü gevşetmek değil,
+ * kilidi işin gerçek sonunda bırakmak.
  */
 function assertStillOwner(store: Store, holder: string): void {
   let row: { holder: string } | undefined;

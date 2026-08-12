@@ -287,6 +287,19 @@ test("yutulan tazeleme hataları olay olarak görünür kalır", async () => {
   base.close();
 });
 
+test("kilidi kendi eliyle bırakıp devam eden iş de başarı sayılmaz", async () => {
+  // Bitişteki satır okumasının bilinçli yan etkisi. Bırakma anından sonraki
+  // yazımlar korumasız olduğu için reddetmek DOĞRU; sürpriz olmaması için
+  // sabitleniyor. Gerekirse çözüm bu kontrolü gevşetmek değil, kilidi işin
+  // gerçek sonunda bırakmak.
+  const store = openStore(":memory:");
+  await assert.rejects(
+    () => withScanLock(store, (lock) => { lock.release(); return "bitti"; }),
+    (err: unknown) => err instanceof ScanLockStolen && err.reason === "holder_changed",
+  );
+  store.close();
+});
+
 // --- 3c) temizlik hatası özgün hatayı EZMEZ ----------------------------------
 
 test("bırakma hatası işin özgün hatasını ezmez", async () => {
