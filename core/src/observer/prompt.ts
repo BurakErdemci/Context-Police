@@ -118,11 +118,62 @@ const HEX_SHA_RE = /^[0-9a-fA-F]{7,40}$/;
  * düşeceğini söylüyor, ki doğru — ama bayrak şekilli bir değer kendiliğinden
  * DÜŞMÜYOR, argümana dönüşüyor. Reddedilen tek sınıf o.
  */
+const GLOB_META_RE = /[*?[\]]/;
+
 function anchorShapeError(kind: AnchorKind, value: string): string | null {
   if (kind === "commit_sha") return HEX_SHA_RE.test(value) ? null : "commit_sha hex (7-40) değil";
-  // Yol/sembol: yalnız BAŞ karakterde tire yasak — argv'de bayrak konumuna
-  // ancak baştaki tire düşürür (importer/parse.ts'teki aynı hüküm).
-  return value.startsWith("-") ? "tire ile başlıyor (bayrak şekilli)" : null;
+  // Baştaki tire her türde yasak — argv'de bayrak konumuna ancak o düşürür
+  // (importer/parse.ts'teki aynı hüküm).
+  if (value.startsWith("-")) return "tire ile başlıyor (bayrak şekilli)";
+  // Sembol PATHSPEC OLARAK TÜKETİLMİYOR: `symbolExists` değeri `git grep -F -e
+  // <değer>` ile (sabit dize, ayraçlı), `symbolEverExisted` `-S<değer>` ile
+  // geçiriyor. Yol kısıtlarını sembole de dayatmak, kazancı olmayan bir aşırı
+  // reddetme olurdu — ve aşırı reddetmenin bedeli bu dosyada ölçülmüş
+  // (probes/emoji-anchor-rejected.sh).
+  if (kind === "symbol") return null;
+  return pathShapeError(value, kind === "file_path");
+}
+
+/**
+ * Yol çapalarının biçim kapısı (denetim: git-pathspec-injection, BLOCKER).
+ *
+ * Importer'ın ürettiği çapalar `PATH_RE` karakter sınıfıyla DOLAYLI olarak
+ * korunuyordu (`[\w.-]` glob karakteri üretemez); gözlemcinin ÜRETTİĞİ çapalar
+ * ise yalnız "boş değil + ≤512 karakter" denetiminden geçiyordu, yani `*`, `?`,
+ * `[`, `]` ve pathspec sihri serbestti. Ölçüldü: `core/src/signals/g?t.ts`
+ * çapası `ls-tree`de bulunamayıp `log`da eşleşerek `missing_now` üretiyor, DURUM
+ * kalıbıyla birleşince 0,7 suspect — var olmayan bir yol gerçek bir notu
+ * şüpheliye çeviriyor.
+ *
+ * İKİ KATMANIN İKİNCİSİ. Asıl koruma çağrı yerinde: git.ts'teki üç literal
+ * yardımcı `--literal-pathspecs` ile koşuyor. Bu kapı ise değeri DEPOYA girmeden
+ * daraltıyor, çünkü koruma yalnız çağrı yerinde olursa bayraksız yeni bir
+ * tüketici eklendiği an açık geri geliyor (dosyanın kendi tarihinde ölçülmüş
+ * bir sınıf).
+ *
+ * Dosya başındaki "çapa VERİdir, burada doğrulanmaz" kararıyla çelişmiyor:
+ * o karar var olmayan/tuhaf bir çapanın git'e karşı kendiliğinden düşeceğini
+ * söylüyor — doğru, ama glob şekilli bir değer kendiliğinden DÜŞMÜYOR, YANLIŞ
+ * bir şeyle eşleşiyor. Reddedilen sınıf o.
+ *
+ * Reddedilen çapa sessizce kaybolmuyor: `droppedAnchors` sayısına giriyor ve
+ * observer.ts onu `observer_batch_ok` olayının `detail.droppedAnchors` alanına
+ * yazıyor.
+ */
+function pathShapeError(value: string, repoRelative: boolean): string | null {
+  // `:` öneki pathspec sihri (`:(glob)`, `:!`, `:/`). Değerin İÇİNDEKİ iki nokta
+  // meşru (Windows sürücüsü, `a:b` adlı dosya) — sihir yalnız BAŞTA çalışır.
+  if (value.startsWith(":")) return "':' öneki (pathspec sihri)";
+  if (GLOB_META_RE.test(value)) return "glob metakarakteri (* ? [ ])";
+  // Üst dizine çıkan çapa repo kökünün dışını ölçtürür. Her iki ayraç: model
+  // Windows biçiminde de yazabiliyor.
+  if (value.split(/[\\/]/).includes("..")) return "'..' ile repo dışına çıkıyor";
+  // file_path repo köküne GÖRELİ olmak zorunda (anchor-drift.ts hiçbir yol
+  // birleştirmesi yapmadan git'e olduğu gibi veriyor). Mutlak/ev yolu için
+  // ayrı bir tür var: external_path — ve o D-M3-7 gereği zaten `unverifiable`.
+  if (repoRelative && (value.startsWith("/") || value.startsWith("~")))
+    return "mutlak yol (file_path repo köküne göreli olmalı; external_path kullanılmalı)";
+  return null;
 }
 
 // Veri-çiti tanımı ortak modülde (../prompt-fence.ts): sinyal katmanı da aynı

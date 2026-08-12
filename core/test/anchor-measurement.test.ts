@@ -134,10 +134,21 @@ const FAKE_CTX: GitContext = { repoRoot: "/cp-synthetic", head: "abc1234", origi
 before(() => {
   const dir = tmpDir("cp-fakegit-");
   const bin = join(dir, "git");
-  // Alt komut 3. argüman: çağrılar `git -C <cwd> <subcmd> ...` biçiminde.
+  // Alt komut KONUMDAN değil AYRIŞTIRILARAK bulunur. Eskiden `sub=$3` idi ve
+  // `git -C <cwd> <subcmd>` dizilimini varsayıyordu; `--literal-pathspecs`
+  // eklenince (git-pathspec-injection çaresi) $3 birden cwd oldu ve iki test
+  // "beklenmeyen alt komut" ile arızaya düştü — ürün doğru çalışırken harness
+  // kırmızı verdi. Konum varsayımı yerine komut-öncesi seçenekler atlanıyor.
   writeFileSync(bin, [
     "#!/bin/sh",
-    'sub=$3',
+    'sub=""',
+    "while [ $# -gt 0 ]; do",
+    '  case "$1" in',
+    "    -C) shift 2 ;;",
+    "    -*) shift ;;",
+    "    *) sub=$1; break ;;",
+    "  esac",
+    "done",
     'case "${CP_FAKE_MODE:-}:$sub" in',
     // ls-tree arızası: promisor remote'a ulaşılamadı (gerçek stderr'in kısası).
     '  lstree:ls-tree) echo "fatal: could not fetch from promisor remote" >&2; exit 128 ;;',

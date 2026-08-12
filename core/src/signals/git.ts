@@ -84,10 +84,19 @@ export function classifyFailure(err: unknown): string {
 /**
  * @param noExit Bu çıkış kodu komutun MEŞRU "hayır" cevabıdır (örn. `git grep`
  *   eşleşme bulamayınca rc=1). Verilmezse rc≠0'ın tamamı arızadır.
+ * @param literalPathspecs Bu çağrıdaki pathspec'ler LİTERAL yorumlanır: glob
+ *   yok, `:` sihri yok. Bkz. LITERAL_PATHSPECS_RATIONALE.
  */
-async function git(cwd: string, args: string[], opts: { noExit?: number } = {}): Promise<GitOutcome> {
+async function git(
+  cwd: string, args: string[], opts: { noExit?: number; literalPathspecs?: boolean } = {},
+): Promise<GitOutcome> {
+  // Bayrak `-C`'den ÖNCE: ikisi de komut-öncesi git seçeneği, sıra ölçüldü
+  // (git 2.50.1, 2026-08-12) ve bu dizilim çalışıyor.
+  const argv = opts.literalPathspecs === true
+    ? ["--literal-pathspecs", "-C", cwd, ...args]
+    : ["-C", cwd, ...args];
   try {
-    const { stdout } = await exec("git", ["-C", cwd, ...args], {
+    const { stdout } = await exec("git", argv, {
       timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER,
     });
     return { kind: "ok", out: stdout.trim() };
@@ -138,6 +147,32 @@ export async function openGit(
 }
 
 /**
+ * NEDEN `--literal-pathspecs` (denetim: git-pathspec-injection, BLOCKER).
+ *
+ * Çapa değerleri güvenilmeyen metinden geliyor: importer'ınkiler kullanıcının/
+ * başka bir AI ajanının yazdığı not gövdesinden, gözlemcininkiler doğrudan
+ * model çıktısından. Git varsayılan olarak pathspec'te GLOB uyguluyor, yani
+ * `core/src/signals/g?t.ts` gibi bir değer `ls-tree`de eşleşmezken `log`da
+ * eşleşiyordu → `missing_now`, ve DURUM kalıbıyla birleşince 0,7 suspect
+ * (probe: model-pathspec-wildcard). Yani var olmayan bir yol gerçek bir notu
+ * şüpheliye çeviriyordu.
+ *
+ * İki mekanizma ölçüldü (git 2.50.1, 2026-08-12) ve İKİSİ DE çalışıyor:
+ * `:(literal)<yol>` önek sihri ve `git --literal-pathspecs`. Bayrak seçildi:
+ *   1. Kapsam komutun TAMAMI — önek yalnız prefixlemeyi hatırladığın tek
+ *      pathspec'i korur; yeni bir argüman eklendiğinde açık sessizce geri gelir.
+ *   2. Bayrak pathspec SİHRİNİ de kapatıyor, yani `:(glob)x` / `:!x` gibi
+ *      önekler de literal — önekleme yaklaşımı bunu ancak dolaylı sağlıyor.
+ *   3. Değer argv'de notun yazdığı hâliyle kalıyor: arıza mesajı ve
+ *      `Measured.command` alanı sentetik bir önek göstermiyor.
+ *
+ * `filesMatchingSuffix` bilerek bayrak ALMIYOR: oradaki yıldız-eğik önekli
+ * pathspec glob'u işin kendisi. Onun çözdüğü yol ikinci ölçüme buradaki literal
+ * yardımcılarla gidiyor, yani `a[1].ts` gibi gerçek bir dosya adı ikinci geçişte
+ * glob'a dönüşmüyor (denetim haritasındaki "kaçışsız ikinci ölçüm" kusuru).
+ */
+
+/**
  * ref:path var mı.
  *
  * Komut seçimi ÖLÇÜMLE yapıldı (git 2.50.1, 2026-08-11) — üçü de denendi:
@@ -154,13 +189,21 @@ export async function openGit(
  */
 export async function fileExistsAt(ctx: GitContext, ref: string, path: string): Promise<Measured<boolean>> {
   const args = ["ls-tree", "-r", "--name-only", ref, "--", path];
-  return measure(`git ls-tree ${ref} -- ${path}`, await git(ctx.repoRoot, args), (out) => out !== null && out !== "");
+  return measure(
+    `git ls-tree ${ref} -- ${path}`,
+    await git(ctx.repoRoot, args, { literalPathspecs: true }),
+    (out) => out !== null && out !== "",
+  );
 }
 
 /** Yol geçmişin HERHANGİ bir noktasında eklendi mi — never_existed'ı missing_now'dan ayıran soru. */
 export async function fileEverExisted(ctx: GitContext, path: string): Promise<Measured<boolean>> {
   const args = ["log", "--all", "--diff-filter=A", "-1", "--format=%H", "--", path];
-  return measure(`git log --diff-filter=A -- ${path}`, await git(ctx.repoRoot, args), (out) => out !== null && out !== "");
+  return measure(
+    `git log --diff-filter=A -- ${path}`,
+    await git(ctx.repoRoot, args, { literalPathspecs: true }),
+    (out) => out !== null && out !== "",
+  );
 }
 
 /**
@@ -185,6 +228,10 @@ export async function filesMatchingSuffix(ctx: GitContext, path: string): Promis
   // hiçbir şeyle eşleşmez.
   const clean = path.replace(/^(?:\.\/)+/, "");
   const pathspec = `*/${clean.replace(/[\\*?[\]]/g, (c) => `\\${c}`)}`;
+  // `--literal-pathspecs` BİLEREK yok (bkz. LITERAL_PATHSPECS_RATIONALE): buradaki
+  // `*/` glob'u işin kendisi, bayrak onu da literal yapıp fonksiyonu işlevsizleştirirdi.
+  // Metnin kendi glob karakterleri yukarıda kaçılıyor, yani serbest kalan tek glob bizim
+  // yazdığımız `*/` — ve dönen yol ikinci ölçüme literal yardımcılarla gidiyor.
   // -z: yolda satır sonu ya da özel karakter varsa git aksi hâlde tırnaklı
   // ("quoted") yazar ve dönen değer gerçek yol OLMAZ.
   const r = await git(ctx.repoRoot, ["ls-files", "-z", "--", pathspec]);
@@ -197,7 +244,7 @@ export async function commitsTouching(
   ctx: GitContext, ref: string, path: string, sinceIso: string,
 ): Promise<Measured<number>> {
   const args = ["rev-list", "--count", `--since=${sinceIso}`, ref, "--", path];
-  const r = await git(ctx.repoRoot, args);
+  const r = await git(ctx.repoRoot, args, { literalPathspecs: true });
   const cmd = `git rev-list --count ${ref} -- ${path}`;
   if (r.kind === "failed") return { ok: false, command: cmd, reason: r.reason };
   const n = Number(r.kind === "ok" ? r.out : "");

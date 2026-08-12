@@ -184,15 +184,25 @@ test("[unsanitized-anchor-value] kontrol / satır sonu / bidi karakterli çapa r
   }
 });
 
-test("[unsanitized-anchor-value] yol gezinmesi ve mutlak yol REDDEDİLMEZ (doğrulaması M3'ün işi)", () => {
+// GÜNCELLENDİ (12 Ağu 2026, git-pathspec-injection). M2'deki hüküm "yol gezinmesi
+// ve mutlak yol reddedilmez, doğrulaması M3'ün işi" idi ve o zaman doğruydu:
+// çapa VERİdir, var olmayan bir yol M3'ün sinyal motorunda kendiliğinden düşer.
+// M3 geldi ve varsayımı ÇÜRÜTTÜ — pathspec şekilli bir değer kendiliğinden
+// düşmüyor, YANLIŞ bir şeyle eşleşiyor ya da repo dışını ölçtürüyor. Bu yüzden
+// yol çapaları artık biçim kapısından geçiyor. Değişmeyen kısım aşağıda: parti
+// hâlâ REDDEDİLMİYOR (bedeli kalıcı bulgu kaybı olurdu), yalnız çapa düşüyor —
+// ve external_path'in mutlak yolu MEŞRU kalıyor.
+test("[unsanitized-anchor-value] yol gezinmesi düşer, external_path'in mutlak yolu meşru kalır", () => {
   const res = parseObserverOutput(JSON.stringify({
     findings: [{ content: "bulgu", anchors: [
       { kind: "file_path", value: "../../etc/passwd" },
       { kind: "external_path", value: "/Users/x/.claude/settings.json" },
     ] }],
   }));
-  assert.equal(res.ok, true, "meşru olabilecek çapa sessizce yutuldu");
-  assert.equal(res.ok && res.items[0]!.anchors.length, 2);
+  assert.equal(res.ok, true, "tek bir çapa yüzünden parti reddedildi");
+  assert.deepEqual(res.ok && res.items[0]!.anchors,
+    [{ kind: "external_path", value: "/Users/x/.claude/settings.json" }]);
+  assert.equal(res.ok && res.droppedAnchors, 1, "düşen çapa sayılmadı");
 });
 
 test("[unsanitized-anchor-value] sahte çapa bulguyu active yapamaz: parti hiç yazılmaz", async () => {

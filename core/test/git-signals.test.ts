@@ -122,3 +122,47 @@ test("originRef: geçersiz pin aday listesine DÜŞMEZ, null döner", async () =
   // altın set sonucu sessizce yanlış çıkardı. null = "denetlenecek uzak uç yok".
   assert.equal(ctx.originRef, null);
 });
+
+// ─── Dalga B: pathspec literal olarak geçer (git-pathspec-injection) ──────────
+
+test("pathspec LİTERAL: glob şekilli çapa var olan dosyayla eşleşmez", async () => {
+  // Probe terfisi: model-pathspec-wildcard.sh. Git varsayılan olarak pathspec'te
+  // glob uyguluyordu: `src/?.ts` `ls-tree`de bulunamayıp `log --diff-filter=A`da
+  // eşleşiyor → `missing_now`, DURUM kalıbıyla 0,7 suspect. Var olmayan bir yol
+  // gerçek bir notu şüpheliye çeviriyordu.
+  const ctx = (await openGit(repo, { fetch: false }))!;
+  const kotu = [
+    "src/?.ts",       // orijinal repro sınıfı (tek karakter joker)
+    "src/*.ts",       // SINIF KAPANIŞI: yıldız
+    "src/[ab].ts",    // SINIF KAPANIŞI: köşeli parantez sınıfı
+    ":(glob)**/a.ts", // SINIF KAPANIŞI: pathspec sihri
+  ];
+  for (const path of kotu) {
+    assert.deepEqual(await fileExistsAt(ctx, "HEAD", path), no, `ls-tree glob açtı: ${path}`);
+    assert.deepEqual(await fileEverExisted(ctx, path), no, `log glob açtı: ${path}`);
+    assert.deepEqual(await commitsTouching(ctx, "HEAD", path, "2000-01-01T00:00:00Z"), { ok: true, value: 0 },
+      `rev-list glob açtı: ${path}`);
+  }
+  // Gerçek yol etkilenmiyor: bayrak yalnız glob'u kapatıyor.
+  assert.deepEqual(await fileExistsAt(ctx, "HEAD", "src/a.ts"), yes);
+});
+
+test("pathspec LİTERAL: adında glob karakteri OLAN gerçek dosya doğru ölçülür", async () => {
+  // Sonek çözümlemesinin ikinci ölçümü `filesMatchingSuffix`in bulduğu GERÇEK
+  // yolu yeniden ölçüyor; o yolda `[`/`]` varsa kaçışsız gitmesi kusurdu.
+  const r2 = realpathSync(tmpDir("cp-git-glob-"));
+  const g = (...a: string[]) => execFileSync("git", ["-C", r2, ...a], { encoding: "utf8" }).trim();
+  g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t");
+  mkdirSync(join(r2, "src"));
+  writeFileSync(join(r2, "src", "a[1].ts"), "export const x = 1;\n");
+  writeFileSync(join(r2, "src", "ab.ts"), "export const y = 2;\n");
+  g("add", "-A"); g("commit", "-qm", "ilk");
+
+  const ctx = (await openGit(r2, { fetch: false }))!;
+  // Literal: kendi adıyla BULUNUR (glob olsaydı `a[1].ts` yalnız `a1.ts` ile eşleşirdi).
+  assert.deepEqual(await fileExistsAt(ctx, "HEAD", "src/a[1].ts"), yes);
+  assert.deepEqual(await fileEverExisted(ctx, "src/a[1].ts"), yes);
+  assert.deepEqual(await commitsTouching(ctx, "HEAD", "src/a[1].ts", "2000-01-01T00:00:00Z"), { ok: true, value: 1 });
+  // Ve KOMŞUSUNU yutmuyor: `src/[ab].ts` glob'u `ab.ts`ye denk gelmemeli.
+  assert.deepEqual(await fileExistsAt(ctx, "HEAD", "src/[ab].ts"), no);
+});
