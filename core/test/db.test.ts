@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { openStore } from "../src/store/db.ts";
+import { openStore, SCHEMA_GENERATION, StoreGenerationTooNew } from "../src/store/db.ts";
+import { DatabaseSync } from "node:sqlite";
 import { tmpStorePath } from "./helpers.ts";
 
 test("şema uygulanınca beş tablo da var", () => {
@@ -100,4 +101,45 @@ test("node:sqlite yalnız db.ts'de import ediliyor", async () => {
     out.map((p) => p.split("/").pop()),
     ["db.ts"],
   );
+});
+
+// --- şema kuşağı damgası (PRAGMA user_version) -------------------------------
+
+test("damgasız VAR OLAN depo açılınca kuşak damgası yazılır, veri korunur", () => {
+  // CLAUDE.md §7: göç TAZE depoda çalışıyor diye kanıtlanmış olmuyor. Dosya
+  // önce yaratılıp veriyle dolduruluyor, damga elle sıfırlanıyor (bu kuşaktan
+  // önceki her depo böyle: user_version varsayılanı 0), sonra açılıyor.
+  const path = tmpStorePath();
+  const ilk = openStore(path);
+  ilk.run("INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t");
+  ilk.close();
+
+  const ham = new DatabaseSync(path);
+  ham.exec("PRAGMA user_version = 0");
+  ham.close();
+
+  const yeni = openStore(path);
+  assert.equal(yeni.get<{ user_version: number }>("PRAGMA user_version")?.user_version, SCHEMA_GENERATION,
+    "var olan depo damgalanmadı: eski kod bu depoyu kendisininmiş gibi kullanmaya devam eder");
+  assert.equal(yeni.get<{ n: number }>("SELECT COUNT(*) AS n FROM projects")?.n, 1, "damgalama veri kaybetti");
+  yeni.close();
+});
+
+test("BENDEN YENİ kuşakla damgalanmış depo açılmayı reddeder", () => {
+  // Ters yön (eski kod, yeni depo) BU KODDAN kapatılamaz: damgayı okumayan bir
+  // sürüme okuma öğretilemez. Kapatılabilen yön bu — ve sessizce devam etmek,
+  // bilmediğimiz bir şemaya göçümüzü koşturmak demek olurdu.
+  const path = tmpStorePath();
+  openStore(path).close();
+  const ham = new DatabaseSync(path);
+  ham.exec(`PRAGMA user_version = ${SCHEMA_GENERATION + 1}`);
+  ham.close();
+
+  assert.throws(() => openStore(path), StoreGenerationTooNew);
+
+  // Reddetmek YETMEZ, dokunmamak da şart: reddedilen depo damgasını korumalı.
+  const kontrol = new DatabaseSync(path, { readOnly: true });
+  assert.equal((kontrol.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+    SCHEMA_GENERATION + 1, "reddedilen depo yine de damgalandı");
+  kontrol.close();
 });

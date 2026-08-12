@@ -57,8 +57,8 @@ export const HEARTBEAT_INTERVAL_MS = 30_000;
  * gerekçesizden kötüdür: okuyan, çökmüş bir varsayıma dayanarak sayıyı
  * "güvenli" sanıyor.
  *
- * ÖLÇÜLEN gerçek senkron blok kaynağı depo yazımının kendisi: `node:sqlite`
- * SENKRON, dolayısıyla çekişmeli bir yazımda `busy_timeout` (db.ts: 5 sn)
+ * ÖLÇÜLEN gerçek senkron blok kaynağı depo yazımının kendisi: Node'un yerleşik
+ * SQLite sürücüsü SENKRON, dolayısıyla çekişmeli bir yazımda busy timeout (5 sn)
  * boyunca olay döngüsü tümden durur. Ölçüm (12 Ağu 2026, node 24.10): rakip bir
  * yazıcı varken tek bir INSERT 5192 ms senkron blokladı ve 100 ms'lik bir
  * zamanlayıcı 5092 ms gecikmeyle ateşledi. Buna karşılık AYNI gün ölçülen

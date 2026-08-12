@@ -30,6 +30,38 @@ export function defaultStorePath(): string {
 }
 
 /**
+ * Deponun ŞEMA KUŞAĞI. `PRAGMA user_version` ile dosyanın içine yazılır.
+ *
+ * 1 = kalp atışlı kilit kuşağı (lock.ts). Neden gerekti: kilit sahipliği
+ * PID tahmininden atışa geçti ve iki kuşak AYNI depoya yazabiliyor. Eski
+ * (atışsız) kod satıra `heartbeat_at` yazmıyor, yeni kod NULL atışı
+ * `acquired_at`'e düşürüyor — sonuç, iki sürümün birbirinin CANLI kilidini
+ * çalması (probe: mixed-version-null-heartbeat).
+ *
+ * Damganın KAPATTIĞI yön tek: yeni kodun, kendisinden daha yeni bir kuşak
+ * tarafından yazılmış bir depoya göç koşturması. Ters yön (eski kod, yeni
+ * depo) buradan kapatılamaz — damgayı hiç okumayan bir sürüme okuma
+ * öğretilemez. Bir kuşak eklerken bu sayı artırılır ve karşılığı `migrate()`
+ * içinde AYNI commit'te ele alınır (CLAUDE.md §7).
+ */
+export const SCHEMA_GENERATION = 1;
+
+/** Depo bizden yeni bir kod tarafından yazılmış: göçümüz onu bozabilir. */
+export class StoreGenerationTooNew extends Error {
+  constructor(path: string, found: number) {
+    super(
+      `depo şema kuşağı ${found}, bu sürüm en fazla ${SCHEMA_GENERATION} biliyor (${path}) — ` +
+        "daha yeni bir context-police bu depoya yazmış; sürümü güncelleyin",
+    );
+    this.name = "StoreGenerationTooNew";
+  }
+}
+
+function readGeneration(db: DatabaseSync): number {
+  return Number((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+}
+
+/**
  * Var olan depoyu güncel şemaya taşır. `CREATE TABLE IF NOT EXISTS` var olan
  * tabloya ne sütun ekler ne birincil anahtarını değiştirir; bu yüzden şema
  * değişimi ayrıca ele alınmak zorunda.
@@ -416,6 +448,15 @@ export function openStore(path: string): Store {
     console.warn(`uyarı: ${path} WAL kipine alınamadı (başka bir yazıcı bağlı); rollback journal ile devam ediliyor.`);
   }
 
+  // KUŞAK KONTROLÜ HER ŞEYDEN ÖNCE: bizden yeni bir depoya kurtarma, şema ve
+  // göç koşturmak, tanımadığımız bir şemayı kendi varsayımlarımıza göre yeniden
+  // yazmak demek. Reddetmek dokunmaktan ucuz.
+  const generation = readGeneration(db);
+  if (generation > SCHEMA_GENERATION) {
+    db.close();
+    throw new StoreGenerationTooNew(path, generation);
+  }
+
   // Şemadan ÖNCE: yarıda kesilmiş bir göçün ara tablosu ortadaysa schema.sql
   // hedefi boş yeniden yaratıp veriyi yetim bırakıyor (gerekçe: fonksiyonun
   // kendi yorumunda).
@@ -425,6 +466,12 @@ export function openStore(path: string): Store {
   db.exec(schema);
 
   migrate(db);
+  // Damga göçten SONRA: kuşak damgası "bu dosya şu şemaya taşındı" demek, "şu
+  // sürüm dosyaya baktı" değil. Göç yarıda patlarsa damga da yazılmaz ve
+  // sonraki açılış göçü baştan dener.
+  // Değer bağlanamıyor (PRAGMA parametre almaz); enterpole edilen şey bizim
+  // sabitimiz, dışarıdan gelen bir veri değil.
+  if (generation !== SCHEMA_GENERATION) db.exec(`PRAGMA user_version = ${SCHEMA_GENERATION}`);
   ensureGuards(db, schema);
   assertRecursiveTriggers(db);
 
