@@ -49,17 +49,33 @@ export const HEARTBEAT_INTERVAL_MS = 30_000;
 /**
  * Bu süre atış görülmezse sahip ölmüş sayılır (≈20 kaçırılmış atış).
  *
- * Pay neden bu kadar geniş: kilit TUTULURKEN tek bir Codex çağrısı 180 saniyeye
- * kadar sürebiliyor (adapters/codex.ts) ve git alt süreçleri 15 saniyeye kadar.
- * Node tek iş parçacıklı, yani senkron bir alt süreç beklemesi zamanlayıcıyı da
- * geciktirir. Bir-iki atışlık pay (60-90 sn) bu yüzden yetmez: SAĞLIKLI bir
- * denetim tek bir uzun çağrının arkasında bayat görünür ve kilidin var olma
- * sebebi olan mükerrer teslimat yarışı geri gelirdi. 10 dakika, en uzun tek
- * bloklama süresinin üç katından fazla.
+ * BURADA ÖNCE YANLIŞ BİR GEREKÇE YAZIYORDU (düzeltildi 12 Ağu 2026): "kilit
+ * tutulurken tek bir Codex çağrısı 180 sn sürebiliyor ve senkron alt süreç
+ * beklemesi zamanlayıcıyı geciktirir" deniyordu. Ölçülünce çöktü — `codex.ts`
+ * `spawn`, `signals/git.ts` promisify'lı `execFile` kullanıyor; ikisi de
+ * asenkron, hiçbiri olay döngüsünü tutmuyor. Yanlış gerekçeli bir eşik
+ * gerekçesizden kötüdür: okuyan, çökmüş bir varsayıma dayanarak sayıyı
+ * "güvenli" sanıyor.
  *
- * Ters yönde bedeli: gerçekten ölmüş bir sahibin kilidi en fazla 10 dakika
- * tutulu kalır. Ölçülen alternatifin (ölü sahibi `ps` ile TAHMİN etme) bedeli
- * canlı kilidin çalınmasıydı; 10 dakikalık gecikme bunun yanında ucuz.
+ * ÖLÇÜLEN gerçek senkron blok kaynağı depo yazımının kendisi: `node:sqlite`
+ * SENKRON, dolayısıyla çekişmeli bir yazımda `busy_timeout` (db.ts: 5 sn)
+ * boyunca olay döngüsü tümden durur. Ölçüm (12 Ağu 2026, node 24.10): rakip bir
+ * yazıcı varken tek bir INSERT 5192 ms senkron blokladı ve 100 ms'lik bir
+ * zamanlayıcı 5092 ms gecikmeyle ateşledi. Buna karşılık AYNI gün ölçülen
+ * gerçek tarama yükü (416 MB / 24.971 turn, ~/.claude/projects tamamı) olay
+ * döngüsünü en fazla 1 ms bekletti — yani ayrıştırma bu eşiğe hiç girmiyor.
+ *
+ * Yani kendi kodumuzun bloklaması en kötü bir atış turu yiyor, iki değil. 10
+ * dakikalık payı HAKLI ÇIKARAN şey ölçemediklerimiz: süreç dondurulması
+ * (kapak kapanması, VM duraklatma) sırasında duvar saati işlemeye devam eder ve
+ * canlı bir sahip bayat görünür; üstüne tazeleme hataları yutuluyor (aşağıda),
+ * yani üst üste gelen birkaç arıza sessizce atış kaybettirir.
+ *
+ * İki yöndeki bedel simetrik değil, tercih bilinçli: fazla cömert eşiğin bedeli
+ * ÖLÇÜLÜ ve ucuz (gerçekten ölmüş bir sahibin kilidi en fazla 10 dk tutulu
+ * kalır), fazla cimri eşiğin bedeli CANLI kilidin çalınmasıydı — bu modülün
+ * dört turdur kanadığı sınıf. Eşiği düşürmek isteyen önce dondurma senaryosunu
+ * ölçsün.
  */
 export const HEARTBEAT_STALE_MS = 10 * 60_000;
 
@@ -88,14 +104,33 @@ export class ScanLockBusy extends Error {
 }
 
 /**
+ * Sahipliğin bittiğinde neden kanıtlanamadığı. Üç ayrı yol, tek sınıf: çağıranın
+ * tepkisi hepsinde aynı (sonucu atıp tekrar koş), ama teşhis farklı.
+ */
+export type LockLostReason =
+  /** Atış turu satırın başkasına geçtiğini gördü. */
+  | "heartbeat_lost"
+  /** İş bitti, satır okundu, sahip başkasıydı — atış hiç ateşlememiş olabilir. */
+  | "holder_changed"
+  /** Satır okunamadı: sahiplik ne doğrulanabildi ne çürütülebildi. */
+  | "unverifiable";
+
+/**
  * Kilit iş sürerken elden gitti. YUTULMAZ: kilidini kaybetmiş bir koşumun
  * yazımları korumasızdır ve başarıyla dönmesi, kilidin engellemesi gereken
  * mükerrer teslimatı sessizce geri getirir.
  */
 export class ScanLockStolen extends Error {
-  constructor(holder: string) {
-    super(`tarama kilidi koşum sırasında elden gitti (sahip: ${holder}) — sonuç güvenilmez, tekrar koşun`);
+  readonly reason: LockLostReason;
+  constructor(holder: string, reason: LockLostReason = "heartbeat_lost", options?: { cause?: unknown }) {
+    const nasil = {
+      heartbeat_lost: "tazeleme turu satırı başkasında buldu",
+      holder_changed: "iş bittiğinde satır başkasınaydı",
+      unverifiable: "iş bittiğinde sahiplik doğrulanamadı (kilit satırı okunamadı)",
+    }[reason];
+    super(`tarama kilidi koşum sırasında elden gitti (sahip: ${holder}; ${nasil}) — sonuç güvenilmez, tekrar koşun`, options);
     this.name = "ScanLockStolen";
+    this.reason = reason;
   }
 }
 
@@ -137,9 +172,16 @@ function isBusyError(err: unknown): boolean {
  * Tek satır bakmak yetiyor çünkü kilit tablosunda tek satır var (id=1): bu
  * türdeki en son olay, mümkün olan tek "hâlâ süren" takılmayı temsil eder.
  */
-function noteLongHeldLock(store: Store, holder: string, acquiredAt: string, age: number): void {
+function noteLockRow(
+  store: Store,
+  kind: string,
+  holder: string,
+  acquiredAt: string,
+  extra: Record<string, unknown>,
+): void {
   const last = store.get<{ detail: string | null }>(
-    "SELECT detail FROM events WHERE kind = 'scan_lock_held_long' ORDER BY id DESC LIMIT 1",
+    "SELECT detail FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1",
+    kind,
   );
   if (last?.detail) {
     try {
@@ -152,21 +194,27 @@ function noteLongHeldLock(store: Store, holder: string, acquiredAt: string, age:
   store.run(
     "INSERT INTO events (project_id, at, kind, detail) VALUES (NULL,?,?,?)",
     nowIso(),
-    "scan_lock_held_long",
-    JSON.stringify({
-      holder,
-      acquiredAt,
-      ageMs: age,
-      thresholdMs: LONG_HELD_MS,
-      // Devralınmadığı OLAYIN İÇİNDE yazılı: bu satırı okuyan, kilidin hâlâ
-      // sahibinde olduğunu `scan_lock_stolen` yokluğundan çıkarmak zorunda
-      // kalmasın. Meşru uzun denetim de bu satırı üretir; ayrımı insan yapar.
-      stolen: false,
-    }),
+    kind,
+    JSON.stringify({ holder, acquiredAt, ...extra }),
   );
 }
 
-type Busy = { holder: string; acquiredAt: string; longHeld: boolean; age: number };
+/**
+ * Damganın "gelecekte" sayılması için gereken pay. Meşru bir gelecek damga
+ * MÜMKÜN DEĞİL: satır yazıldıktan sonra okunuyor, yani aynı saatte fark daima
+ * ≥0. Pay yalnız saat kaymasının (NTP slew) ve damga çözünürlüğünün altındaki
+ * gürültüyü yutuyor; bunun üstü artık iki farklı saat demektir.
+ */
+const CLOCK_SKEW_TOLERANCE_MS = 5_000;
+
+type Busy = {
+  holder: string;
+  acquiredAt: string;
+  longHeld: boolean;
+  age: number;
+  /** Damga bizim şimdimizin ne kadar ötesinde; 0 = tutarsızlık yok. */
+  skewMs: number;
+};
 
 export function acquireScanLock(store: Store, holder: string): void {
   let busy: Busy | null = null;
@@ -196,6 +244,15 @@ export function acquireScanLock(store: Store, holder: string): void {
             acquiredAt: cur.acquired_at,
             longHeld: Number.isFinite(age) && age >= LONG_HELD_MS,
             age,
+            // GELECEKTEKİ damga = saat uyuşmazlığının kanıtı (GUARD, kök çözüm
+            // değil). Bayatlık ölçüsü duvar saati ve süreçler arası monotonik
+            // saat YOK; ileri sıçrayan bir saat (NTP, VM restore) taptaze bir
+            // kilidi anında bayat gösterebiliyor ve bunu engellemenin yolu yok.
+            // Engelleyemediğimizi hiç değilse GÖRÜNÜR kılıyoruz: bu satırı
+            // yazan saat bizimkiyle aynı değilse, o depodaki her bayatlık
+            // ölçümü şüphelidir. Ters yön (damga geçmişte) ayırt edilemez —
+            // bayat bir kilitle bire bir aynı görünür.
+            skewMs: Number.isFinite(sinceBeat) && sinceBeat < -CLOCK_SKEW_TOLERANCE_MS ? -sinceBeat : 0,
           };
           return;
         }
@@ -234,7 +291,25 @@ export function acquireScanLock(store: Store, holder: string): void {
   }
   if (busy) {
     const b: Busy = busy;
-    if (b.longHeld) noteLongHeldLock(store, b.holder, b.acquiredAt, b.age);
+    if (b.longHeld) {
+      noteLockRow(store, "scan_lock_held_long", b.holder, b.acquiredAt, {
+        ageMs: b.age,
+        thresholdMs: LONG_HELD_MS,
+        // Devralınmadığı OLAYIN İÇİNDE yazılı: bu satırı okuyan, kilidin hâlâ
+        // sahibinde olduğunu `scan_lock_stolen` yokluğundan çıkarmak zorunda
+        // kalmasın. Meşru uzun denetim de bu satırı üretir; ayrımı insan yapar.
+        stolen: false,
+      });
+    }
+    // Kilit ÇALINMIYOR: gelecekteki damga zaten "bayat değil" demek, yani bu dal
+    // devralma kararını hiç etkilemiyor. Yazılan tek şey teşhis.
+    if (b.skewMs > 0) {
+      noteLockRow(store, "scan_lock_clock_skew", b.holder, b.acquiredAt, {
+        skewMs: b.skewMs,
+        toleranceMs: CLOCK_SKEW_TOLERANCE_MS,
+        staleThresholdMs: HEARTBEAT_STALE_MS,
+      });
+    }
     throw new ScanLockBusy(b.holder);
   }
 }
@@ -252,6 +327,32 @@ export function releaseScanLock(store: Store, holder: string): void {
  */
 export function renewScanLock(store: Store, holder: string): boolean {
   return store.run("UPDATE scan_lock SET heartbeat_at = ? WHERE id = 1 AND holder = ?", nowIso(), holder).changes > 0;
+}
+
+/**
+ * Kilit HÂLÂ bizde mi — satırı okuyarak. Bayrak yerine SATIR, çünkü bayrak
+ * yalnız "bir atış turu koştu ve satırı başkasında buldu" diyebiliyor.
+ *
+ * Bağımsız çürütücü ölçtü (probe: completion-misses-takeover): 300 ms süren
+ * senkron bir iş boyunca SIFIR atış koşuyor, ve `await fn()` sonrası devam bir
+ * MİKRO görev iken bekleyen atış MAKRO görev — yani bayrak kontrolü bekleyen
+ * atıştan önce çalışır. Bayrağa güvenen bir bitiş, her koşumun sonunda bir tam
+ * aralık (30 sn) genişliğinde kör pencere bırakıyordu.
+ *
+ * Bu tek okuma, atışın hiç koşmamış ya da her turda fırlamış olmasını da
+ * yapısal olarak zararsız kılıyor: sonuç atışın çalışmasına DEĞİL satırın
+ * kendisine dayanıyor.
+ */
+function assertStillOwner(store: Store, holder: string): void {
+  let row: { holder: string } | undefined;
+  try {
+    row = store.get<{ holder: string }>("SELECT holder FROM scan_lock WHERE id = 1");
+  } catch (err) {
+    // "Doğrulayamadım" ile "sahibim" aynı şey değil: kanıtı olmayan sahiplik
+    // iddiası koruma değil. Sebep zincire konur, sınıf çağıran için aynı kalır.
+    throw new ScanLockStolen(holder, "unverifiable", { cause: err });
+  }
+  if (row?.holder !== holder) throw new ScanLockStolen(holder, "holder_changed");
 }
 
 export type ScanLockHandle = {
@@ -280,6 +381,8 @@ export async function withScanLock<T>(
   let timer: ReturnType<typeof setInterval> | null = null;
   let stolen = false;
   let released = false;
+  /** Yutulan tazeleme hatası sayısı — bitişte olaya dönüşür (aşağıdaki gerekçe). */
+  let renewFailures = 0;
 
   const stopTimer = (): void => {
     if (timer !== null) {
@@ -317,16 +420,52 @@ export async function withScanLock<T>(
       // Geçici bir depo hatası (SQLITE_BUSY, kapanmış bağlantı) atışı
       // öldürmemeli: bir sonraki tur yeniden dener. Burada fırlatmak zamanlayıcı
       // geri çağırımında yakalanamayan bir istisna demek — süreci öldürürdü.
+      //
+      // Yutmak sürüyor ama SESSİZLİK bitti: sayaç bitişte olaya dönüyor.
+      // Ayrım önemli — bu hatayı burada FIRLATMAK süreci öldürür, GÖRÜNMEZ
+      // bırakmak ise sonraki koşumun "neden devralındım" sorusunu cevapsız
+      // bırakır. Sayacın kendisi de yazma denemesi değil, bellekte bir sayı:
+      // depo yazılamıyorken depoya yazmaya çalışmıyor.
+      renewFailures++;
     }
   }, opts.intervalMs ?? HEARTBEAT_INTERVAL_MS);
   // Süreci ayakta tutmasın: kilit bir yan iş, işin kendisi değil.
   timer.unref?.();
 
+  let out: T;
   try {
-    const out = await fn(handle);
-    if (stolen) throw new ScanLockStolen(holder);
-    return out;
-  } finally {
-    handle.release();
+    out = await fn(handle);
+    if (stolen) throw new ScanLockStolen(holder, "heartbeat_lost");
+    // SATIR OKUMASI BIRAKMADAN ÖNCE: ters sırada kendi sildiğimiz satırı
+    // "başkası aldı" diye okurduk.
+    assertStillOwner(store, holder);
+    if (renewFailures > 0) {
+      try {
+        noteLockRow(store, "scan_lock_renew_failed", holder, nowIso(), { failures: renewFailures });
+      } catch {
+        // Teşhis kaydı işin sonucunu geçersiz kılmaz: kilit doğrulandı, iş
+        // bitti. Burada fırlatmak, sağlam bir koşumu bir günlük satırı yüzünden
+        // çöpe atmak olurdu.
+      }
+    }
+  } catch (err) {
+    // TEMİZLİK HATASI ÖZGÜN HATAYI EZMEZ. Eski hâlinde bırakma `finally`
+    // içindeydi ve fırlarsa işin gerçek hatasını yerinden ediyordu — teşhis
+    // kaybı, üstelik `cause` zinciri de kurulmadan.
+    try {
+      handle.release();
+    } catch (releaseErr) {
+      // db.ts'teki `rollbackError` ile aynı sözleşme: ikincil hata AYRI bir
+      // alana konur, `cause` ezilmez (özgün hatanın kendi `cause`'u olabilir).
+      // İlkel bir değer fırlatılmışsa (throw "x") alan yazılamaz; kayıp bilinçli,
+      // alternatifi özgün hatayı bir TypeError ile değiştirmek olurdu.
+      if (err !== null && typeof err === "object") (err as { releaseError?: unknown }).releaseError = releaseErr;
+    }
+    throw err;
   }
+  // BAŞARI yolunda bırakma hatası GÖRÜNÜR: maskeleyeceği bir özgün hata yok ve
+  // kilit satırının diskte kalması sonraki koşumu bayatlama süresi (10 dk)
+  // boyunca bekletir — susmak bunu bir gizemli gecikmeye çevirirdi.
+  handle.release();
+  return out;
 }

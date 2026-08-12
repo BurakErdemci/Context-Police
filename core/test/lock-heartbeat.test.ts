@@ -189,6 +189,159 @@ test("withScanLock: sahip satırı gerçekten tazeleniyor", async () => {
   store.close();
 });
 
+// --- 3b) bitişte SATIR okunur, bayrak yetmez ---------------------------------
+
+test("atış hiç ateşlemeden devralınan koşum başarı dönemez", async () => {
+  // Bağımsız çürütücü ölçtü (probe: completion-misses-takeover): 300 ms'lik
+  // senkron iş sırasında SIFIR atış koşuyor, ve `await fn()` sonrası devam bir
+  // mikro-görevken bekleyen atış makro-görev — yani bayrak kontrolü bekleyen
+  // atıştan ÖNCE koşar. Bayrağa bakmak, her koşumun sonunda bir tam aralık
+  // genişliğinde kör pencere bırakır. Satırı okumak bu pencereyi kapatır.
+  const store = openStore(":memory:");
+  await assert.rejects(
+    () =>
+      withScanLock(
+        store,
+        () => {
+          store.run("UPDATE scan_lock SET heartbeat_at = ? WHERE id = 1", "2000-01-01T00:00:00.000Z");
+          acquireScanLock(store, "davetsiz");
+          return "bitti";
+        },
+        // Aralık bilerek işin süresinden UZUN: bayrak yolu hiç çalışmaz.
+        { holder: "asil", intervalMs: 60_000 },
+      ),
+    (err: unknown) => err instanceof ScanLockStolen,
+    "kilidi çalınmış koşum başarı döndü: mükerrer teslimat sessizce geri gelir",
+  );
+  store.close();
+});
+
+test("her tazeleme fırlatsa bile bitişteki satır okuması devralmayı yakalar", async () => {
+  // Aynı kör pencerenin ikinci biçimi (probe: renew-error-hides-takeover):
+  // atış koşuyor ama HER SEFERİNDE fırlıyor, dolayısıyla `stolen` bayrağı hiç
+  // kurulmuyor. Bitişteki okuma bayraktan bağımsız olduğu için bu biçimi de
+  // kapatır — yamayı iki kez yazmaya gerek kalmıyor.
+  const base = openStore(":memory:");
+  const atisiBozuk = {
+    ...base,
+    run(sql: string, ...params: Parameters<typeof base.run>[1][]) {
+      if (sql.startsWith("UPDATE scan_lock SET heartbeat_at")) throw new Error("atış yazılamadı");
+      return base.run(sql, ...params);
+    },
+  };
+  await assert.rejects(
+    () =>
+      withScanLock(
+        atisiBozuk,
+        async () => {
+          await new Promise((r) => setTimeout(r, 30));
+          base.run("UPDATE scan_lock SET heartbeat_at = ? WHERE id = 1", "2000-01-01T00:00:00.000Z");
+          acquireScanLock(base, "davetsiz");
+          await new Promise((r) => setTimeout(r, 30));
+          return "bitti";
+        },
+        { holder: "asil", intervalMs: 10 },
+      ),
+    (err: unknown) => err instanceof ScanLockStolen,
+  );
+  base.close();
+});
+
+test("sahiplik OKUNAMIYORSA koşum başarılı sayılmaz", () => {
+  // "Doğrulayamadım" ile "sahibim" aynı şey değil. Kilidin var olma sebebi
+  // korumasız yazım yapmamak; kanıtı olmayan bir sahiplik iddiası koruma değil.
+  const base = openStore(":memory:");
+  let bozuk = false; // alım okuması geçsin; bozulma İŞ BİTTİKTEN sonra
+  const okumasiBozuk = {
+    ...base,
+    get<T>(sql: string, ...params: Parameters<typeof base.get>[1][]) {
+      if (bozuk) throw new Error("satır okunamadı");
+      return base.get<T>(sql, ...params);
+    },
+  };
+  return assert.rejects(
+    () => withScanLock(okumasiBozuk, () => { bozuk = true; return "bitti"; }, { holder: "asil" }),
+    (err: unknown) => err instanceof ScanLockStolen && err.reason === "unverifiable",
+  ).finally(() => { bozuk = false; base.close(); });
+});
+
+test("yutulan tazeleme hataları olay olarak görünür kalır", async () => {
+  // Zamanlayıcı geri çağırımında fırlatmak süreci öldürür, o yüzden hata
+  // yutuluyor (gerekçe lock.ts'te). Ama sessizlik ayrı bir kalem: atışı hiç
+  // yazılamamış bir koşum, bir dahaki sefere neden devralındığını açıklayabilir
+  // bir iz bırakmadan bitiyordu.
+  const base = openStore(":memory:");
+  const atisiBozuk = {
+    ...base,
+    run(sql: string, ...params: Parameters<typeof base.run>[1][]) {
+      if (sql.startsWith("UPDATE scan_lock SET heartbeat_at")) throw new Error("atış yazılamadı");
+      return base.run(sql, ...params);
+    },
+  };
+  await withScanLock(atisiBozuk, async () => { await new Promise((r) => setTimeout(r, 40)); }, { intervalMs: 10 });
+  const ev = base.get<{ detail: string }>(
+    "SELECT detail FROM events WHERE kind = 'scan_lock_renew_failed' ORDER BY id DESC LIMIT 1",
+  );
+  assert.ok(ev, "tazeleme hataları hiçbir iz bırakmadı");
+  assert.ok(JSON.parse(ev.detail).failures >= 1);
+  base.close();
+});
+
+// --- 3c) temizlik hatası özgün hatayı EZMEZ ----------------------------------
+
+test("bırakma hatası işin özgün hatasını ezmez", async () => {
+  const base = openStore(":memory:");
+  const birakmasiBozuk = {
+    ...base,
+    run(sql: string, ...params: Parameters<typeof base.run>[1][]) {
+      if (sql.startsWith("DELETE FROM scan_lock")) throw new Error("bırakma patladı");
+      return base.run(sql, ...params);
+    },
+  };
+  const err = await withScanLock(birakmasiBozuk, () => { throw new Error("özgün iş hatası"); })
+    .then(() => undefined, (e: unknown) => e);
+  assert.ok(err instanceof Error);
+  assert.match(err.message, /özgün iş hatası/, "temizlik hatası teşhisi olan hatayı yuttu");
+  assert.match(String((err as { releaseError?: Error }).releaseError?.message), /bırakma patladı/,
+    "bırakma hatası tümden kayboldu: kilit satırı diskte kalmışken kimse bilmiyor");
+  base.close();
+});
+
+test("iş başarılıyken bırakma hatası GÖRÜNÜR olur", async () => {
+  // Ters karar da savunulabilirdi (yut, iş bitti). Yutulmuyor: kilit satırı
+  // diskte kalmış demektir ve sonraki koşum bayatlama süresi (10 dk) boyunca
+  // bekler. Maskeleyecek bir özgün hata da yok — bu hata TEK bilgi.
+  const base = openStore(":memory:");
+  const birakmasiBozuk = {
+    ...base,
+    run(sql: string, ...params: Parameters<typeof base.run>[1][]) {
+      if (sql.startsWith("DELETE FROM scan_lock")) throw new Error("bırakma patladı");
+      return base.run(sql, ...params);
+    },
+  };
+  await assert.rejects(() => withScanLock(birakmasiBozuk, () => "bitti"), /bırakma patladı/);
+  base.close();
+});
+
+// --- 3d) saat tutarsızlığı ---------------------------------------------------
+
+test("GELECEKTEKİ atış damgası saat uyuşmazlığı olarak yazılır, kilit çalınmaz", () => {
+  const store = openStore(":memory:");
+  acquireScanLock(store, "uzak-sahip");
+  // Sahibin saati bizimkinden ileri: yazdığı damga bizim şimdimizin ötesinde.
+  store.run("UPDATE scan_lock SET heartbeat_at = ? WHERE id = 1", new Date(Date.now() + 3 * 60_000).toISOString());
+
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
+  const ev = store.all<{ detail: string }>("SELECT detail FROM events WHERE kind = 'scan_lock_clock_skew'");
+  assert.equal(ev.length, 1, "gelecekteki damga sessiz kaldı: bayatlık ölçümü artık güvenilmez ve kimse bilmiyor");
+  assert.ok(JSON.parse(ev[0]!.detail).skewMs > 60_000);
+
+  // Gürültü engeli: aynı kilit satırına tekrar çarpmak olayı çoğaltmaz.
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
+  assert.equal(store.all("SELECT 1 FROM events WHERE kind = 'scan_lock_clock_skew'").length, 1);
+  store.close();
+});
+
 // --- 4) göç: eski şemalı VAR OLAN depo ---------------------------------------
 
 test("heartbeat_at'sız eski şemalı depo açılınca kolon gelir ve kilit alınabilir", () => {
