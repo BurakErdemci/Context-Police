@@ -5,7 +5,7 @@
 import type { Anchor } from "../types.ts";
 import {
   type GitContext, type Measured, fileExistsAt, fileEverExisted, commitsTouching,
-  symbolExists, symbolEverExisted, commitExists,
+  symbolExists, symbolEverExisted, commitExists, filesMatchingSuffix,
 } from "./git.ts";
 
 export const SUSPICION_THRESHOLD = 0.6; // M0 kalibrasyonu (rapor §5)
@@ -33,6 +33,13 @@ export interface AnchorVerdict {
    * çürüme de görünür olsun.
    */
   measurementFailed?: MeasurementFailure;
+  /**
+   * Nottaki kısa yol repoda TEK bir gerçek yola çözüldü ve hüküm o yolla
+   * yeniden ölçüldü (altın set §5.2). Hükümde durur ki denetim çıktısı "not
+   * `./build_backend.sh` diyor, ölçüm `Backend/build_backend.sh` üzerinden
+   * yapıldı" diyebilsin — aksi hâlde çözümleme sessiz bir varsayım olurdu.
+   */
+  resolvedPath?: string;
 }
 
 export interface DriftScore { score: number; reasons: string[] }
@@ -103,30 +110,59 @@ export async function checkAnchors(ctx: GitContext, anchors: Anchor[], sinceIso:
       continue;
     }
     // file_path: iki ref birden (M0-D7), skor kötüsünden (D-M3-5).
-    const head = await fileStateAt(ctx, "HEAD", anchor.value, sinceIso);
-    const origin = ctx.originRef !== null ? await fileStateAt(ctx, ctx.originRef, anchor.value, sinceIso) : null;
-    // Ölçülemeyen taraf hükme KATILMAZ: bir ref'te arıza, diğerinde başarılı
-    // ölçüm varsa hüküm ölçülenden çıkar. Aksi hâlde tek bir arıza, çalışan
-    // ölçümü de nötrleştirip gerçek çürümeyi kaçırırdı.
-    const measured = [head, origin].filter((s): s is FileState => s !== null && s.failure === undefined);
-    const worse = measured.length === 0
-      ? head // ikisi de ölçülemedi → unverifiable, arıza aşağıda taşınır
-      : measured.reduce((a, b) => (SEVERITY[b.state] > SEVERITY[a.state] ? b : a));
-    const commits = [head.commits, origin?.commits].filter((n): n is number => n !== undefined);
-    const failure = head.failure ?? origin?.failure;
-    out.push({
-      anchor,
-      state: worse.state,
-      ...(commits.length > 0 ? { commits: Math.max(...commits) } : {}),
-      // Uyuşmazlık ancak İKİ taraf da ölçülebildiyse anlamlı; biri arızalıysa
-      // "ok vs unverifiable" gibi yanıltıcı bir satır üretirdi.
-      ...(origin !== null && failure === undefined && origin.state !== head.state
-        ? { refDisagreement: { head: head.state, origin: origin.state } }
-        : {}),
-      ...(failure !== undefined ? { measurementFailed: failure } : {}),
-    });
+    let v = await filePathVerdict(ctx, anchor, anchor.value, sinceIso);
+
+    // Sonek çözümlemesi (altın set §5.2): `never_existed` demeden ÖNCE, nottaki
+    // kısa yol repoda gerçekten var mı diye bakılır. Yalnız bu dalda ödenir —
+    // duran, silinmiş ya da ölçülemeyen çapa ek git çağrısı görmez.
+    if (v.state === "never_existed") {
+      const matches = await filesMatchingSuffix(ctx, anchor.value);
+      if (!matches.ok) {
+        // Ölçüm arızası ASLA suçlamaya dönmez (dosya başındaki temel sözleşme):
+        // eşleşmeyi göremediysek "hiç var olmamış" diyemeyiz.
+        v = { anchor, state: "unverifiable", measurementFailed: failureOf(matches)! };
+      } else if (matches.value.length === 1) {
+        const resolved = matches.value[0]!;
+        v = { ...(await filePathVerdict(ctx, anchor, resolved, sinceIso)), resolvedPath: resolved };
+      } else if (matches.value.length > 1) {
+        // Hangi dosyanın kastedildiği ÖLÇÜLEMİYOR. Rastgele birini seçmek sahte
+        // bir kesinlik, hepsini suçlamak uydurma bir kayma olurdu.
+        v = { anchor, state: "unverifiable" };
+      }
+      // 0 eşleşme: yol gerçekten hiçbir yerde yok → never_existed korunur.
+    }
+    out.push(v);
   }
   return out;
+}
+
+/** Bir yolun iki ref'e karşı hükmü. Sonek çözümlemesinde çözülmüş yolla TEKRAR
+ *  çağrılır — çözülen çapa normal akışın (exists/churn) tamamından geçsin diye. */
+async function filePathVerdict(
+  ctx: GitContext, anchor: Anchor, path: string, sinceIso: string,
+): Promise<AnchorVerdict> {
+  const head = await fileStateAt(ctx, "HEAD", path, sinceIso);
+  const origin = ctx.originRef !== null ? await fileStateAt(ctx, ctx.originRef, path, sinceIso) : null;
+  // Ölçülemeyen taraf hükme KATILMAZ: bir ref'te arıza, diğerinde başarılı
+  // ölçüm varsa hüküm ölçülenden çıkar. Aksi hâlde tek bir arıza, çalışan
+  // ölçümü de nötrleştirip gerçek çürümeyi kaçırırdı.
+  const measured = [head, origin].filter((s): s is FileState => s !== null && s.failure === undefined);
+  const worse = measured.length === 0
+    ? head // ikisi de ölçülemedi → unverifiable, arıza aşağıda taşınır
+    : measured.reduce((a, b) => (SEVERITY[b.state] > SEVERITY[a.state] ? b : a));
+  const commits = [head.commits, origin?.commits].filter((n): n is number => n !== undefined);
+  const failure = head.failure ?? origin?.failure;
+  return {
+    anchor,
+    state: worse.state,
+    ...(commits.length > 0 ? { commits: Math.max(...commits) } : {}),
+    // Uyuşmazlık ancak İKİ taraf da ölçülebildiyse anlamlı; biri arızalıysa
+    // "ok vs unverifiable" gibi yanıltıcı bir satır üretirdi.
+    ...(origin !== null && failure === undefined && origin.state !== head.state
+      ? { refDisagreement: { head: head.state, origin: origin.state } }
+      : {}),
+    ...(failure !== undefined ? { measurementFailed: failure } : {}),
+  };
 }
 
 export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): DriftScore {
@@ -148,6 +184,12 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
     // Arıza gerekçesi skordan BAĞIMSIZ yazılır (ağırlıklı durum olmadığı için
     // yukarıdaki daldan geçmez). Kullanıcı "git söyleyemedi" ile "dosya gitti"yi
     // ancak burada ayırabiliyor; sessiz kalırsa skor 0 "temiz" diye okunur.
+    // Çözümleme skordan bağımsız yazılır: çözülen çapa çoğunlukla `ok` çıkıyor
+    // (ağırlıksız dal) ve o hâlde HİÇ gerekçe üretmezdi — yani bir varsayım
+    // sessizce hükme girerdi. Kullanıcı hangi yolun ölçüldüğünü görmeli.
+    if (v.resolvedPath !== undefined) {
+      reasons.push(`${v.anchor.kind} ${v.anchor.value}: sonek çözümlendi → ${v.resolvedPath} (durum: ${v.state})`);
+    }
     if (v.measurementFailed !== undefined) {
       reasons.push(
         `${v.anchor.kind} ${v.anchor.value}: ölçülemedi — ${v.measurementFailed.command}` +

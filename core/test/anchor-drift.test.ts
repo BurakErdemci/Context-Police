@@ -112,6 +112,64 @@ test("checkAnchors: churn sayılır, var olan sha ok, olmayan sha unverifiable",
   assert.equal(sonra[0]!.commits, 0);
 });
 
+// --- sonek çözümlemesi (altın set §5.2) -------------------------------------
+// Ölçüm: 15 `never_existed` hükmünün 10'u repoda GERÇEKTEN duran dosyalardı;
+// not yolu kısa yazılmıştı (`./build_backend.sh` ↔ `Backend/build_backend.sh`).
+// İki `never_existed` 0,3+0,3 = 0,60 ile eşiğe tam oturuyor: ölçümün İKİ yanlış
+// alarmı da bu mekanizmadan çıktı. Kendi fikstürü var — üstteki repoya dosya
+// eklemek oradaki churn sayılarını sessizce kaydırırdı.
+
+let sufRepo: string;
+
+before(() => {
+  sufRepo = realpathSync(tmpDir("cp-suffix-"));
+  const git = (...a: string[]) => execFileSync("git", ["-C", sufRepo, ...a], { encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.email", "t@t"); git("config", "user.name", "t");
+  mkdirSync(join(sufRepo, "Backend"));
+  mkdirSync(join(sufRepo, "A")); mkdirSync(join(sufRepo, "B"));
+  writeFileSync(join(sufRepo, "Backend", "build_backend.sh"), "#!/bin/sh\necho 1\n");
+  writeFileSync(join(sufRepo, "A", "dup.ts"), "export const a = 1;\n");
+  writeFileSync(join(sufRepo, "B", "dup.ts"), "export const b = 1;\n");
+  git("add", "-A"); git("commit", "-qm", "ilk");
+  // Çözülen yolun churn'ü de gerçekten yeniden ölçülmeli: iki dokunuş daha,
+  // toplam 3 → `churned` sınırı.
+  for (const n of [2, 3]) {
+    writeFileSync(join(sufRepo, "Backend", "build_backend.sh"), `#!/bin/sh\necho ${n}\n`);
+    git("add", "-A"); git("commit", "-qm", `dokunuş ${n}`);
+  }
+});
+
+test("checkAnchors: tek eşleşen kısa yol çözülür ve akış çözülmüş yolla yeniden koşar", async () => {
+  const ctx = (await openGit(sufRepo, { fetch: false }))!;
+  const [v0] = await checkAnchors(ctx, [{ kind: "file_path", value: "./build_backend.sh" }], EPOCH);
+  // Eski davranış: never_existed (0,3). Yeni: gerçek dosya bulundu, churn ölçüldü.
+  assert.equal(v0!.state, "churned");
+  assert.equal(v0!.resolvedPath, "Backend/build_backend.sh");
+  assert.equal(v0!.commits, 3);
+  assert.equal(scoreDrift([v0!], false).score, 0.2); // never_existed'ın 0,3'ü değil
+});
+
+test("checkAnchors: çok eşleşme unverifiable, sıfır eşleşme gerçek never_existed", async () => {
+  const ctx = (await openGit(sufRepo, { fetch: false }))!;
+  const verdicts = await checkAnchors(ctx, [
+    { kind: "file_path", value: "dup.ts" },       // A/ ve B/ — hangisi kastedildi ölçülemez
+    { kind: "file_path", value: "yok/hic.ts" },   // gerçekten hiç yok
+  ], EPOCH);
+  assert.deepEqual(verdicts.map((x) => x.state), ["unverifiable", "never_existed"]);
+  assert.equal(verdicts[0]!.resolvedPath, undefined);
+  assert.equal(scoreDrift([verdicts[0]!], false).score, 0); // belirsizlik suçlama değil
+  assert.equal(scoreDrift([verdicts[1]!], false).score, 0.3);
+});
+
+test("checkAnchors: çözümleme silinmiş dosyayı never_existed'a çevirmez", async () => {
+  // missing_now (0,5) sonek yoluna hiç girmez: yalnız never_existed adayı ödüyor.
+  const ctx = (await openGit(repo, { fetch: false }))!;
+  const [v0] = await checkAnchors(ctx, [{ kind: "file_path", value: "src/b.ts" }], EPOCH);
+  assert.equal(v0!.state, "missing_now");
+  assert.equal(v0!.resolvedPath, undefined);
+});
+
 test("checkAnchors: origin ile çalışma ağacı çelişirse kötü hüküm kazanır (M0-D7 / D-M3-5)", async () => {
   // Klona yerel bir commit: dosya HEAD'de var, origin'de yok.
   const git = (...a: string[]) => execFileSync("git", ["-C", clone, ...a], { encoding: "utf8" }).trim();

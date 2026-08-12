@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpDir } from "./helpers.ts";
 import {
   openGit, fileExistsAt, fileEverExisted, commitsTouching, symbolExists, symbolEverExisted, commitExists,
+  filesMatchingSuffix,
 } from "../src/signals/git.ts";
 
 let repo: string;
@@ -97,6 +98,20 @@ test("originRef: ölçüm pin'i her adaydan önce gelir ve pin'li ref sorgulanab
   // gösterir — aynı olsalardı test pin'i ölçmüş olmazdı.
   assert.deepEqual(await symbolExists(ctx, firstSha, "eskiSembol"), yes);
   assert.deepEqual(await symbolExists(ctx, "HEAD", "eskiSembol"), no);
+});
+
+// Altın set §5.2: 15 `never_existed` hükmünün 10'u repoda GERÇEKTEN var olan
+// dosyaları gösteriyordu — not yolu kısa/göreli yazdığı için (`./build_backend.sh`
+// ↔ `Backend/build_backend.sh`). Sonek eşlemesi tam bu sınıfı çözer.
+test("filesMatchingSuffix: kısa yol sonekten çözülür, ./ öneki soyulur, glob kaçılır", async () => {
+  const ctx = (await openGit(repo, { fetch: false }))!;
+  assert.deepEqual(await filesMatchingSuffix(ctx, "a.ts"), { ok: true, value: ["src/a.ts"] });
+  assert.deepEqual(await filesMatchingSuffix(ctx, "./a.ts"), { ok: true, value: ["src/a.ts"] });
+  // Sonek TAM parça eşleşmesi: yarım ad eşleşmemeli.
+  assert.deepEqual(await filesMatchingSuffix(ctx, "hayalet.ts"), { ok: true, value: [] });
+  // Kaçış olmasaydı `a*.ts` glob'u `src/a.ts`'i yakalardı ve olmayan bir yolu
+  // var gibi gösterirdi — bu, sahte bir "çözüldü" hükmü demek.
+  assert.deepEqual(await filesMatchingSuffix(ctx, "a*.ts"), { ok: true, value: [] });
 });
 
 test("originRef: geçersiz pin aday listesine DÜŞMEZ, null döner", async () => {

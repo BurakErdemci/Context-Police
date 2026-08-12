@@ -163,6 +163,35 @@ export async function fileEverExisted(ctx: GitContext, path: string): Promise<Me
   return measure(`git log --diff-filter=A -- ${path}`, await git(ctx.repoRoot, args), (out) => out !== null && out !== "");
 }
 
+/**
+ * Çalışma ağacındaki İZLENEN dosyalar içinde sonek eşleşmesi arar.
+ *
+ * Neden var (altın set §5.2): elle yazılmış hafıza notları yolları kısa yazıyor
+ * (`./build_backend.sh`, `helpers/ipc-trust.ts`) ama üç git yardımcısı da yolu
+ * repo köküne çapalı LİTERAL pathspec olarak geçiriyor — eşleşmeyince hüküm
+ * `never_existed` oluyordu. Ölçüm: 15 `never_existed`'in 10'u tam bu sınıf, ve
+ * iki `never_existed` (0,3+0,3) eşiğe tam oturduğu için ölçümün İKİ yanlış
+ * alarmı da buradan çıktı. Maliyet yalnız `never_existed` adayı yolda ödenir:
+ * duran ya da silinmiş bir dosya bu ek süreci hiç görmez.
+ *
+ * Pathspec yıldız-eğik-yol biçiminde, yani eşleşme tam yol PARÇASI sınırında;
+ * `a.ts` soneki `src/a.ts`'i bulur, `xa.ts`'i bulmaz. Metnin
+ * içindeki glob karakterleri kaçılır: kaçmasaydı `a*.ts` yazan bir not repodaki
+ * `src/ab.ts`'e denk gelip OLMAYAN bir yolu "çözüldü" ilan ederdi — yani bir
+ * yanlış alarmı düzeltirken sessiz bir yanlış temizlik üretirdi.
+ */
+export async function filesMatchingSuffix(ctx: GitContext, path: string): Promise<Measured<string[]>> {
+  // `./` git tarafından zaten kökten çözülüyor; pathspec'e verilirse `*/./x`
+  // hiçbir şeyle eşleşmez.
+  const clean = path.replace(/^(?:\.\/)+/, "");
+  const pathspec = `*/${clean.replace(/[\\*?[\]]/g, (c) => `\\${c}`)}`;
+  // -z: yolda satır sonu ya da özel karakter varsa git aksi hâlde tırnaklı
+  // ("quoted") yazar ve dönen değer gerçek yol OLMAZ.
+  const r = await git(ctx.repoRoot, ["ls-files", "-z", "--", pathspec]);
+  return measure(`git ls-files -- ${pathspec}`, r, (out) =>
+    out === null ? [] : out.split("\0").filter((s) => s !== ""));
+}
+
 /** sinceIso'dan beri yola dokunan commit sayısı (churn — D-M3-4). */
 export async function commitsTouching(
   ctx: GitContext, ref: string, path: string, sinceIso: string,
