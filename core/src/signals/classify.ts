@@ -12,6 +12,49 @@ import { parseNote } from "../importer/parse.ts";
 import { DATA_FENCE_RULE, fenceUntrusted, neutralizeFence } from "../prompt-fence.ts";
 
 export const MAX_CLASSIFY_ITEMS = 20; // koşum başına; taşan sayı raporlanır
+
+/**
+ * Sınıflama bütçesinin yüzeylere dağılımı (MAX_CLASSIFY_ITEMS ölçeğinde).
+ *
+ * Ölçüm (altın set §5.3): `findCandidates` 69 aday üretti, kırpma sırasız bir
+ * `slice(0,20)` idi ve üretim sırası önce TÜM cross'ları verdiği için ilk 20'nin
+ * hepsi cross oldu. Atılan 49 adayın TAMAMI intra + frontmatter — yani M0-D3'ün
+ * saha örneği verdiği iki yüzey (not-içi çelişki, description ↔ gövde) sınıflamaya
+ * hiç girmedi ve onaylanan çelişki 0 çıktı. Sayılar: cross en çok aday üreten
+ * yüzey olduğu için en büyük payı alıyor, ama diğer ikisi artık garantili.
+ */
+export const CLASSIFY_SURFACE_QUOTA: Record<Candidate["kind"], number> = { cross: 8, intra: 6, frontmatter: 6 };
+
+/** Devir sırası: payını kullanmayan yüzeyin artığı bu sırayla dağıtılır. */
+const SURFACE_ORDER: readonly Candidate["kind"][] = ["cross", "intra", "frontmatter"];
+
+/**
+ * Bütçeyi yüzeylere bölerek aday seçer. İki tur: önce her yüzey kotası kadar
+ * alır, sonra kalan boşluk öncelik sırasıyla artıklardan dolar — kota bütçeyi
+ * KÜÇÜLTMEZ, yalnız tek bir yüzeyin hepsini yutmasını engeller.
+ * Çıktı, adayların özgün sırasını korur (kararlı prompt, kararlı index eşlemesi).
+ */
+export function selectCandidates(candidates: Candidate[], max: number): Candidate[] {
+  if (candidates.length <= max) return candidates;
+  // Kota MAX_CLASSIFY_ITEMS ölçeğinde tanımlı; farklı bir tavanla çağrılırsa
+  // (audit --max-classify-items) oranı korunur. En az 1: küçük bir tavanda bile
+  // hiçbir yüzey tümden kapanmasın.
+  const quota = (k: Candidate["kind"]) =>
+    Math.max(1, Math.floor((max * CLASSIFY_SURFACE_QUOTA[k]) / MAX_CLASSIFY_ITEMS));
+  const chosen = new Set<number>();
+  let budget = max;
+  const takeFrom = (kind: Candidate["kind"], limit: number) => {
+    let n = 0;
+    for (const [i, c] of candidates.entries()) {
+      if (budget === 0 || n === limit) break;
+      if (c.kind !== kind || chosen.has(i)) continue;
+      chosen.add(i); n++; budget--;
+    }
+  };
+  for (const kind of SURFACE_ORDER) takeFrom(kind, quota(kind));
+  for (const kind of SURFACE_ORDER) takeFrom(kind, Infinity);
+  return candidates.filter((_, i) => chosen.has(i));
+}
 const EXCERPT_CHARS = 1500;
 /**
  * Aday gerekçesi ("ortak çapa: <yol>") kanıt değil TEŞHİS: modelin kararı
@@ -153,7 +196,7 @@ export async function classifyCandidates(
   opts: { maxItems?: number } = {},
 ): Promise<ClassifyResult> {
   const max = opts.maxItems ?? MAX_CLASSIFY_ITEMS;
-  const taken = candidates.slice(0, max);
+  const taken = selectCandidates(candidates, max);
   const dropped = candidates.length - taken.length;
   if (taken.length === 0) return { ok: true, confirmed: [], kararsiz: 0, calls: 0, dropped };
 

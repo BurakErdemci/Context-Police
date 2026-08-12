@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildClassifyPrompt, parseClassifyOutput, classifyCandidates, MAX_CLASSIFY_ITEMS, CLASSIFY_OUTPUT_SCHEMA,
+  selectCandidates, CLASSIFY_SURFACE_QUOTA,
 } from "../src/signals/classify.ts";
 import { fakeExecutor } from "./helpers.ts";
 import type { Candidate, NoteView } from "../src/signals/contradiction.ts";
@@ -54,6 +55,55 @@ test("classifyCandidates: onaylanan çift döner, tavan üstü aday sayılır, t
   assert.deepEqual([r.confirmed[0]!.aId, r.confirmed[0]!.bId], [1, 2]);
   assert.equal(r.dropped, 3); // tavan üstü — sessiz değil
   assert.equal(fake.calls.length, 1);
+});
+
+// Altın set §5.3: `findCandidates` 69 aday üretti, `slice(0,20)` sırasız kırptı
+// ve aday üretim sırası önce tüm cross'ları verdiği için ilk 20'nin HEPSİ cross
+// oldu. Atılan 49 adayın TAMAMI intra + frontmatter — yani M0-D3'ün saha örneği
+// verdiği iki yüzey sınıflamaya hiç girmedi. Onaylanan çelişki: 0.
+test("selectCandidates: bütçe yüzeylere bölünür, cross seli diğer ikisini yutamaz", () => {
+  const many = [
+    ...Array.from({ length: 31 }, () => cand(1, 2, "cross")),
+    ...Array.from({ length: 10 }, () => cand(1, null, "intra")),
+    ...Array.from({ length: 28 }, () => cand(1, null, "frontmatter")),
+  ];
+  const taken = selectCandidates(many, MAX_CLASSIFY_ITEMS);
+  const count = (k: Candidate["kind"]) => taken.filter((c) => c.kind === k).length;
+  assert.equal(taken.length, MAX_CLASSIFY_ITEMS);
+  assert.equal(count("cross"), CLASSIFY_SURFACE_QUOTA.cross);
+  assert.equal(count("intra"), CLASSIFY_SURFACE_QUOTA.intra);
+  assert.equal(count("frontmatter"), CLASSIFY_SURFACE_QUOTA.frontmatter);
+});
+
+test("selectCandidates: kullanılmayan pay öncelik sırasıyla devredilir, bütçe boşa gitmez", () => {
+  // intra yalnız 1 aday üretiyor: kalan 5 payı cross → frontmatter sırasıyla alır.
+  const many = [
+    ...Array.from({ length: 30 }, () => cand(1, 2, "cross")),
+    cand(1, null, "intra"),
+    ...Array.from({ length: 3 }, () => cand(1, null, "frontmatter")),
+  ];
+  const taken = selectCandidates(many, MAX_CLASSIFY_ITEMS);
+  const count = (k: Candidate["kind"]) => taken.filter((c) => c.kind === k).length;
+  assert.equal(taken.length, MAX_CLASSIFY_ITEMS);
+  assert.equal(count("intra"), 1);
+  assert.equal(count("frontmatter"), 3); // hepsi girdi
+  assert.equal(count("cross"), MAX_CLASSIFY_ITEMS - 4);
+  // Tavanın altında kalan liste hiç kırpılmaz.
+  assert.equal(selectCandidates([cand(1, 2), cand(2, null, "intra")], MAX_CLASSIFY_ITEMS).length, 2);
+});
+
+test("classifyCandidates: kota atlanan adayı sessizleştirmez, dropped doğru kalır", async () => {
+  const notes = new Map([[1, note(1, "A doğru")], [2, note(2, "A yanlış")]]);
+  const many = [
+    ...Array.from({ length: 25 }, () => cand(1, 2, "cross")),
+    ...Array.from({ length: 5 }, () => cand(1, null, "intra")),
+  ];
+  const fake = fakeExecutor([{ output: '{"verdicts":[]}' }]);
+  const r = await classifyCandidates(fake, many, notes);
+  assert.equal(r.ok, true);
+  assert.equal(r.dropped, 30 - MAX_CLASSIFY_ITEMS);
+  // intra adaylarının hepsi prompt'a girmiş olmalı (eski davranışta HİÇBİRİ girmiyordu).
+  assert.equal((fake.calls[0]!.prompt.match(/\[not-içi\]/g) ?? []).length, 5);
 });
 
 test("bozuk JSON'da bir düzeltme turu, yine bozuksa ok=false (spec §3.7)", async () => {
