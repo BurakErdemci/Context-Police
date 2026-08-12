@@ -203,7 +203,15 @@ async function cmdScan(): Promise<void> {
   const store = openStore(storePath);
   try {
     const started = Date.now();
-    const sum = await scanOnce(store, { adapter: claudeCodeAdapter, root: arg("dir") });
+    // Sinyal kancası `audit` ve `observe --session` ile AYNI: ölçüldü
+    // (probe: scan-sigterm-leaves-lock) yalnız bu yol eksikti ve SIGTERM kilidi
+    // asılı bırakıyordu. Sıra da aynı: önce kilit, sonra depo — kapanmış bir
+    // bağlantıya yazmaya çalışan bir atış zamanlayıcısı kalmasın.
+    const sum = await scanOnce(store, {
+      adapter: claudeCodeAdapter,
+      root: arg("dir"),
+      onLock: (lock) => onInterrupt(() => { lock.release(); store.close(); }),
+    });
     const secs = ((Date.now() - started) / 1000).toFixed(1);
 
     console.log(`depo: ${storePath}`);
@@ -292,6 +300,10 @@ async function cmdObserve(): Promise<void> {
         await scanOnce(store, {
           adapter: claudeCodeAdapter,
           root: arg("dir"),
+          // AYNI EKSİKLİK BURADAYDI: `observe --session` kancayı kuruyordu ama
+          // `observe`un tam-tarama dalı kilidi scanOnce'ın içinde alıyor,
+          // dolayısıyla o da sinyalde kilidi asılı bırakıyordu.
+          onLock: (lock) => onInterrupt(() => { lock.release(); store.close(); }),
           only: arg("project") ? [arg("project")!] : undefined,
           onTurns: budgetGuardedOnTurns(
             () => observer.stats.budgetExhausted,

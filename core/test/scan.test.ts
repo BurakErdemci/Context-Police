@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdirSync, truncateSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { openStore } from "../src/store/db.ts";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.ts";
@@ -152,4 +154,74 @@ test("--batch-tokens doğrulaması: tam sayı ve ≥500 (üst sınır: audit-m2-
   assert.throws(() => validateBatchTokens(""), /geçersiz --batch-tokens/);
   assert.throws(() => validateBatchTokens("8000.5"), /geçersiz --batch-tokens/);
   assert.throws(() => validateBatchTokens("Infinity"), /geçersiz --batch-tokens/);
+});
+
+// --- kilit tanıtıcısının dışarı verilmesi (sinyal temizliği) -----------------
+
+test("scanOnce kilit tanıtıcısını dışarı verir ve iş bitince kancayı söker", async () => {
+  // Kilit taramanın İÇİNDE alınıyor, dolayısıyla CLI onu kendi sinyal
+  // kancasına bağlayamıyordu; `observe --session` ve `audit` bağlayabildiği
+  // için yalnız `scan` yolu SIGTERM'de kilidi asılı bırakıyordu. Dikiş burada.
+  const { root } = fakeRoot();
+  const store = openStore(":memory:");
+  let tutuluyken: string | undefined;
+  let sokuldu = false;
+  await scanOnce(store, {
+    adapter: claudeCodeAdapter,
+    root,
+    onLock: (lock) => {
+      tutuluyken = lock.holder;
+      // Kanca gerçekten kilit ALINDIKTAN sonra kuruluyor mu: satır ortada olmalı.
+      assert.ok(store.get("SELECT holder FROM scan_lock WHERE id = 1"));
+      return () => { sokuldu = true; };
+    },
+  });
+  assert.ok(tutuluyken, "kilit tanıtıcısı hiç verilmedi");
+  assert.ok(sokuldu, "sökme fonksiyonu çağrılmadı: kanca listesi koşumdan koşuma birikirdi");
+  store.close();
+});
+
+test("scan: SIGTERM kilidi asılı bırakmaz", async () => {
+  // Ölçüldü (probe: scan-sigterm-leaves-lock): `process.exit()` finally'leri
+  // koşturmuyor, dolayısıyla kilit satırı diskte kalıyor ve sonraki koşum
+  // bayatlama süresi (10 dk) boyunca ScanLockBusy alıyordu.
+  const root = tmpDir();
+  const dir = join(root, "-tmp-uzun-tarama");
+  mkdirSync(dir, { recursive: true });
+  const dosya = join(dir, "sess-uzun.jsonl");
+  writeFileSync(dosya, "");
+  // SEYREK 1 GB: diskte yer kaplamıyor ama taramayı sinyal atacak kadar
+  // (ölçüldü: ~400 MB/sn, yani ~2,5 sn) ayakta tutuyor. Sabit bir uyku yerine
+  // gerçek iş: testin beklediği şey tam da "iş sürerken sinyal".
+  truncateSync(dosya, 1024 * 1024 * 1024);
+  const storePath = join(root, "store.db");
+
+  const child = spawn(process.execPath,
+    ["--disable-warning=ExperimentalWarning", join(import.meta.dirname, "..", "src", "cli.ts"),
+      "scan", "--dir", root, "--store", storePath],
+    { stdio: "ignore" });
+  const bitti = new Promise<number | null>((res) => child.on("exit", (c) => res(c)));
+
+  const kilitVar = (): boolean => {
+    if (!existsSync(storePath)) return false;
+    try {
+      const db = new DatabaseSync(storePath, { readOnly: true });
+      const row = db.prepare("SELECT holder FROM scan_lock WHERE id = 1").get();
+      db.close();
+      return row !== undefined;
+    } catch {
+      return false; // depo henüz kurulmadı ya da yazılıyor
+    }
+  };
+  let alindi = false;
+  for (let i = 0; i < 250 && !alindi; i++) {
+    alindi = kilitVar();
+    if (!alindi) await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(alindi, "tarama kilidi hiç görülmedi: senaryo kurulmadı (sinyal erken atılırdı)");
+
+  child.kill("SIGTERM");
+  assert.equal(await bitti, 143, "SIGTERM kabuk sözleşmesiyle 128+15 dönmeli");
+  assert.equal(kilitVar(), false,
+    "scan SIGTERM'de kilidi asılı bıraktı: sonraki koşum 10 dakika ScanLockBusy alır");
 });

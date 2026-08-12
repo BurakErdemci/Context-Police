@@ -11,7 +11,7 @@ import { upsertProject, getCursor, getCursorByInode, setCursor, markScanned } fr
 import { logEvent } from "./store/events.ts";
 import { readIncremental } from "./adapters/claude-code.ts";
 import { BudgetHalt } from "./observe-cmd.ts";
-import { withScanLock } from "./store/lock.ts";
+import { withScanLock, type ScanLockHandle } from "./store/lock.ts";
 import { realpath, stat } from "node:fs/promises";
 
 /**
@@ -85,13 +85,37 @@ export interface ScanOptions {
   }) => void | Promise<void>;
   /** Kilit sahibi kimliği; testlerde iki taramayı ayırt etmek için. */
   lockHolder?: string;
+  /**
+   * Kilit ALINDIKTAN sonra, iş başlamadan önce çağrılır; dönen fonksiyon iş
+   * bitince (hata dâhil) koşar.
+   *
+   * Var olma sebebi ölçüldü (probe: scan-sigterm-leaves-lock): kilit taramanın
+   * İÇİNDE alınıyor, dolayısıyla CLI onu kendi SIGINT/SIGTERM kancasına
+   * bağlayamıyordu — `observe --session` ve `audit` bağlayabildiği için yalnız
+   * `scan` yolu sinyalde kilidi asılı bırakıyordu. Kancanın KENDİSİ burada
+   * kurulmuyor: sinyal makinesi CLI'ın işi, tarama yalnız tutamağı uzatıyor.
+   */
+  onLock?: (lock: ScanLockHandle) => () => void;
 }
 
 export async function scanOnce(store: Store, opts: ScanOptions): Promise<ScanSummary> {
   // Kilit taramanın TAMAMINI kapsar: imleci okuyup işleyip yazmak tek bir
   // mantıksal birim ve iki tarama arasında bölünmemeli. Kalp atışı da bu süre
   // boyunca sürer — sarmalayıcının işi.
-  return await withScanLock(store, () => scanAll(store, opts), { holder: opts.lockHolder });
+  return await withScanLock(
+    store,
+    async (lock) => {
+      // Sökme `finally`de: kanca listesi süreç ömrü boyunca yaşıyor, bırakılan
+      // her giriş kapanmış bir kilide dokunmaya çalışan ölü bir kayıt olurdu.
+      const off = opts.onLock?.(lock);
+      try {
+        return await scanAll(store, opts);
+      } finally {
+        off?.();
+      }
+    },
+    { holder: opts.lockHolder },
+  );
 }
 
 async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
