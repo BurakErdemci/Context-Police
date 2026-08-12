@@ -43,6 +43,25 @@ export function defaultStorePath(): string {
 function migrate(db: DatabaseSync): void {
   migrateCursors(db);
   migrateWatermarks(db);
+  migrateScanLock(db);
+}
+
+/**
+ * Kilit kimliği PID'den kalp atışına geçti (lock.ts). Var olan depolarda
+ * `scan_lock` sütunu eksik ve `CREATE TABLE IF NOT EXISTS` onu eklemiyor —
+ * sütunsuz bir depoda her `INSERT INTO scan_lock (... heartbeat_at ...)` "no
+ * such column" ile patlar, yani kilit HİÇ alınamaz ve tarama da denetim de
+ * tümden durur.
+ *
+ * Tek ifade: `inTransaction` sarmalayıcısına gerek yok, ALTER ya olur ya olmaz;
+ * yarım kalabilecek ikinci bir adım yok.
+ */
+function migrateScanLock(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(scan_lock)").all() as { name: string }[];
+  if (cols.length === 0) return; // tablo yok: şema henüz koşmamış
+  if (!cols.some((c) => c.name === "heartbeat_at")) {
+    db.exec("ALTER TABLE scan_lock ADD COLUMN heartbeat_at TEXT");
+  }
 }
 
 /**

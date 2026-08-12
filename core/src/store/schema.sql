@@ -83,12 +83,17 @@ CREATE TABLE IF NOT EXISTS observer_watermarks (
 );
 
 -- Aynı anda iki tarama aynı imleci okuyup aynı aralığı iki kez teslim
--- edebiliyordu (denetim bulgusu). Tek satırlık kilit; sahibi ölürse
--- bayatlama süresiyle devralınır.
+-- edebiliyordu (denetim bulgusu). Tek satırlık kilit; sahibi kalp atışını
+-- tazelemeyi bırakırsa devralınır (bkz. lock.ts).
+--
+-- `heartbeat_at` NULLABLE, çünkü göç yolunda eski satırlarda yok. NULL =
+-- "hiç atış görmedik" ve tazelik ölçümü `acquired_at`'e düşer; kilidi bu
+-- kuşaktan bir yazıcı yazmışsa zaten çoktan bayatlamıştır.
 CREATE TABLE IF NOT EXISTS scan_lock (
-  id         INTEGER PRIMARY KEY CHECK (id = 1),
-  holder     TEXT NOT NULL,
-  acquired_at TEXT NOT NULL
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  holder       TEXT NOT NULL,
+  acquired_at  TEXT NOT NULL,
+  heartbeat_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS findings (
