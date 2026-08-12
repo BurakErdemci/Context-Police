@@ -443,18 +443,26 @@ export function openStore(path: string): Store {
   // pragma: ölçülen sürümde (node 24.10) ikisi de çalışıyor, pragma sürümden
   // bağımsız.
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  if (!enableWal(db)) {
-    // Sessiz düşüş yok: WAL'sız çalışmak doğru ama daha az eşzamanlı.
-    console.warn(`uyarı: ${path} WAL kipine alınamadı (başka bir yazıcı bağlı); rollback journal ile devam ediliyor.`);
-  }
 
-  // KUŞAK KONTROLÜ HER ŞEYDEN ÖNCE: bizden yeni bir depoya kurtarma, şema ve
-  // göç koşturmak, tanımadığımız bir şemayı kendi varsayımlarımıza göre yeniden
-  // yazmak demek. Reddetmek dokunmaktan ucuz.
+  // KUŞAK KONTROLÜ, DOSYAYI DEĞİŞTİREN HER ŞEYDEN ÖNCE. Sıra kritik ve ölçüldü
+  // (doğrulama turu, `future-schema-mutated-before-rejection`): kontrol
+  // `enableWal`den SONRA koşarken, reddedilen deponun KALICI `journal_mode`
+  // ayarı DELETE→WAL oluyordu. Yani "daha yeni depoyu dosyaya dokunmadan
+  // reddediyoruz" iddiası yanlıştı. Sonucu hafif — ama tanımadığımız bir şemaya
+  // dokunmama sözü, hafif dokunuşlar için de geçerli olmak zorunda; yanlış
+  // gerekçe, gerekçesizlikten kötüdür.
+  //
+  // `busy_timeout` ve `PRAGMA user_version` okuması bu kuralın DIŞINDA değil:
+  // ikisi de bağlantı-yerel/salt-okuma, dosyaya tek bayt yazmıyorlar.
   const generation = readGeneration(db);
   if (generation > SCHEMA_GENERATION) {
     db.close();
     throw new StoreGenerationTooNew(path, generation);
+  }
+
+  if (!enableWal(db)) {
+    // Sessiz düşüş yok: WAL'sız çalışmak doğru ama daha az eşzamanlı.
+    console.warn(`uyarı: ${path} WAL kipine alınamadı (başka bir yazıcı bağlı); rollback journal ile devam ediliyor.`);
   }
 
   // Şemadan ÖNCE: yarıda kesilmiş bir göçün ara tablosu ortadaysa schema.sql
