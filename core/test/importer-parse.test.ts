@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseNote, extractAnchors, noteTimestamp, MAX_ANCHORS_PER_NOTE, PER_KIND_QUOTA,
+  parseNote, extractAnchors, noteTimestamp, capNoteContent,
+  MAX_ANCHORS_PER_NOTE, PER_KIND_QUOTA, MAX_NOTE_CHARS,
 } from "../src/importer/parse.ts";
 
 test("parseNote: frontmatter düz alanları okur, gövdeyi ayırır; frontmatter'sız dosya tamamen gövde", () => {
@@ -112,7 +113,8 @@ test("parseNote: metadata altındaki girintili alanlar okunur, üst seviye kazan
   assert.equal(p.frontmatter.node_type, "memory");
   assert.equal(p.frontmatter.metadata, undefined); // eşleme başlığı hâlâ değer değil
   assert.equal(p.body.trim(), "gövde");
-  assert.equal(noteTimestamp(p.frontmatter, "2026-01-01T00:00:00Z"), "2026-08-11T21:57:39.156Z");
+  // Geri düşüş burada TAVAN da olduğu için (kelepçe) notun tarihinden sonrası seçildi.
+  assert.equal(noteTimestamp(p.frontmatter, "2026-08-12T00:00:00Z").iso, "2026-08-11T21:57:39.156Z");
 
   // Çakışmada üst seviye kazanır: girintili alan onu EZEMEZ.
   const cakisma = parseNote("---\nmodified: 2026-01-02T00:00:00Z\nmetadata:\n  modified: 2020-01-01T00:00:00Z\n---\nx");
@@ -120,13 +122,19 @@ test("parseNote: metadata altındaki girintili alanlar okunur, üst seviye kazan
 });
 
 test("noteTimestamp: frontmatter modified > created > geri düşüş, geçerli tarih ISO'ya normalize edilir", () => {
-  assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00.000Z" }, "2026-08-11T00:00:00Z"), "2026-08-01T10:00:00.000Z");
-  assert.equal(noteTimestamp({}, "2026-08-11T00:00:00Z"), "2026-08-11T00:00:00Z");
-  assert.equal(noteTimestamp({ modified: "bozuk-tarih" }, "F"), "F"); // ayrıştırılamayan → geri düşüş
+  const now = "2026-08-11T00:00:00Z";
+  assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00.000Z" }, now).iso, "2026-08-01T10:00:00.000Z");
+  assert.equal(noteTimestamp({}, now).iso, now);
+  assert.equal(noteTimestamp({ modified: "bozuk-tarih" }, now).iso, now); // ayrıştırılamayan → geri düşüş
   // ISO olmayan ama ayrıştırılabilir giriş. Saat dilimi GMT olarak yazıldı: dilimsiz
   // yazılsaydı beklenen değer testi koşturan makinenin diliminden değişirdi.
-  assert.equal(noteTimestamp({ created: "11 Aug 2026 00:00:00 GMT" }, "F"), "2026-08-11T00:00:00.000Z");
-  assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00Z" }, "F"), "2026-08-01T10:00:00.000Z");
+  assert.equal(noteTimestamp({ created: "11 Aug 2026 00:00:00 GMT" }, "2026-08-20T00:00:00Z").iso,
+    "2026-08-11T00:00:00.000Z");
+  assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00Z" }, now).iso, "2026-08-01T10:00:00.000Z");
+  // Geri düşüş değeri ayrıştırılamıyorsa TAVAN da yok: uydurma bir pencere
+  // dayatmak yerine notun değeri olduğu gibi kullanılır (çağıranın hatası,
+  // sessizce yanlış ölçüm değil).
+  assert.equal(noteTimestamp({ modified: "2099-01-01T00:00:00Z" }, "F").iso, "2099-01-01T00:00:00.000Z");
 });
 
 // Denetim: imported-flag-anchor. `--output/tmp/audit.txt` gibi bir token yol
@@ -148,4 +156,105 @@ test("extractAnchors: meşru yollar tire kuralından etkilenmez", () => {
   assert.deepEqual(anchors.map((a) => a.value), [
     "core/src/scan.ts", "docs/x.md", "src/my-mod/a-b.ts", "~/.gemini/settings.json", "/tmp/-tuhaf/ad.txt",
   ]);
+});
+
+// ─── Dalga B: güvenilmez girdi (denetim 12 Ağu 2026) ──────────────────────────
+
+test("noteTimestamp: gelecekteki damga içe aktarma anına kelepçelenir (untrusted-audit-window)", () => {
+  // Probe terfisi: future-modified-suppresses-churn.sh. Not kendi denetim
+  // penceresini kapatabiliyordu — `modified: 2099` `--since` sınırını bugünün
+  // ötesine iterek churn'ü sıfırlıyor, aynı çapa `churned`/0,2 yerine `ok`/0
+  // veriyordu.
+  const now = "2026-08-12T00:00:00.000Z";
+  const r = noteTimestamp({ modified: "2099-01-01T00:00:00Z" }, now);
+  assert.equal(r.iso, now, "gelecek damga kelepçelenmedi");
+  assert.deepEqual(r.clamped, { field: "modified", value: "2099-01-01T00:00:00Z" });
+
+  // SINIF KAPANIŞI — orijinal repro yalnız `modified` kullanıyordu; diğer iki
+  // alan da aynı yoldan geçiyor.
+  assert.equal(noteTimestamp({ created: "2099-01-01T00:00:00Z" }, now).iso, now);
+  assert.equal(noteTimestamp({ created: "2099-01-01T00:00:00Z" }, now).clamped?.field, "created");
+  assert.equal(noteTimestamp({ date: "3000-05-05" }, now).iso, now);
+  assert.equal(noteTimestamp({ date: "3000-05-05" }, now).clamped?.field, "date");
+  // ISO olmayan ama ayrıştırılabilir gelecek yazımı da kelepçelenir.
+  assert.equal(noteTimestamp({ modified: "1 Jan 2099 00:00:00 GMT" }, now).iso, now);
+
+  // Geçmiş damga MEŞRU: eski not gerçekten eskidir ve geniş pencere denetimi
+  // sıkılaştırır. Kelepçe onu bozmamalı.
+  const gecmis = noteTimestamp({ modified: "2020-03-04T05:06:07Z" }, now);
+  assert.equal(gecmis.iso, "2020-03-04T05:06:07.000Z");
+  assert.equal(gecmis.clamped, undefined);
+  // Sınır: tam import anı gelecek DEĞİL, kelepçelenmez.
+  assert.equal(noteTimestamp({ modified: now }, now).clamped, undefined);
+});
+
+test("noteTimestamp: ayrıştırılamayan damga sessizce atlanmaz, hangi alan olduğu bildirilir", () => {
+  const now = "2026-08-12T00:00:00.000Z";
+  const r = noteTimestamp({ modified: "bozuk-tarih", created: "2026-01-01T00:00:00Z" }, now);
+  assert.equal(r.iso, "2026-01-01T00:00:00.000Z"); // bir sonraki alana geçiş korunuyor
+  assert.deepEqual(r.unparsable, [{ field: "modified", value: "bozuk-tarih" }]);
+  // Yankılanan değer kırpılır: olay günlüğü 256 KiB'lık bir frontmatter değerini taşımamalı.
+  const uzun = noteTimestamp({ modified: "x".repeat(5000) }, now);
+  assert.equal(uzun.unparsable![0]!.value.length, 201); // 200 + "…"
+});
+
+test("parseNote: girintili alan yalnız `metadata:` altında kabul edilir (frontmatter-scope-confusion)", () => {
+  // Probe terfisi: nested-frontmatter-parent.sh. Girintili `key: value` satırları
+  // EBEVEYNE bakılmadan tek düz haritaya toplanıyordu; `presentation:` altındaki
+  // `modified:` gerçek denetim damgası sanılıyordu.
+  const p = parseNote("---\npresentation:\n  modified: 2099-01-01T00:00:00Z\n---\nDURUM: eski\n");
+  assert.equal(p.frontmatter.modified, undefined, "yabancı ebeveyn altındaki alan sızdı");
+  assert.equal(noteTimestamp(p.frontmatter, "2026-08-12T00:00:00.000Z").iso, "2026-08-12T00:00:00.000Z");
+
+  // SINIF KAPANIŞI — farklı ebeveyn adları, aynı hüküm.
+  for (const parent of ["frontmatter", "display", "Metadata", "meta"]) {
+    const q = parseNote(`---\n${parent}:\n  modified: 2099-01-01T00:00:00Z\n---\nx`);
+    assert.equal(q.frontmatter.modified, undefined, `${parent} altındaki alan sızdı`);
+  }
+  // metadata GEÇERLİ ebeveyn olmaya devam ediyor (altın set §5.4 ölçümü).
+  assert.equal(
+    parseNote("---\nmetadata:\n  modified: 2026-08-11T21:57:39.156Z\n---\nx").frontmatter.modified,
+    "2026-08-11T21:57:39.156Z",
+  );
+  // Dolu değerli bir üst seviye anahtar başlık DEĞİL: altındaki girinti kapsam dışı.
+  assert.equal(parseNote("---\nmetadata: v\n  modified: 2099-01-01T00:00:00Z\n---\nx").frontmatter.modified, undefined);
+  // Başlık bağlamı boş satırla bozulmaz.
+  assert.equal(parseNote("---\nmetadata:\n\n  modified: 2026-01-01T00:00:00Z\n---\nx").frontmatter.modified,
+    "2026-01-01T00:00:00Z");
+  // metadata kapandıktan SONRA gelen başka başlık altındaki alan alınmaz.
+  assert.equal(
+    parseNote("---\nmetadata:\n  a: 1\nother:\n  modified: 2099-01-01T00:00:00Z\n---\nx").frontmatter.modified,
+    undefined,
+  );
+});
+
+test("parseNote: BOŞ değerli üst seviye anahtar girintili namesake ile ezilemez", () => {
+  // Yorumdaki "üst seviye her zaman kazanır" iddiası bu durumda YANLIŞTI: değeri
+  // boş olan üst seviye anahtar haritaya hiç yazılmadığı için `metadata` altındaki
+  // aynı adlı alan onu ezebiliyordu.
+  const p = parseNote("---\nmodified:\nmetadata:\n  modified: 2099-01-01T00:00:00Z\n---\nx");
+  assert.equal(p.frontmatter.modified, undefined, "boş üst seviye anahtar girintiliyle ezildi");
+  // Dolu üst seviye anahtar da kazanmaya devam ediyor (mevcut sözleşme).
+  assert.equal(
+    parseNote("---\nmodified: 2026-01-02T00:00:00Z\nmetadata:\n  modified: 2020-01-01T00:00:00Z\n---\nx")
+      .frontmatter.modified,
+    "2026-01-02T00:00:00Z",
+  );
+});
+
+test("capNoteContent: tavan üstü not kırpılır, kırpma sayılır, vekil çifti bölünmez", () => {
+  const kucuk = "a".repeat(1000);
+  assert.deepEqual(capNoteContent(kucuk), { content: kucuk, truncated: 0 });
+
+  const buyuk = "a".repeat(MAX_NOTE_CHARS + 500);
+  const r = capNoteContent(buyuk);
+  assert.equal(r.content.length, MAX_NOTE_CHARS);
+  assert.equal(r.truncated, 500);
+
+  // Kesim noktasına tam bir vekil çifti oturt: yüksek vekil son karakter olursa
+  // geriye tek başına kalır ve UTF-8'e kodlanamaz.
+  const bolen = "a".repeat(MAX_NOTE_CHARS - 1) + "😀" + "b".repeat(10);
+  const s = capNoteContent(bolen);
+  assert.equal(s.content.length, MAX_NOTE_CHARS - 1, "yalnız kalan yüksek vekil kırpılmadı");
+  assert.equal(Buffer.from(s.content, "utf8").toString("utf8"), s.content);
 });

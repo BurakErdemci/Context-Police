@@ -6,13 +6,28 @@ import type { Anchor } from "../types.ts";
 
 export interface ParsedNote {
   /**
-   * Düz string alanlar + `metadata:` gibi bir eşleme başlığı altındaki TEK
-   * seviye (2 boşluk) girintili alanlar, tek düzleme haritada. Üst seviye
-   * çakışmada kazanır.
+   * Düz string alanlar + `metadata:` başlığı altındaki TEK seviye (2 boşluk)
+   * girintili alanlar, tek düzleme haritada. Üst seviyede AYNI ADLA bir anahtar
+   * VARSA — değeri boş olsa bile — girintili namesake onu ezemez.
    */
   frontmatter: Record<string, string>;
   body: string;
 }
+
+/**
+ * Girintili alanların düzleme haritaya alındığı TEK ebeveyn.
+ *
+ * Denetim (frontmatter-scope-confusion): eskiden girintili her `key: value`
+ * ebeveynine BAKILMADAN toplanıyordu, yani `presentation:` ya da herhangi bir
+ * başka başlık altındaki `modified:` gerçek denetim damgası sanılıyordu. Notu
+ * yazan (kullanıcı ya da başka bir AI ajanı) böylece denetim penceresini
+ * frontmatter'ın istediği köşesinden sürebiliyordu.
+ *
+ * Beyaz liste NEDEN tek isim: ölçülen ihtiyaç tek (altın set §5.4 — gerçek
+ * Claude Code not biçiminde `modified` alanı `metadata:` altında duruyor).
+ * Yeni bir ebeveyn ancak yeni bir ölçümle eklenir.
+ */
+const NESTED_PARENT = "metadata";
 
 export function parseNote(raw: string): ParsedNote {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
@@ -22,11 +37,25 @@ export function parseNote(raw: string): ParsedNote {
   // aynı adı taşıyorsa o kazanmalı, yoksa `metadata.modified` gerçek `modified`
   // alanını ezebilirdi.
   const nested: Record<string, string> = {};
+  /**
+   * Üst seviyede GÖRÜLEN anahtarlar — `fm`den ayrı tutulur çünkü değeri boş olan
+   * anahtar (`modified:` + boş) `fm`e hiç yazılmıyor. Ayrım olmadan, girintili
+   * namesake boş bırakılmış bir üst seviye alanı EZİYORDU; yani yukarıdaki
+   * "üst seviye kazanır" sözleşmesi tam da saldırganın kolayca kurabileceği
+   * durumda çöküyordu (`modified:` boş + `metadata: modified: 2099`).
+   */
+  const topLevelKeys = new Set<string>();
+  /** İçinde bulunulan eşleme başlığı; null = girintili alan beklenmiyor. */
+  let parent: string | null = null;
   const unquote = (v: string) => v.replace(/^["']|["']$/g, "");
   for (const line of m[1]!.split(/\r?\n/)) {
     const kv = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
     if (kv !== null) {
+      topLevelKeys.add(kv[1]!);
       if (kv[2] !== "") fm[kv[1]!] = unquote(kv[2]!);
+      // Değeri BOŞ olan üst seviye anahtar bir eşleme başlığı adayıdır; değeri
+      // dolu olan skalerdir ve altında girintili alan beklenmez.
+      parent = kv[2] === "" ? kv[1]! : null;
       continue;
     }
     // Tam YAML ayrıştırıcı hâlâ YOK (K12: bağımlılık yasak) — yalnız tek seviye
@@ -36,24 +65,128 @@ export function parseNote(raw: string): ParsedNote {
     // penceresi tümden kullanılamaz oldu. İç içe listeler ve daha derin
     // girintiler bilerek kapsam dışı: ihtiyaç modified/created/date ile sınırlı.
     const sub = /^ {2}([A-Za-z_][\w-]*):\s*(.+)$/.exec(line);
-    if (sub !== null && nested[sub[1]!] === undefined) nested[sub[1]!] = unquote(sub[2]!);
+    if (sub !== null && parent === NESTED_PARENT && nested[sub[1]!] === undefined)
+      nested[sub[1]!] = unquote(sub[2]!);
+    // Eşleşmeyen satır (boş satır, liste öğesi, daha derin girinti) başlık
+    // bağlamını BOZMAZ: `metadata:` altındaki bir boş satır sonraki alanı
+    // kapsam dışına atmamalı.
   }
-  for (const [k, v] of Object.entries(nested)) if (fm[k] === undefined) fm[k] = v;
+  for (const [k, v] of Object.entries(nested)) if (!topLevelKeys.has(k)) fm[k] = v;
   return { frontmatter: fm, body: raw.slice(m[0].length) };
 }
 
-/** Frontmatter'daki not tarihini seçer; churn penceresi buradan başlar (Görev 7). */
-export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): string {
+/**
+ * Olaya/hükme yazılırken bir frontmatter değerinden yankılanan azami karakter.
+ * Değer güvenilmeyen metin ve tavanı yok (256 KiB'lık tek satırlık bir `modified`
+ * meşru bir dosyada bile mümkün); olay günlüğü onu ham taşımamalı.
+ */
+const VALUE_ECHO_MAX = 200;
+
+export interface NoteTimestamp {
+  /** Kullanılacak ISO damga; churn penceresi (Görev 7) buradan başlar. */
+  iso: string;
+  /**
+   * Damga içe aktarma anına KELEPÇELENDİ: notun verdiği değer gelecekteydi.
+   * Dolu olması sessiz bir düzeltme değil, çağıranın olaya yazması gereken bir
+   * olgudur.
+   */
+  clamped?: { field: string; value: string };
+  /** `Date.parse` çözemedi, alan atlandı — hangi alan hangi değerle. */
+  unparsable?: { field: string; value: string }[];
+}
+
+const echo = (v: string) => (v.length > VALUE_ECHO_MAX ? v.slice(0, VALUE_ECHO_MAX) + "…" : v);
+
+/**
+ * Frontmatter'daki not tarihini seçer; churn penceresi buradan başlar (Görev 7).
+ *
+ * `fallbackIso` iki iş yapar: alan yoksa GERİ DÜŞÜŞ, alan varsa TAVAN. Çağıran
+ * onu içe aktarma anı olarak verir (`nowIso()`), yani tavan "şimdi"dir.
+ *
+ * KELEPÇE — denetim: untrusted-audit-window (BLOCKER). Damga notun kendi
+ * metninden geliyor, yani kullanıcının ya da başka bir AI ajanının yazdığı
+ * güvenilmeyen veriden; ve `createdAt` olarak saklanıp git'in `--since` sınırı
+ * oluyor. Ölçüldü (probe: future-modified-suppresses-churn): aynı çapa geri
+ * düşüş tarihiyle `churned`/0,2 verirken `modified: 2099-01-01` ile `ok`/0
+ * veriyordu — denetlenen not kendi denetim penceresini kapatıyordu.
+ *
+ * Neden yalnız GELECEK kelepçeleniyor: geçmiş damga meşru (eski not gerçekten
+ * eskidir ve geniş pencere denetimi SIKILAŞTIRIR, gevşetmez); gelecek damga ise
+ * fiziksel olarak imkânsız ve tek etkisi pencereyi kapatmak.
+ */
+export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): NoteTimestamp {
+  const ceiling = Date.parse(fallbackIso);
+  const unparsable: { field: string; value: string }[] = [];
+  const extra = () => (unparsable.length > 0 ? { unparsable } : {});
   for (const key of ["modified", "created", "date"]) {
     const v = fm[key];
     if (v === undefined) continue;
     const t = Date.parse(v);
+    if (Number.isNaN(t)) {
+      // Eskiden sessizce bir sonraki alana geçiliyordu. Sessizlik burada pahalı:
+      // "bozuk damga" ile "damga yok" ayrımı, notun tarihinin neden import anına
+      // düştüğünü açıklayan tek şey.
+      unparsable.push({ field: key, value: echo(v) });
+      continue;
+    }
+    // `fallbackIso` ayrıştırılamıyorsa tavan yok — bu çağıranın hatası, ama
+    // burada uydurma bir tavan üretmek yanlış pencereyi sessizce dayatırdı.
+    if (!Number.isNaN(ceiling) && t > ceiling)
+      return { iso: new Date(ceiling).toISOString(), clamped: { field: key, value: echo(v) }, ...extra() };
     // ISO'ya normalize: churn penceresi (Görev 7) ve depodaki createdAt
     // karşılaştırmaları tek biçim varsayıyor; "11 Aug 2026" gibi ayrıştırılabilir
     // ama ISO olmayan bir frontmatter değeri oraya ham geçerse pencere kayar.
-    if (!Number.isNaN(t)) return new Date(t).toISOString();
+    return { iso: new Date(t).toISOString(), ...extra() };
   }
-  return fallbackIso;
+  return { iso: fallbackIso, ...extra() };
+}
+
+/**
+ * İçe aktarılan bir notun TARANAN ve SAKLANAN üst sınırı (UTF-16 karakter).
+ *
+ * Denetim: unbounded-note-size. `importMemoryDir` bir .md dosyasını sınırsız
+ * okuyup hem `extractAnchors`'a veriyor hem de olduğu gibi depoya yazıyordu;
+ * ölçüldü (probe), 100 MB'lık tek dosya 100 MB'lık tek satır olarak
+ * saklanıyordu — ve bu depoda hiçbir şey SİLİNMİYOR (spec §3.2), yani tek
+ * patolojik dosya kalıcı.
+ *
+ * 256 KiB nereden: gerçek hafıza korpusu ölçüldü (`~/.claude/projects/*​/memory/*.md`,
+ * 86 dosya, 12 Ağu 2026): p50 2,4 KB, p90 6,7 KB, p99 31 KB, maks 45 KB. Bağımsız
+ * çürütücünün 131 dosyalık daha geniş ölçümü: p50 2 KB, p99 75 KB, maks 109 KB.
+ * Tavan gerçek maksimumun ~2,4 katı — meşru hiçbir not bugün kırpılmıyor, ama
+ * maliyet sınırlı kalıyor.
+ *
+ * Bu bir REGEX çaresi DEĞİL ve KALINTI BİR MALİYET BIRAKIYOR — sayı burada
+ * dursun ki M4 kararı ölçüyle verilsin. `PATH_RE`'nin maliyeti dosya boyutuyla
+ * değil tek kesintisiz `[\w.-]` koşusunun uzunluğuyla KARESEL. Ölçüldü
+ * (12 Ağu 2026, node 24.10 / macOS): 4 KiB tek koşu 15,7 ms · 8 KiB 59,3 ms ·
+ * 16 KiB 242 ms · 32 KiB 1.016 ms — her katlamada tam 4x. Ekstrapolasyon
+ * 256 KiB için ~65 sn, ve bu doğrulandı (kırpma testinin patolojik ilk
+ * sürümü 64,3 sn sürdü).
+ *
+ * Yani tavanın yaptığı şey SINIRSIZ maliyeti SINIRLI ama hâlâ büyük bir
+ * maliyete çevirmek: tek bir patolojik not en kötü ihtimalle ~65 sn CPU yakar
+ * (öncesinde 100 MB'lık bir dosya için üst sınır yoktu). Gerçek korpus buradan
+ * çok uzak: 131 dosyanın TOPLAMI 7,1 ms, en uzun koşu 109 karakter.
+ *
+ * Tavanı DAHA DA düşürmek çare değil (128 KiB hâlâ ~16 sn) ve gerçek maksimuma
+ * (109 KB) yaklaşarak meşru notu kırpma riskini doğurur. Asıl çare
+ * doğrusallaştıran lookbehind (`(?<![\w.\-/~])`, ölçüldü: 18.180 ms → 0,63 ms),
+ * ama o çapa ÇIKTISINI değiştiriyor (99 gerçek dosyanın 1'inde fark) ve altın
+ * sette yeniden ölçüm istiyor → M4'e ERTELENDİ.
+ */
+export const MAX_NOTE_CHARS = 256 * 1024;
+
+/** Notu tavana kırpar. `truncated` > 0 ise çağıran bunu olaya yazar — sessiz kırpma yok. */
+export function capNoteContent(raw: string): { content: string; truncated: number } {
+  if (raw.length <= MAX_NOTE_CHARS) return { content: raw, truncated: 0 };
+  let cut = MAX_NOTE_CHARS;
+  // Kesim vekil çiftinin ORTASINA denk gelirse geriye tek başına yüksek vekil
+  // kalır; UTF-8'e kodlanamayan bu değer depoya yazıldığında gidiş-dönüş bozulur
+  // (aynı sınıf prompt.ts'te \p{Cs} olarak zaten yasaklı).
+  const code = raw.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut--;
+  return { content: raw.slice(0, cut), truncated: raw.length - cut };
 }
 
 export const MAX_ANCHORS_PER_NOTE = 16;

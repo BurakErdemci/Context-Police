@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { openStore } from "../src/store/db.ts";
 import { importMemoryDir } from "../src/importer/import.ts";
+import { MAX_NOTE_CHARS } from "../src/importer/parse.ts";
 import { listActive, getFinding, getAnchors } from "../src/store/findings.ts";
 import { listEvents } from "../src/store/events.ts";
 import { tmpDir } from "./helpers.ts";
@@ -245,4 +246,42 @@ test("başka bir notun okunamaması, gerçekten silinmiş notun süpürülmesini
   const sum = await importMemoryDir(store, projectId, dir);
   assert.equal(sum.deleted, 1);
   assert.deepEqual(listActive(store, projectId).map((f) => f.content), ["OKUNAMAZ OLACAK"]);
+});
+
+// ─── Dalga B: güvenilmez girdi (denetim 12 Ağu 2026) ──────────────────────────
+
+test("import: gelecekteki frontmatter damgası kelepçelenir ve olay yazılır", async () => {
+  const { dir, store, projectId } = setup();
+  writeFileSync(join(dir, "a.md"), "---\nmodified: 2099-01-01T00:00:00Z\n---\ncore/src/scan.ts\n");
+  await importMemoryDir(store, projectId, dir);
+  const [f] = listActive(store, projectId);
+  assert.ok(f!.createdAt < "2099", `createdAt kelepçelenmedi: ${f!.createdAt}`);
+  const ev = listEvents(store, { projectId, kind: "import_timestamp_clamped" });
+  assert.equal(ev.length, 1, "kelepçe sessiz kaldı");
+  assert.equal(JSON.parse(ev[0]!.detail!).field, "modified");
+});
+
+test("import: ayrıştırılamayan damga olayla bildirilir", async () => {
+  const { dir, store, projectId } = setup();
+  writeFileSync(join(dir, "a.md"), "---\nmodified: dün\n---\ncore/src/scan.ts\n");
+  await importMemoryDir(store, projectId, dir);
+  assert.equal(listEvents(store, { projectId, kind: "import_timestamp_unparsable" }).length, 1);
+});
+
+test("import: tavan üstü not kırpılarak saklanır, kırpma olayı yazılır (unbounded-note-size)", async () => {
+  // Probe terfisi: unbounded-note-size.sh. Boyut/sayı tavanı yoktu; 100 MB'lık
+  // tek dosya 100 MB'lık tek kayıt olarak saklanıyordu ve bu depoda hiçbir kayıt
+  // silinmiyor (spec §3.2).
+  const { dir, store, projectId } = setup();
+  // Kısa satırlar: tek kesintisiz `[\w.-]` koşusu PATH_RE'yi karesel yola sokuyor
+  // (M4'e ertelenen ayrı karar) ve bu test tavanı ölçüyor, regex'i değil —
+  // patolojik dolgu testi 64 saniyeye çıkarıyordu.
+  const buyuk = ("x".repeat(63) + "\n").repeat((MAX_NOTE_CHARS + 4096) / 64);
+  writeFileSync(join(dir, "buyuk.md"), buyuk);
+  await importMemoryDir(store, projectId, dir);
+  const [f] = listActive(store, projectId);
+  assert.equal(f!.content.length, MAX_NOTE_CHARS, "gövde tavana kırpılmadı");
+  const ev = listEvents(store, { projectId, kind: "import_note_truncated" });
+  assert.equal(ev.length, 1, "kırpma sessiz kaldı");
+  assert.equal(JSON.parse(ev[0]!.detail!).truncated, 4096);
 });

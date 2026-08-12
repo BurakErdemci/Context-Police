@@ -8,7 +8,24 @@ import type { Store } from "../store/db.ts";
 import { nowIso } from "../store/db.ts";
 import { appendFinding, supersede } from "../store/findings.ts";
 import { logEvent } from "../store/events.ts";
-import { parseNote, extractAnchors, noteTimestamp } from "./parse.ts";
+import { parseNote, extractAnchors, noteTimestamp, capNoteContent, MAX_NOTE_CHARS } from "./parse.ts";
+
+/**
+ * Bu modülün yazdığı YENİ olay tipleri. `logEvent` kind'ı `EventKind | string`
+ * kabul ettiği için burada tanımlanmaları yeterli; `store/events.ts`'teki
+ * belgeleyici birleşime eklenmeleri eşzamanlı dalga o dosyada çalıştığı için
+ * ertelendi (dalgalar birleştiğinde eklenecek).
+ *
+ * - `import_note_truncated`   : not MAX_NOTE_CHARS tavanına kırpıldı. Kırpılan
+ *   baytlar ne çapa çıkarımına ne depoya girdi — sessiz kalırsa denetim
+ *   görmediği bir gövdeyi görmüş gibi raporlar.
+ * - `import_timestamp_clamped`: notun verdiği damga gelecekteydi, içe aktarma
+ *   anına kelepçelendi. Kelepçe denetim penceresini DEĞİŞTİRİR; gizli kalırsa
+ *   "bu not neden churned çıktı" sorusunun cevabı kaybolur.
+ * - `import_timestamp_unparsable`: `Date.parse` alanı çözemedi, alan atlandı.
+ */
+const _NEW_EVENT_KINDS = ["import_note_truncated", "import_timestamp_clamped", "import_timestamp_unparsable"] as const;
+void _NEW_EVENT_KINDS;
 
 export interface ImportSummary {
   files: number;
@@ -152,6 +169,19 @@ export async function importMemoryDir(
     // Okuma başarılı olduktan SONRA: "diskte hâlâ var" iddiası ancak burada doğru.
     currentRefs.add(path);
 
+    // Tavan HER ŞEYDEN önce (denetim: unbounded-note-size). Kırpılmış metin
+    // hem taranan hem SAKLANAN gövde olur; üç gerekçe:
+    //   1. Depo denetimin zemini — saklanan gövde ölçülenden fazlasını
+    //      iddia etmemeli (çapa çıkarımı ve çelişki tespiti yalnız kırpılmışı
+    //      görüyor).
+    //   2. Kaynak dosya diskte duruyor ve gerçeğin sahibi o; import eşlemedir,
+    //      senkron değil (dosya başı).
+    //   3. Hiçbir kayıt silinmiyor (spec §3.2): sınırsız gövde kalıcı şişme.
+    // Bedeli: tavanın ÖTESİNDE değişen bir not "unchanged" görünür. Kabul —
+    // denetim o baytları zaten hiç okumuyor, yani görünmeyen bir değişiklik
+    // görünmeyen bir hükümle eşleşiyor; ve kırpma olayı her koşumda yazılıyor.
+    const { content, truncated } = capNoteContent(raw);
+
     // En son canlı temsil: aynı dosyanın superseded olmayan en yeni kaydı.
     const existing = store.get<{ id: number; content: string }>(
       `SELECT id, content FROM findings
@@ -159,10 +189,11 @@ export async function importMemoryDir(
        ORDER BY id DESC LIMIT 1`,
       projectId, path,
     );
-    if (existing && existing.content === raw) { sum.unchanged++; continue; }
+    if (existing && existing.content === content) { sum.unchanged++; continue; }
 
-    const { frontmatter } = parseNote(raw);
-    const { anchors, dropped } = extractAnchors(raw);
+    const { frontmatter } = parseNote(content);
+    const { anchors, dropped } = extractAnchors(content);
+    const stamp = noteTimestamp(frontmatter, nowIso());
     // Yeni kayıt, eskisinin supersede'i VE bunları açıklayan olaylar TEK işlemde.
     // İki ayrı gerekçe, ikisi de "arada çökme":
     //   - kayıt/supersede ayrı olsaydı aynı dosyanın iki canlı temsili kalırdı
@@ -173,13 +204,31 @@ export async function importMemoryDir(
     //     olay yok, yani §3.2'nin "geri alınabilirlik" iddiası kanıtsız kalıyordu.
     store.tx(() => {
       const newId = appendFinding(store, {
-        projectId, source: "imported", content: raw, sourceRef: path, anchors,
+        projectId, source: "imported", content, sourceRef: path, anchors,
         // Not tarihi frontmatter'dan: churn penceresi (Görev 7) import gününden
         // değil notun yazıldığı günden başlamalı, yoksa her not "bugün doğmuş" olur.
-        createdAt: noteTimestamp(frontmatter, nowIso()),
+        createdAt: stamp.iso,
       });
       if (dropped > 0)
         logEvent(store, { projectId, kind: "import_anchor_overflow", detail: { file: name, kept: anchors.length, dropped } });
+      // Kırpma ve kelepçe olayları kaydın KENDİ tx'inde: ikisi de bu kaydın
+      // içeriğini/penceresini anlatıyor, ayrı commit edilirse günlük depoyu
+      // yanlış anlatır (yukarıdaki değişmez kural).
+      if (truncated > 0)
+        logEvent(store, {
+          projectId, kind: "import_note_truncated",
+          detail: { file: name, kept: MAX_NOTE_CHARS, truncated, originalChars: raw.length },
+        });
+      if (stamp.clamped !== undefined)
+        logEvent(store, {
+          projectId, kind: "import_timestamp_clamped",
+          detail: { file: name, field: stamp.clamped.field, given: stamp.clamped.value, usedIso: stamp.iso },
+        });
+      if (stamp.unparsable !== undefined)
+        logEvent(store, {
+          projectId, kind: "import_timestamp_unparsable",
+          detail: { file: name, fields: stamp.unparsable, usedIso: stamp.iso },
+        });
       if (existing) {
         supersede(store, existing.id, newId);
         logEvent(store, {
