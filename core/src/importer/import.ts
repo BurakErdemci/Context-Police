@@ -189,7 +189,27 @@ export async function importMemoryDir(
        ORDER BY id DESC LIMIT 1`,
       projectId, path,
     );
-    if (existing && existing.content === content) { sum.unchanged++; continue; }
+    if (existing && existing.content === content) {
+      // Kırpma, içerik DEĞİŞMESE de her koşumda görünür (denetim: doğrulama turu,
+      // `truncated-note-tail-change-undetected`). Erken dönüş olayı da atlıyordu,
+      // yani not her koşumda kırpılırken kullanıcı bunu yalnız ilk koşumda
+      // görüyordu — oysa kırpma bu koşumda da GERÇEKLEŞTİ ve o koşumun hükmü
+      // eksik bir gövde üzerinden verildi. Yukarıdaki takasın (tavan üstü değişim
+      // "unchanged" görünür) kabul edilebilir olmasının tek şartı bu görünürlük.
+      //
+      // Tekilleştirilmiyor (lock.ts noteLockRow'un aksine): orada tekrar eden şey
+      // AYNI olgunun tekrar tekrar gözlenmesiydi (takılı kilide her dakika bir
+      // tarama çarpıyor), burada her koşum notun kırpılmış hâline karşı YENİ bir
+      // denetim hükmü üretiyor — hükmün hangi gövdeye dayandığı o koşumun kaydı.
+      // Hacim de sınırlı: tavan üstü not nadir, koşum başına not başına tek satır.
+      if (truncated > 0)
+        logEvent(store, {
+          projectId, kind: "import_note_truncated",
+          detail: { file: name, kept: MAX_NOTE_CHARS, truncated, originalChars: raw.length, unchanged: true },
+        });
+      sum.unchanged++;
+      continue;
+    }
 
     const { frontmatter } = parseNote(content);
     const { anchors, dropped } = extractAnchors(content);
