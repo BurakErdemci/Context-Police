@@ -11,7 +11,7 @@ import { upsertProject, getCursor, getCursorByInode, setCursor, markScanned } fr
 import { logEvent } from "./store/events.ts";
 import { readIncremental } from "./adapters/claude-code.ts";
 import { BudgetHalt } from "./observe-cmd.ts";
-import { acquireScanLock, releaseScanLock } from "./store/lock.ts";
+import { withScanLock } from "./store/lock.ts";
 import { realpath, stat } from "node:fs/promises";
 
 /**
@@ -89,14 +89,9 @@ export interface ScanOptions {
 
 export async function scanOnce(store: Store, opts: ScanOptions): Promise<ScanSummary> {
   // Kilit taramanın TAMAMINI kapsar: imleci okuyup işleyip yazmak tek bir
-  // mantıksal birim ve iki tarama arasında bölünmemeli.
-  const holder = opts.lockHolder ?? `pid:${process.pid}`;
-  acquireScanLock(store, holder);
-  try {
-    return await scanAll(store, opts);
-  } finally {
-    releaseScanLock(store, holder);
-  }
+  // mantıksal birim ve iki tarama arasında bölünmemeli. Kalp atışı da bu süre
+  // boyunca sürer — sarmalayıcının işi.
+  return await withScanLock(store, () => scanAll(store, opts), { holder: opts.lockHolder });
 }
 
 async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {

@@ -21,7 +21,7 @@ import {
 } from "./observe-cmd.ts";
 import { logEvent } from "./store/events.ts";
 import type { Turn } from "./types.ts";
-import { acquireScanLock, releaseScanLock, ScanLockBusy } from "./store/lock.ts";
+import { withScanLock, ScanLockBusy } from "./store/lock.ts";
 import {
   EXIT_USAGE, EXIT_NO_CODEX, EXIT_NEEDS_APPROVAL, EXIT_BUDGET, EXIT_LOCK_BUSY,
 } from "./cli-exit.ts";
@@ -35,9 +35,10 @@ register(claudeCodeAdapter);
  * probes/audit-kill-leaves-active.sh): Node varsayılanında SIGINT/SIGTERM
  * `finally` bloklarını KOŞTURMADAN süreci bitiriyor — yani Ctrl-C tarama
  * kilidini asılı ve denetimi yarım bırakıyordu. Kilidin asılı kalması artık
- * kalıcı bir tıkanma DEĞİL (lock.ts: ölü sahip hemen devralınıyor), ama yine de
- * bir arıza: devralma bir olay yazar ve "kilit çalındı mı" sorusunu günlüğe
- * taşır — düzgün kapanışta hiç sorulmaması gereken bir soru.
+ * kalıcı bir tıkanma DEĞİL (lock.ts: atışı kesilen sahip devralınıyor), ama yine
+ * de bir arıza: hem devralma bir olay yazıp "kilit çalındı mı" sorusunu günlüğe
+ * taşır, hem de sonraki koşum bayatlama süresi (10 dk) boyunca beklemek zorunda
+ * kalır — düzgün kapanışta ikisi de olmamalı.
  * Kanca listesi LIFO: en son alınan kaynak ilk bırakılır.
  */
 const interruptHandlers: ((signal: string) => void)[] = [];
@@ -336,53 +337,67 @@ async function observeSingleSession(
   const sessionId = basename(sessionPath).replace(/\.jsonl$/, "");
 
   // Kilit: aynı anda koşan bir scan/observe ile filigran yarışını engeller.
-  const holder = `pid:${process.pid}`;
-  acquireScanLock(store, holder);
-  // Ctrl-C burada da kilidi asılı bırakıyordu (aynı ölçüm: Node sinyalde
-  // finally'leri koşturmuyor) — audit'in kancasıyla aynı mekanizma.
-  const off = onInterrupt(() => {
-    releaseScanLock(store, holder);
-    store.close();
-  });
-  try {
-    const projectId = upsertProject(store, {
-      path: projPath,
-      adapterId: claudeCodeAdapter.id,
-      transcriptDir: dirname(sessionPath), // dizin, dosya değil — projects sözleşmesi
+  return await withScanLock(store, async (lock) => {
+    // Ctrl-C burada da kilidi asılı bırakıyordu (aynı ölçüm: Node sinyalde
+    // finally'leri koşturmuyor) — audit'in kancasıyla aynı mekanizma.
+    // `lock.release()` kalp atışı zamanlayıcısını da durduruyor: yalnız satırı
+    // silmek, kapanan bir depoya yazmaya çalışan bir zamanlayıcı bırakırdı.
+    const off = onInterrupt(() => {
+      lock.release();
+      store.close();
     });
-    // İmleçlere DOKUNULMAZ: imleç taramanın, filigran gözlemcinin (D-M2-2).
-    // Okuma FİLİGRANIN ofsetinden başlıyor — filigran artık bir bayt ofseti
-    // olduğu için gözlemcinin kendi ilerlemesi burada da kullanılabiliyor.
-    // Eskiden dosya her koşumda 0'dan okunuyordu ve eleme içerik kimliğine
-    // kaldığı için `--session` aynı oturumu tekrar tekrar Codex'e gönderiyordu.
-    const { wm, res, range } = await readSessionIncremental(store, projectId, sessionId, sessionPath);
-    // Önizleme gözlemcinin KENDİ kararıyla aynı fonksiyondan çıkıyor: iki ayrı
-    // ölçüt, maliyet kapısının yanlış sayıya bakması demek olurdu.
-    const fresh = dropThroughWatermark(res.turns, wm, range);
-
-    let filteredBytes = 0;
-    for (const t of fresh) filteredBytes += Buffer.byteLength(t.text, "utf8");
-    const est = estimateCalls(filteredBytes, batchTokens);
-    console.log(
-      `oturum: ${safe(sessionId)}  yeni turn: ${fresh.length}  ` +
-        `parti: ${est.batches}  çağrı: beklenen ~${est.expected}, en kötü ${est.worst}`,
-    );
-    const gate = costGate(est, yes);
-    if (!gate.ok) {
-      console.error(gate.reason);
-      return true;
+    try {
+      return await observeBody(store, observer, sessionPath, projPath, sessionId, batchTokens, yes);
+    } finally {
+      off();
     }
-    // Turn'ler SÜZÜLMEDEN veriliyor: eleme kararı gözlemcinin, ve aynı aralığın
-    // kimliği ancak listenin tamamıyla hesaplanırsa tarama yolununkiyle örtüşür.
-    await observer.handleTurns({ projectId, sessionId, turns: res.turns, range });
-    // Tazelik SONRA yazılıyor: handleTurns atarsa filigran okuduğumuz dosyanın
-    // kimliğini üstlenmemeli, yoksa işlenmemiş bir okuma "görüldü" sayılırdı.
-    recordSessionFreshness(store, projectId, sessionId, res);
-    return false;
-  } finally {
-    off();
-    releaseScanLock(store, holder);
+  });
+}
+
+/** observeSingleSession'ın kilit ALTINDA koşan gövdesi; ayrılması yalnız yuvalanmayı azaltıyor. */
+async function observeBody(
+  store: Store,
+  observer: Observer,
+  sessionPath: string,
+  projPath: string,
+  sessionId: string,
+  batchTokens: number,
+  yes: boolean,
+): Promise<boolean> {
+  const projectId = upsertProject(store, {
+    path: projPath,
+    adapterId: claudeCodeAdapter.id,
+    transcriptDir: dirname(sessionPath), // dizin, dosya değil — projects sözleşmesi
+  });
+  // İmleçlere DOKUNULMAZ: imleç taramanın, filigran gözlemcinin (D-M2-2).
+  // Okuma FİLİGRANIN ofsetinden başlıyor — filigran artık bir bayt ofseti
+  // olduğu için gözlemcinin kendi ilerlemesi burada da kullanılabiliyor.
+  // Eskiden dosya her koşumda 0'dan okunuyordu ve eleme içerik kimliğine
+  // kaldığı için `--session` aynı oturumu tekrar tekrar Codex'e gönderiyordu.
+  const { wm, res, range } = await readSessionIncremental(store, projectId, sessionId, sessionPath);
+  // Önizleme gözlemcinin KENDİ kararıyla aynı fonksiyondan çıkıyor: iki ayrı
+  // ölçüt, maliyet kapısının yanlış sayıya bakması demek olurdu.
+  const fresh = dropThroughWatermark(res.turns, wm, range);
+
+  let filteredBytes = 0;
+  for (const t of fresh) filteredBytes += Buffer.byteLength(t.text, "utf8");
+  const est = estimateCalls(filteredBytes, batchTokens);
+  console.log(
+    `oturum: ${safe(sessionId)}  yeni turn: ${fresh.length}  ` +
+      `parti: ${est.batches}  çağrı: beklenen ~${est.expected}, en kötü ${est.worst}`,
+  );
+  const gate = costGate(est, yes);
+  if (!gate.ok) {
+    console.error(gate.reason);
+    return true;
   }
+  // Turn'ler SÜZÜLMEDEN veriliyor: eleme kararı gözlemcinin, ve aynı aralığın
+  // kimliği ancak listenin tamamıyla hesaplanırsa tarama yolununkiyle örtüşür.
+  await observer.handleTurns({ projectId, sessionId, turns: res.turns, range });
+  // Tazelik SONRA yazılıyor: handleTurns atarsa filigran okuduğumuz dosyanın
+  // kimliğini üstlenmemeli, yoksa işlenmemiş bir okuma "görüldü" sayılırdı.
+  recordSessionFreshness(store, projectId, sessionId, res);
+  return false;
 }
 
 async function cmdAudit(): Promise<void> {
@@ -413,106 +428,110 @@ async function cmdAudit(): Promise<void> {
   // "en son canlı temsil"i okuyup yenisini yazıyor, bu okuma-yazma atomik değil.
   // Aynı anda koşan iki denetim (ya da bir denetim + bir tarama) aynı dosya için
   // iki canlı kayıt bırakabilir — Görev 4 ölçümü.
-  const holder = `pid:${process.pid}`;
+  // `runId` hâlâ PID taşıyor: o bir KOŞUM ETİKETİ, kilit sahipliği kanıtı değil.
+  // Günlükte "hangi süreç" sorusunu cevaplaması faydalı ve yanlış olma riski yok
+  // — kimse ona bakıp bir kilidi devralmıyor.
   const runId = `${new Date().toISOString()}-${process.pid}`;
   let current: { id: number; path: string } | null = null;
   let exitCode = 0;
   try {
-    acquireScanLock(store, holder);
-    // Kilit ALINDIKTAN sonra kaydediliyor: kanca ancak bırakacak bir şey varken
-    // anlamlı, ve kilidi almadan bırakmaya çalışmak başkasının kilidini silmez
-    // (releaseScanLock sahip eşleşmesi arıyor) ama gereksiz.
-    const off = onInterrupt((signal) => {
-      // Kesinti DEPODA yazılı kalır: yarım denetim "ölçüldü, temiz çıktı" ile
-      // karışmasın. Olay ÖNCE, kilit sonra — kilit bırakıldıktan sonra yazmak
-      // başka bir koşumun araya girdiği bir pencere açardı.
-      try {
-        logEvent(store, {
-          projectId: current?.id ?? null, kind: "audit_failed",
-          detail: { runId, reason: `signal:${signal}`, path: current?.path ?? null },
-        });
-      } catch { /* yut: kilidi bırakmak daha önemli */ }
-      releaseScanLock(store, holder);
-      store.close();
-    });
-    try {
-      // İki mod: depodaki projeler (--project süzer) ya da elle kayıt
-      // (--path [+ --memory-dir]); altın set ölçümü pin'li worktree'yi böyle
-      // denetliyor (D-M3-8).
-      let targets: { id: number; path: string; memoryDir: string | null }[];
-      const manualPath = arg("path");
-      if (manualPath !== undefined) {
-        const memoryDir = arg("memory-dir") ?? null;
-        const id = upsertProject(store, {
-          path: manualPath, adapterId: claudeCodeAdapter.id,
-          transcriptDir: manualPath, memoryDir,
-        });
-        // --memory-dir verilmediyse depodaki kayıt kullanılır: upsertProject
-        // null'ı COALESCE ile yutuyor, yani proje bilinen bir hafıza dizinine
-        // sahipken burada null geçmek o dizini SESSİZCE denetim dışı bırakırdı.
-        const stored = listProjects(store).find((p) => p.id === id);
-        targets = [{ id, path: manualPath, memoryDir: memoryDir ?? stored?.memory_dir ?? null }];
-      } else {
-        targets = listProjects(store)
-          .filter((p) => arg("project") === undefined || p.path === arg("project"))
-          .map((p) => ({ id: p.id, path: p.path, memoryDir: p.memory_dir }));
-        if (targets.length === 0) throw new UsageError("denetlenecek proje yok: önce `scan` koşun ya da --path verin");
-      }
-
-      // Maliyet kapısı: observe'un kalıbı. Ölçüldü (2026-08-11): audit'te hiç
-      // kapı yoktu ve bu makinede 11 hafıza dizininin 11'i de çelişki adayı
-      // üretiyor (123 aday) — tek bir argümansız `audit` onaysız 11-33 ücretli
-      // Codex çağrısı yapıyordu, her biri ~15k token'a kadar.
-      const maxCalls = callBudget(yes);
-      const budget = new SpendBudget(maxCalls);
-      const gate = auditCostGate(targets.length, yes);
-      console.log(
-        `denetlenecek proje: ${targets.length}  çelişki sınıflaması: ` +
-          `beklenen ~${gate.est.expected}, en kötü ${gate.est.worst} Codex çağrısı`,
-      );
-      console.log(
-        maxCalls === undefined
-          ? "maliyet tavanı: yok (--yes verildi)"
-          : `maliyet tavanı: en fazla ${maxCalls} Codex çağrısı (--yes ile kaldırılır)`,
-      );
-
-      if (!gate.ok) {
-        // Onay gerekiyor: TEK ücretli çağrı yapılmadan durulur (observe ile aynı
-        // çıkış kodu — 3 "onay gerekiyor", 4 "onayla başladı ama yarıda kaldı").
-        console.error(gate.reason);
-        exitCode = EXIT_NEEDS_APPROVAL;
-      } else {
-        const results: { path: string; id: number; summary: AuditSummary }[] = [];
-        let halted = false;
-        for (const t of targets) {
-          // Tavan kontrolü proje BAŞLAMADAN: yarım denetlenmiş bir proje, çelişki
-          // sinyali eksik olduğu için notları haksız yere temize çıkarabilirdi
-          // (skor sıfırdan hesaplanıyor — D-M3-3). Ya tamamı ya hiçbiri.
-          if (!budget.canAfford(WORST_CASE_CALLS_PER_AUDIT)) { halted = true; break; }
-          current = { id: t.id, path: t.path };
-          // Fetch açıkken HANGİ repoda koşulacağı basılır: hedefi seçen veri
-          // (transcript `cwd`) güvenilmez, kullanıcı en azından görmüş olmalı.
-          if (doFetch) console.log(`git fetch (--fetch) hedefi: ${safe(t.path)}`);
-          const summary = await auditProject(store, t, {
-            executor, fetch: doFetch, originRef: arg("origin-ref"), runId,
+    await withScanLock(store, async (lock) => {
+      // Kilit ALINDIKTAN sonra kaydediliyor: kanca ancak bırakacak bir şey varken
+      // anlamlı, ve kilidi almadan bırakmaya çalışmak başkasının kilidini silmez
+      // (releaseScanLock sahip eşleşmesi arıyor) ama gereksiz.
+      const off = onInterrupt((signal) => {
+        // Kesinti DEPODA yazılı kalır: yarım denetim "ölçüldü, temiz çıktı" ile
+        // karışmasın. Olay ÖNCE, kilit sonra — kilit bırakıldıktan sonra yazmak
+        // başka bir koşumun araya girdiği bir pencere açardı.
+        try {
+          logEvent(store, {
+            projectId: current?.id ?? null, kind: "audit_failed",
+            detail: { runId, reason: `signal:${signal}`, path: current?.path ?? null },
           });
-          budget.spend(summary.classifyCalls);
-          results.push({ path: t.path, id: t.id, summary });
+        } catch { /* yut: kilidi bırakmak daha önemli */ }
+        // `lock.release()` zamanlayıcıyı da durduruyor — depo hemen kapanıyor ve
+        // ayakta kalan bir atış kapalı bağlantıya yazmaya çalışırdı.
+        lock.release();
+        store.close();
+      });
+      try {
+        // İki mod: depodaki projeler (--project süzer) ya da elle kayıt
+        // (--path [+ --memory-dir]); altın set ölçümü pin'li worktree'yi böyle
+        // denetliyor (D-M3-8).
+        let targets: { id: number; path: string; memoryDir: string | null }[];
+        const manualPath = arg("path");
+        if (manualPath !== undefined) {
+          const memoryDir = arg("memory-dir") ?? null;
+          const id = upsertProject(store, {
+            path: manualPath, adapterId: claudeCodeAdapter.id,
+            transcriptDir: manualPath, memoryDir,
+          });
+          // --memory-dir verilmediyse depodaki kayıt kullanılır: upsertProject
+          // null'ı COALESCE ile yutuyor, yani proje bilinen bir hafıza dizinine
+          // sahipken burada null geçmek o dizini SESSİZCE denetim dışı bırakırdı.
+          const stored = listProjects(store).find((p) => p.id === id);
+          targets = [{ id, path: manualPath, memoryDir: memoryDir ?? stored?.memory_dir ?? null }];
+        } else {
+          targets = listProjects(store)
+            .filter((p) => arg("project") === undefined || p.path === arg("project"))
+            .map((p) => ({ id: p.id, path: p.path, memoryDir: p.memory_dir }));
+          if (targets.length === 0) throw new UsageError("denetlenecek proje yok: önce `scan` koşun ya da --path verin");
         }
-        current = null;
 
-        if (flag("json")) console.log(JSON.stringify(results, null, 2));
-        else printAuditResults(store, results);
+        // Maliyet kapısı: observe'un kalıbı. Ölçüldü (2026-08-11): audit'te hiç
+        // kapı yoktu ve bu makinede 11 hafıza dizininin 11'i de çelişki adayı
+        // üretiyor (123 aday) — tek bir argümansız `audit` onaysız 11-33 ücretli
+        // Codex çağrısı yapıyordu, her biri ~15k token'a kadar.
+        const maxCalls = callBudget(yes);
+        const budget = new SpendBudget(maxCalls);
+        const gate = auditCostGate(targets.length, yes);
+        console.log(
+          `denetlenecek proje: ${targets.length}  çelişki sınıflaması: ` +
+            `beklenen ~${gate.est.expected}, en kötü ${gate.est.worst} Codex çağrısı`,
+        );
+        console.log(
+          maxCalls === undefined
+            ? "maliyet tavanı: yok (--yes verildi)"
+            : `maliyet tavanı: en fazla ${maxCalls} Codex çağrısı (--yes ile kaldırılır)`,
+        );
 
-        if (halted) {
-          console.error(`\n${auditBudgetExhaustedMessage(budget.spent, results.length, targets.length, maxCalls)}`);
-          exitCode = EXIT_BUDGET;
+        if (!gate.ok) {
+          // Onay gerekiyor: TEK ücretli çağrı yapılmadan durulur (observe ile aynı
+          // çıkış kodu — 3 "onay gerekiyor", 4 "onayla başladı ama yarıda kaldı").
+          console.error(gate.reason);
+          exitCode = EXIT_NEEDS_APPROVAL;
+        } else {
+          const results: { path: string; id: number; summary: AuditSummary }[] = [];
+          let halted = false;
+          for (const t of targets) {
+            // Tavan kontrolü proje BAŞLAMADAN: yarım denetlenmiş bir proje, çelişki
+            // sinyali eksik olduğu için notları haksız yere temize çıkarabilirdi
+            // (skor sıfırdan hesaplanıyor — D-M3-3). Ya tamamı ya hiçbiri.
+            if (!budget.canAfford(WORST_CASE_CALLS_PER_AUDIT)) { halted = true; break; }
+            current = { id: t.id, path: t.path };
+            // Fetch açıkken HANGİ repoda koşulacağı basılır: hedefi seçen veri
+            // (transcript `cwd`) güvenilmez, kullanıcı en azından görmüş olmalı.
+            if (doFetch) console.log(`git fetch (--fetch) hedefi: ${safe(t.path)}`);
+            const summary = await auditProject(store, t, {
+              executor, fetch: doFetch, originRef: arg("origin-ref"), runId,
+            });
+            budget.spend(summary.classifyCalls);
+            results.push({ path: t.path, id: t.id, summary });
+          }
+          current = null;
+
+          if (flag("json")) console.log(JSON.stringify(results, null, 2));
+          else printAuditResults(store, results);
+
+          if (halted) {
+            console.error(`\n${auditBudgetExhaustedMessage(budget.spent, results.length, targets.length, maxCalls)}`);
+            exitCode = EXIT_BUDGET;
+          }
         }
+      } finally {
+        off();
       }
-    } finally {
-      off();
-      releaseScanLock(store, holder);
-    }
+    });
   } finally {
     store.close();
   }

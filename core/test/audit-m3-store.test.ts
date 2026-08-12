@@ -1,6 +1,10 @@
 // M3 denetiminin depo/kilit tarafındaki bulguları. Her test bir PROBE'un
 // iddiasını kalıcılaştırıyor: probe dosyaları .delegate-runs altında geçici,
 // buradaki iddialar takımda kalıcı.
+//
+// NOT: kilidin DEVRALMA sözleşmesi (kalp atışı) artık lock-heartbeat.test.ts'te.
+// Buradaki kilit testleri yalnız devralmadan BAĞIMSIZ olanlar: uzun tutmanın
+// görünürlüğü ve meşgul hâlinin sunumu.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -9,123 +13,77 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, statSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { openStore } from "../src/store/db.ts";
-import { acquireScanLock, releaseScanLock, ScanLockBusy, stampHolderIdentity } from "../src/store/lock.ts";
+import { acquireScanLock, releaseScanLock, renewScanLock, newLockHolder, ScanLockBusy } from "../src/store/lock.ts";
 import { tmpDir, tmpStorePath } from "./helpers.ts";
 
-// --- 1) ölü sahip kilidi: hemen devralınmalı (dead-lock-blocks-retry) ---
+// --- 1) meşgul kilit: sunum ve tekrar deneme --------------------------------
 
-/** Var olmayan bir PID. process.kill(pid,0) ESRCH atmalı; atmıyorsa test yanılır. */
-const DEAD_PID = 99999999;
-
-test("ölü sahip kilidi TAZE damgayla bile hemen devralınır", () => {
-  assert.throws(() => process.kill(DEAD_PID, 0), /ESRCH/, "ölü PID seçimi geçersiz");
-
+test("ölü sahibin bıraktığı satır yeniden denemeyi SÜRESİZ engellemez", () => {
+  // Ctrl-C'de `finally` koşmuyor ve kilit satırı diskte kalıyor. Eski modelde
+  // bu satır "sahip PID'si canlı mı" tahminiyle çözülüyordu; artık ölçüt tek:
+  // atış kesildiyse devralınır. Ölü bir sahip tanım gereği atmaz.
   const store = openStore(":memory:");
-  // Ctrl-C sonrası finally koşmadığında diskte kalan satırın birebir hâli:
-  // sahip ölmüş ama damga yepyeni.
-  store.run(
-    "INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)",
-    `pid:${DEAD_PID}`,
-    new Date().toISOString(),
-  );
+  const olu = newLockHolder();
+  acquireScanLock(store, olu);
+  // Sahibin öldüğü ana denk gelen hâl: satır duruyor, atış donmuş.
+  store.run("UPDATE scan_lock SET heartbeat_at = ? WHERE id = 1",
+    new Date(Date.now() - 11 * 60_000).toISOString());
 
-  const holder = `pid:${process.pid}`;
-  assert.doesNotThrow(() => acquireScanLock(store, holder), "ölü sahip yeniden denemeyi bir saat engelliyor");
-  // Diskteki sahip dizesi ARTIK kimlik damgalı (PID + süreç başlangıç zamanı):
-  // acquireScanLock damgayı kendisi basıyor, çağıranın holder'ı ham kalıyor.
-  assert.equal(
-    store.get<{ holder: string }>("SELECT holder FROM scan_lock WHERE id = 1")?.holder,
-    stampHolderIdentity(holder),
-  );
-
+  const yeni = newLockHolder();
+  assert.doesNotThrow(() => acquireScanLock(store, yeni), "ölü sahip yeniden denemeyi engelliyor");
+  assert.equal(store.get<{ holder: string }>("SELECT holder FROM scan_lock WHERE id = 1")?.holder, yeni);
   const ev = store.get<{ detail: string }>("SELECT detail FROM events WHERE kind = 'scan_lock_stolen'");
   assert.ok(ev, "devralma sessiz olmamalı");
-  assert.equal(JSON.parse(ev.detail).reason, "dead_holder");
+  assert.equal(JSON.parse(ev.detail).reason, "heartbeat_stale");
   store.close();
 });
 
-// --- 2) geri dönüştürülmüş PID (pid-alias-keeps-stale-lock) ---
-
-test("kimliği DAMGASIZ, canlı PID'li kilit STALE_MS'ten sonra devralınır", () => {
+test("kilidi alan süreç onu bırakabilir", () => {
   const store = openStore(":memory:");
-  // Bu süreç kilidi ALMADI; canlı PID'si, sahibi öldükten sonra aynı numarayı
-  // devralan yabancı bir sürecin yerine geçiyor. Satır damgasız (yabancı/eski
-  // bir yazıcı): kimlik doğrulanamaz, geriye tek ölçüt olarak yaş kalır.
-  store.run(
-    "INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)",
-    `pid:${process.pid}`,
-    "2000-01-01T00:00:00.000Z",
-  );
-
-  assert.doesNotThrow(
-    () => acquireScanLock(store, "pid:999999999"),
-    "yaş kontrolü canlı PID tarafından kısa devre ediliyor: kilit süresiz",
-  );
-  const ev = store.get<{ detail: string }>("SELECT detail FROM events WHERE kind = 'scan_lock_stolen'");
-  // Gerekçe AYRIK: bu devralma "yaşlandı" değil "kimliği ölçemedim, yaşa düştüm"
-  // demek. Ayrı isim, düşüşün kaç kez olduğunu günlükten ölçülebilir kılıyor.
-  assert.equal(JSON.parse(ev!.detail).reason, "identity_unverifiable_stale_age");
+  const holder = newLockHolder();
+  acquireScanLock(store, holder);
+  releaseScanLock(store, holder);
+  assert.equal(store.get("SELECT holder FROM scan_lock WHERE id = 1"), undefined);
   store.close();
 });
 
-test("okunamayan damga süresiz tutma hakkı vermez", () => {
+test("taze kilit devralınamaz (kilidin asıl işi)", () => {
   const store = openStore(":memory:");
-  store.run("INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)", `pid:${process.pid}`, "bozuk-damga");
-  assert.doesNotThrow(() => acquireScanLock(store, "pid:999999999"));
-  store.close();
-});
-
-// --- 2b) kimlik = PID + süreç başlangıç zamanı (live-lock-stolen-after-hour) ---
-
-test("SAĞLIKLI ve uzun süren sahip kilidini bir saat sonra da kaybetmez", () => {
-  const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`;
-  acquireScanLock(store, holder); // damgayı acquire basıyor: kimlik doğrulanabilir
-  // 61 dakika: eski mantıkta yaş TEK BAŞINA devralma yetkisiydi ve kilit
-  // çalınıyordu — iki sağlıklı yazıcı üst üste biniyor, mükerrer teslimat
-  // yarışı geri geliyordu (ölçüldü, doğrulama turu).
-  store.run("UPDATE scan_lock SET acquired_at = ? WHERE id = 1",
-    new Date(Date.now() - 61 * 60 * 1000).toISOString());
-
-  assert.throws(() => acquireScanLock(store, "pid:99999999"), ScanLockBusy,
-    "kimliği doğrulanmış CANLI sahibin kilidi yaşı ne olursa olsun çalınamaz");
-  assert.equal(store.get<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_stolen'")?.n, 0);
+  const holder = newLockHolder();
+  acquireScanLock(store, holder);
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
   releaseScanLock(store, holder);
   store.close();
 });
 
-// --- 2c) uzun tutulan kilit görünür (coarse-start-time-pid-reuse guard) ---
+// --- 2) uzun tutulan kilit görünür -------------------------------------------
 
-/** Kilidi geriye tarihlemek: `acquired_at` tek yaş kaynağı. */
-function backdateLock(store: ReturnType<typeof openStore>, ms: number): void {
+/** Kilidi geriye tarihlemek: uzun-tutma ölçüsü `acquired_at`, bayatlık DEĞİL. */
+function backdateAcquired(store: ReturnType<typeof openStore>, ms: number): void {
   store.run("UPDATE scan_lock SET acquired_at = ? WHERE id = 1", new Date(Date.now() - ms).toISOString());
 }
 
 const HOUR = 60 * 60 * 1000;
 
-test("çok uzun tutulan doğrulanmış kilit: devralma YOK ama olay VAR", () => {
-  // Kilit sahibinin kimliği `ps lstart`'a dayanıyor ve çözünürlüğü 1 saniye
-  // (ölçüldü). Aynı-saniye PID yeniden kullanımı sahte bir sahibi "canlı +
-  // kimliği uyuşuyor" gösterebiliyor; kilit o hâlde SÜRESİZ takılı kalır.
-  // Kalıntı bilinçli açık bırakıldı — kapatan şey değil GÖRÜNÜR kılan şey
-  // sınanıyor.
+test("çok uzun tutulan CANLI kilit: devralma YOK ama olay VAR", () => {
+  // Sahip düzenli atıyor, yani meşru. Ama yedi saattir kilidi tutuyorsa ya
+  // asılmış ya da gerçekten çok uzun bir denetim koşuyor: ikisi de bakılmayı
+  // hak ediyor. Kilit ÇALINMIYOR — görünür kılınıyor.
   const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`;
+  const holder = newLockHolder();
   acquireScanLock(store, holder);
-  backdateLock(store, 7 * HOUR); // LONG_HELD_MS = 6 saat
+  backdateAcquired(store, 7 * HOUR); // LONG_HELD_MS = 6 saat
+  assert.equal(renewScanLock(store, holder), true, "sahip canlı: atışı taze");
 
-  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy,
-    "uzun tutma kilidi ÇALDIRMAZ: sağlıklı uzun denetim meşru");
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy,
+    "uzun tutma kilidi ÇALDIRMAZ: atışı süren sahip meşru");
   assert.equal(store.get<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_stolen'")?.n, 0,
-    "devralma olmamalı");
+    "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_stolen'")?.n, 0, "devralma olmamalı");
 
-  const ev = store.get<{ detail: string }>(
-    "SELECT detail FROM events WHERE kind = 'scan_lock_held_long'");
+  const ev = store.get<{ detail: string }>("SELECT detail FROM events WHERE kind = 'scan_lock_held_long'");
   assert.ok(ev, "takılı kalmış olabilecek kilit sessiz kalmamalı");
   const d = JSON.parse(ev.detail);
-  assert.equal(d.holder, stampHolderIdentity(holder), "detay sahibi taşımalı");
+  assert.equal(d.holder, holder, "detay sahibi taşımalı");
   assert.ok(d.ageMs >= 7 * HOUR - 60_000, `yaş taşınmalı, gelen: ${d.ageMs}`);
   assert.equal(d.stolen, false, "devralınmadığı gerçeği detayda yazılı olmalı");
 
@@ -138,11 +96,11 @@ test("uzun tutma olayı gürültü yapmaz: aynı kilit satırı için tek kayıt
   // alınamaz şekilde şişirir ve sayacı "kaç kez takıldık" değil "kaç kez
   // denedik" ölçmeye başlar.
   const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`;
+  const holder = newLockHolder();
   acquireScanLock(store, holder);
-  backdateLock(store, 7 * HOUR);
+  backdateAcquired(store, 7 * HOUR);
   for (let i = 0; i < 3; i++) {
-    assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
+    assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
   }
   assert.equal(store.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_held_long'")?.n, 1);
@@ -151,80 +109,27 @@ test("uzun tutma olayı gürültü yapmaz: aynı kilit satırı için tek kayıt
   // ikinci arızayı birincinin arkasına gizlemek olurdu.
   releaseScanLock(store, holder);
   acquireScanLock(store, holder);
-  backdateLock(store, 7 * HOUR);
-  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
+  // 8 saat, 7 değil: `acquired_at` ms çözünürlüklü ve aynı milisaniyede yeniden
+  // tarihlenirse dize BİREBİR aynı çıkar — test tekilleştirmeyi kırık sanardı.
+  backdateAcquired(store, 8 * HOUR);
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
   assert.equal(store.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_held_long'")?.n, 2);
   releaseScanLock(store, holder);
   store.close();
 });
 
-test("eşik STALE_MS'ten belirgin büyük: iki saatlik sağlıklı denetim olay yazmaz", () => {
-  // STALE_MS (1 saat) üstü ama LONG_HELD_MS (6 saat) altı. Eşik STALE_MS'e
-  // yakın seçilseydi olay her uzun denetimde yanar, gürültüye karışır ve
-  // "birine bak" sinyali olmaktan çıkardı.
+test("eşik bayatlama süresinden ÇOK büyük: iki saatlik sağlıklı denetim olay yazmaz", () => {
+  // HEARTBEAT_STALE_MS (10 dk) üstü ama LONG_HELD_MS (6 saat) altı. Eşik
+  // bayatlığa yakın seçilseydi olay her uzun denetimde yanar, gürültüye karışır
+  // ve "birine bak" sinyali olmaktan çıkardı.
   const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`;
+  const holder = newLockHolder();
   acquireScanLock(store, holder);
-  backdateLock(store, 2 * HOUR);
-  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
+  backdateAcquired(store, 2 * HOUR);
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
   assert.equal(store.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM events WHERE kind = 'scan_lock_held_long'")?.n, 0);
-  releaseScanLock(store, holder);
-  store.close();
-});
-
-test("geri dönüştürülmüş PID: kayıttaki başlangıç zamanı tutmazsa hemen devralınır", () => {
-  const store = openStore(":memory:");
-  // Canlı PID (bu süreç) ama BAŞKA bir başlangıç zamanı: eski sahip ölmüş,
-  // numarası yeniden kullanılmış. Yaş TAZE — yine de beklenmez.
-  store.run(
-    "INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)",
-    `pid:${process.pid}@started:Thu Jan  1 00:00:00 1970`,
-    new Date().toISOString(),
-  );
-  assert.doesNotThrow(() => acquireScanLock(store, "pid:999999999"));
-  const ev = store.get<{ detail: string }>("SELECT detail FROM events WHERE kind = 'scan_lock_stolen'");
-  assert.equal(JSON.parse(ev!.detail).reason, "pid_reused");
-  store.close();
-});
-
-test("kimliği hiç ölçülemeyen sahip: taze kilit korunur, yaşlı kilit devralınır", () => {
-  // Tanımadığımız holder biçimi = başlangıç zamanının hiç ölçülemediği durumun
-  // deterministik karşılığı (paylaşılan depo, farklı makine, `ps` yok). Yaşa
-  // düşülür ama SIRALAMA korunur: taze kilit hâlâ dokunulmaz.
-  const fresh = openStore(":memory:");
-  fresh.run("INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)",
-    "worker-baska-makine", new Date().toISOString());
-  assert.throws(() => acquireScanLock(fresh, "pid:999999999"), ScanLockBusy);
-  fresh.close();
-
-  const old = openStore(":memory:");
-  old.run("INSERT INTO scan_lock (id, holder, acquired_at) VALUES (1,?,?)",
-    "worker-baska-makine", "2000-01-01T00:00:00.000Z");
-  assert.doesNotThrow(() => acquireScanLock(old, "pid:999999999"));
-  const ev = old.get<{ detail: string }>("SELECT detail FROM events WHERE kind = 'scan_lock_stolen'");
-  assert.equal(JSON.parse(ev!.detail).reason, "identity_unverifiable_stale_age");
-  old.close();
-});
-
-test("kilidi alan süreç onu bırakabilir: damga release'te yeniden üretilir", () => {
-  // Damga acquire'da basılıyor, çağıran ham holder tutuyor. Release sahip
-  // eşleşmesiyle siliyor: biçimler ayrışırsa kendi kilidimizi bırakamazdık ve
-  // satır bir saat diskte kalırdı.
-  const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`;
-  acquireScanLock(store, holder);
-  releaseScanLock(store, holder);
-  assert.equal(store.get("SELECT holder FROM scan_lock WHERE id = 1"), undefined);
-  store.close();
-});
-
-test("canlı sahip + taze kilit hâlâ devralınamaz (kilidin asıl işi)", () => {
-  const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`;
-  acquireScanLock(store, holder);
-  assert.throws(() => acquireScanLock(store, "pid:999999999"), ScanLockBusy);
   releaseScanLock(store, holder);
   store.close();
 });

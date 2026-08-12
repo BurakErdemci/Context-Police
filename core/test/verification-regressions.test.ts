@@ -13,7 +13,7 @@ import { scanOnce, StoreFailure } from "../src/scan.ts";
 import { appendFinding } from "../src/store/findings.ts";
 import { listEvents, countEvents } from "../src/store/events.ts";
 import { upsertProject, getCursor } from "../src/store/projects.ts";
-import { acquireScanLock, ScanLockBusy } from "../src/store/lock.ts";
+import { acquireScanLock, newLockHolder, ScanLockBusy } from "../src/store/lock.ts";
 import { tmpDir, tmpStorePath } from "./helpers.ts";
 
 const line = (o: unknown) => JSON.stringify(o) + "\n";
@@ -217,12 +217,14 @@ test("depo yazamıyorsa tarama sessizce başarılı raporlamaz", async () => {
 });
 
 // class: stale-lock-steal
-test("canlı sahip varken kilit yaşlandırılsa bile çalınmaz", () => {
+test("kilit YAŞLI olduğu için çalınmaz; ölçüt yalnız kalp atışı", () => {
   const store = openStore(":memory:");
-  const holder = `pid:${process.pid}`; // bu süreç canlı
+  const holder = newLockHolder();
   acquireScanLock(store, holder);
-  // Kilidi 11 dk eskiye çek: eski mantık burada devralırdı.
+  // Alınma zamanını 11 dk eskiye çek ama atışa DOKUNMA: sahip canlı, iş uzun
+  // sürüyor. İlk kuşak mantık (yaş = devralma yetkisi) burada kilidi çalar ve
+  // kilidin var olma sebebi olan mükerrer teslimat yarışını geri getirirdi.
   store.run("UPDATE scan_lock SET acquired_at = ? WHERE id = 1", new Date(Date.now() - 11 * 60 * 1000).toISOString());
-  assert.throws(() => acquireScanLock(store, "pid:999999"), ScanLockBusy);
+  assert.throws(() => acquireScanLock(store, newLockHolder()), ScanLockBusy);
   store.close();
 });
