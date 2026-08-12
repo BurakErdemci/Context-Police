@@ -50,6 +50,30 @@ const WEIGHT: Partial<Record<AnchorState, number>> = {
   symbol_lost: 0.4,
   never_existed: 0.3,
 };
+/**
+ * `never_existed` katkılarının TOPLAM tavanı. Ölçüm (altın set r2 §8.2): kalan tek
+ * yanlış alarm (`indirme-butunlugu-kutugu`) tam 0,3+0,3 = 0,60 ile eşiğe oturuyordu,
+ * başka hiçbir sinyal olmadan. İlke: tek bir sinyal sınıfı tek başına mahkûm
+ * edemez — eşiği ancak iki bağımsız sınıfın bileşimi delmeli. Per-anchor ağırlık
+ * 0,3 kalır (tekil hüküm ve sayımlar değişmesin diye); kırpılan yalnız toplam.
+ */
+export const NEVER_EXISTED_CAP = 0.5;
+
+/**
+ * `born_invalid` (M0-D2) zayıf sinyali: notun yolları YAZILDIĞI hâliyle tutmuyor,
+ * ancak sonek çözümlemesiyle bulunuyor. Ölçüm (r2 §6.1): `custom-tools-cs-eksik`
+ * 1,00 → 0,30 düştü çünkü 5 `never_existed`'in 4'ü sonekle `ok`'a çözüldü — oysa
+ * M0'ın bu nota verdiği çürüme tipi tam olarak "doğuştan-yanlış yol". Dosyanın
+ * bir yerlerde bulunması notu doğru yapmaz; okuyanı yanlış yola gönderir.
+ *
+ * Eşik neden 2: 2. turda sonek çözümlemesi YAYGINDI (11 çapa kurtarıldı) ve çoğu
+ * geçerli nottaydı — elle yazılmış notta tek kısaltma meşru bir üslup, iki ve
+ * üzeri ise notun yol yazımının sistemli olarak güvenilmez olduğunun işareti.
+ * Ağırlık 0,2: tek başına eşik altı (zayıf sinyal), bileşimde belirleyici.
+ */
+export const BORN_INVALID_MIN_RESOLVED = 2;
+export const BORN_INVALID_WEIGHT = 0.2;
+
 const SEVERITY: Record<AnchorState, number> = {
   missing_now: 3, symbol_lost: 3, never_existed: 2, churned: 1, ok: 0, unverifiable: 0,
 };
@@ -170,12 +194,24 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
   const reasons: string[] = [];
   let maxCommits = 0;
   let anchorMoved = false;
+  let neverExistedRaw = 0;   // kırpma ÖNCESİ toplam — tavana değip değmediği buradan
+  let neverExistedCount = 0;
+  let resolvedCount = 0;     // sonekle çözülen çapa sayısı (born_invalid göstergesi)
 
   for (const v of verdicts) {
     const w = WEIGHT[v.state];
     if (w !== undefined) {
-      score += w;
-      anchorMoved = anchorMoved || v.state !== "never_existed"; // hiç var olmamış çapa "hareket" değil
+      if (v.state === "never_existed") { neverExistedRaw += w; neverExistedCount++; }
+      else score += w;
+      // `never_existed` de hareket sayılır. Eski kural ("hiç var olmamış çapa
+      // hareket değil") sonek çözümlemesinden ÖNCE doğruydu: o zaman hüküm yolun
+      // kısa yazılmasından da çıkabiliyordu. Artık `never_existed` ancak sonek
+      // araması SIFIR eşleşme döndükten sonra ayakta kalıyor (r2 §2: 15 hükmün
+      // 3'ü bu elemeden geçebildi) — yani "gerçekten hiçbir yerde yok" ölçülmüş
+      // bir iddia, ve çapanın işaret ettiği yüzeyin gitmiş olmasıyla eşdeğer.
+      // Eski kuralın bedeli ölçüldü: `windows-acikleri` iki tur boyunca tam
+      // 0,50'de takıldı çünkü D1 (DURUM + hareket) bileşimi hiç açılmadı.
+      anchorMoved = true;
       const refNote = v.refDisagreement !== undefined
         ? ` (çalışma ağacı: ${v.refDisagreement.head}, origin: ${v.refDisagreement.origin})`
         : "";
@@ -188,6 +224,7 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
     // (ağırlıksız dal) ve o hâlde HİÇ gerekçe üretmezdi — yani bir varsayım
     // sessizce hükme girerdi. Kullanıcı hangi yolun ölçüldüğünü görmeli.
     if (v.resolvedPath !== undefined) {
+      resolvedCount++;
       reasons.push(`${v.anchor.kind} ${v.anchor.value}: sonek çözümlendi → ${v.resolvedPath} (durum: ${v.state})`);
     }
     if (v.measurementFailed !== undefined) {
@@ -197,6 +234,17 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
       );
     }
     if (v.commits !== undefined) maxCommits = Math.max(maxCommits, v.commits);
+  }
+
+  // Sessiz tavan görünmez bir varsayım olurdu: kırpma gerçekleştiğinde söylenir.
+  score += Math.min(neverExistedRaw, NEVER_EXISTED_CAP);
+  if (neverExistedRaw > NEVER_EXISTED_CAP) {
+    reasons.push(`never_existed katkısı ${NEVER_EXISTED_CAP} tavanında kırpıldı (${neverExistedCount} çapa)`);
+  }
+
+  if (resolvedCount >= BORN_INVALID_MIN_RESOLVED) {
+    score += BORN_INVALID_WEIGHT;
+    reasons.push(`${resolvedCount} çapa yazıldığı yolda değil — not yolları yanlış yazıyor (born_invalid)`);
   }
 
   if (maxCommits >= 3) {

@@ -5,7 +5,11 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpDir } from "./helpers.ts";
 import { openGit } from "../src/signals/git.ts";
-import { checkAnchors, scoreDrift, SUSPICION_THRESHOLD, type AnchorVerdict } from "../src/signals/anchor-drift.ts";
+import {
+  checkAnchors, scoreDrift, SUSPICION_THRESHOLD,
+  NEVER_EXISTED_CAP, BORN_INVALID_MIN_RESOLVED, BORN_INVALID_WEIGHT,
+  type AnchorVerdict,
+} from "../src/signals/anchor-drift.ts";
 
 const v = (state: AnchorVerdict["state"], extra: Partial<AnchorVerdict> = {}): AnchorVerdict =>
   ({ anchor: { kind: "file_path", value: "x.ts" }, state, ...extra });
@@ -33,6 +37,67 @@ test("skor 1.0'da kapaklanır ve reasons her katkıyı sayar", () => {
   const r = scoreDrift([v("missing_now"), v("missing_now"), v("symbol_lost")], true);
   assert.equal(r.score, 1);
   assert.ok(r.reasons.length >= 3);
+});
+
+// --- 2. tur ölçümünün üç aritmetik düzeltmesi -------------------------------
+// Kaynak: docs/olcumler/2026-08-12-m3-altin-set-olcumu-r2.md §8.2, §8.3, §6.1.
+
+test("never_existed toplamı 0,5'te kırpılır: tek sınıf tek başına eşiği delemez (r2 §8.2)", () => {
+  const iki = scoreDrift([v("never_existed"), v("never_existed")], false);
+  assert.equal(iki.score, NEVER_EXISTED_CAP);
+  assert.ok(iki.score < SUSPICION_THRESHOLD, `iki never_existed eşiği deldi: ${iki.score}`);
+  assert.ok(iki.reasons.some((r) => r.includes("kırpıldı")),
+    `kırpma sessiz kaldı: ${JSON.stringify(iki.reasons)}`);
+
+  // Üç çapa da aynı sınıftan: kırpma sürüyor, skor 0,9 değil 0,5.
+  const uc = scoreDrift([v("never_existed"), v("never_existed"), v("never_existed")], false);
+  assert.equal(uc.score, NEVER_EXISTED_CAP);
+
+  // Tek çapa kırpılmaz ve gerekçe üretmez — tavan yalnız gerçekten değdiğinde konuşur.
+  const tek = scoreDrift([v("never_existed")], false);
+  assert.equal(tek.score, 0.3);
+  assert.ok(!tek.reasons.some((r) => r.includes("kırpıldı")));
+});
+
+test("kırpma YALNIZ never_existed'a uygulanır: sınıf karışımı tam toplanır", () => {
+  // İki bağımsız sınıfın bileşimi eşiği delmeli — kırpılan yalnız kendi sınıfının payı.
+  const karisik = scoreDrift([v("never_existed"), v("never_existed"), v("symbol_lost")], false);
+  assert.equal(karisik.score, NEVER_EXISTED_CAP + 0.4);
+  assert.ok(karisik.score >= SUSPICION_THRESHOLD);
+});
+
+test("never_existed artık 'hareket' sayılır: DURUM ile bileşim eşiği aşar (r2 §8.3)", () => {
+  // Ölçüm: `windows-acikleri` iki turdur 0,50'de takılıydı (0,3 + DURUM 0,2).
+  const d = scoreDrift([v("never_existed")], true);
+  assert.ok(d.score >= 0.7, `beklenen ≥0.7, gelen ${d.score}`);
+  assert.ok(d.reasons.some((r) => r.includes("M0-D1")),
+    `D1 bileşimi ateşlemedi: ${JSON.stringify(d.reasons)}`);
+});
+
+test("born_invalid: iki ve üzeri sonek çözümlemesi zayıf sinyal üretir (r2 §6.1 / M0-D2)", () => {
+  const ikiCozulmus = scoreDrift([
+    v("ok", { resolvedPath: "a/x.ts" }),
+    v("ok", { resolvedPath: "b/y.ts" }),
+  ], false);
+  assert.equal(ikiCozulmus.score, BORN_INVALID_WEIGHT);
+  assert.ok(ikiCozulmus.reasons.some((r) => r.includes("born_invalid")),
+    `gerekçe yok: ${JSON.stringify(ikiCozulmus.reasons)}`);
+
+  // Tek çözülme sinyal DEĞİL: elle yazılmış notta kısaltma meşru.
+  const tekCozulmus = scoreDrift([v("ok", { resolvedPath: "a/x.ts" })], false);
+  assert.equal(tekCozulmus.score, 0);
+  assert.ok(!tekCozulmus.reasons.some((r) => r.includes("born_invalid")));
+  assert.equal(BORN_INVALID_MIN_RESOLVED, 2);
+});
+
+test("born_invalid + never_existed + DURUM eşiği deler (custom-tools-cs-eksik şekli)", () => {
+  const d = scoreDrift([
+    v("ok", { resolvedPath: "unity-mcp/Server/src/services/tools/execute_custom_tool.py" }),
+    v("ok", { resolvedPath: "unity-mcp/MCPForUnity/Editor/Constants/EditorPrefKeys.cs" }),
+    v("never_existed"),
+  ], true);
+  assert.ok(d.score >= SUSPICION_THRESHOLD, `eşik altında kaldı: ${d.score}`);
+  assert.ok(d.reasons.some((r) => r.includes("born_invalid")));
 });
 
 test("ref uyuşmazlığında kötü hüküm skoru belirler (M0-D7)", () => {
