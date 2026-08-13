@@ -23,8 +23,18 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdtempSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseNote, extractAnchors } from "../../core/src/importer/parse.ts";
+import { openGit } from "../../core/src/signals/git.ts";
+import { checkAnchors } from "../../core/src/signals/anchor-drift.ts";
+import { evidenceFor } from "./evidence-block.ts";
 
-const [wt, notesDir, outPath, ...notes] = process.argv.slice(2);
+// --evidence: mekanik katmanın ZATEN ölçtüğü çapa kanıtını isteme koyar.
+// 13 Ağu ölçümü maliyetin keşif turlarından geldiğini gösterdi; bu bayrak o
+// keşfin ne kadarının gereksiz olduğunu ölçmek için var.
+const argvAll = process.argv.slice(2);
+const WITH_EVIDENCE = argvAll.includes("--evidence");
+const positional = argvAll.filter((a) => !a.startsWith("--"));
+const [wt, notesDir, outPath, ...notes] = positional;
 if (!wt || !notesDir || !outPath || notes.length === 0) {
   console.error("kullanım: adjudicate-cost.ts <worktree> <notlar> <cikti.jsonl> <not>...");
   process.exit(2);
@@ -59,7 +69,10 @@ const SCHEMA = {
 // "bu not doğru mu" diye sorulmuyor; "diske karşı ÖLÇ" deniyor. Emir kipiyle
 // "kır / saldır" da yok — o dil sağlayıcı reddine yol açıyor
 // (codex-cyberpolicy-reddi, 11 Ağu ölçümü).
-function buildPrompt(note: string, body: string): string {
+function buildPrompt(note: string, body: string, evidence: string | null): string {
+  const ev = evidence
+    ? `\n--- ÖNCEDEN ÖLÇÜLMÜŞ KANIT (mekanik katman, aynı commit) ---\n${evidence}\n--- KANIT SONU ---\n\nBu kanıt zaten ölçüldü; yeniden ölçme. Yalnız kanıtın YETMEDİĞİ yerlerde depoya bak.\n`
+    : "";
   return `Bir yazılım deposunun kök dizinindesin. Depo \`b4065f1\` commit'ine sabitlenmiş.
 
 Aşağıda o depoya ait bir hafıza notu var. Görevin bu notu OKUMAK değil, ÖLÇMEK:
@@ -86,6 +99,7 @@ sayı. Özet yargı değil.
 
 Ölçüm bütçesi: hiçbir komut 60 saniyeyi geçmesin, arka planda süreç bırakma.
 
+${ev}
 --- NOT: ${note}.md ---
 ${body}
 --- NOT SONU ---`;
@@ -154,6 +168,9 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
   });
 }
 
+const gitCtx = WITH_EVIDENCE ? await openGit(wt, { fetch: false, originRef: "19c623f" }) : null;
+if (WITH_EVIDENCE && !gitCtx) { console.error("git bağlamı açılamadı"); process.exit(1); }
+
 const tmp = mkdtempSync(join(tmpdir(), "adj-"));
 const schemaPath = join(tmp, "schema.json");
 writeFileSync(schemaPath, JSON.stringify(SCHEMA));
@@ -165,13 +182,20 @@ console.log("─".repeat(88));
 for (const note of notes) {
   const body = readFileSync(join(notesDir, `${note}.md`), "utf8");
   const lines = body.split("\n").length;
-  const r = await runCodex(buildPrompt(note, body), schemaPath);
+  let evidence: string | null = null;
+  if (WITH_EVIDENCE) {
+    const parsed = parseNote(body);
+    const { anchors } = extractAnchors(body);
+    const verdicts = await checkAnchors(gitCtx!, anchors, new Date(0).toISOString());
+    evidence = evidenceFor(verdicts);
+  }
+  const r = await runCodex(buildPrompt(note, body, evidence), schemaPath);
   // Ham akış saklanıyor: iddia sayacı sessizce 0 döndüğünde çağrının hiç
   // hüküm üretmediği mi yoksa ayrıştırmanın mı kaçırdığı ancak böyle ayrılır.
   writeFileSync(`${outPath}.${note}.raw.jsonl`, r.raw);
   const u = r.usage ?? {};
   const rec = {
-    note, lines, rc: r.rc, ms: r.ms,
+    note, lines, rc: r.rc, ms: r.ms, evidence_fed: WITH_EVIDENCE,
     input_tokens: u.input_tokens ?? null,
     cached_input_tokens: u.cached_input_tokens ?? null,
     output_tokens: u.output_tokens ?? null,

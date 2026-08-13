@@ -1,0 +1,2707 @@
+{
+  "meta": {
+    "pin": "b4065f1",
+    "pinDate": "2026-07-30T07:50:00.000Z",
+    "repo": "/Users/burakemreerdemci/Documents/unityaiPython",
+    "goldenDir": "/Users/burakemreerdemci/.context-police/golden/2026-08-11-gamachine",
+    "noteCount": 28,
+    "commitsIn8Weeks": 131,
+    "rules": "parse.ts kopyası: PATH_RE/SHA_RE/SYMBOL_RE, PER_KIND_QUOTA=6, MAX_ANCHORS_PER_NOTE=16"
+  },
+  "notes": [
+    {
+      "note": "agy-model-secimi.md",
+      "kinds": {
+        "symbol": 3,
+        "commit_sha": 2,
+        "external_path": 2
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "_AGY_MODEL_MAP",
+        "timeout",
+        "_set_agy_model"
+      ]
+    },
+    {
+      "note": "agy-print-mcp-koprusu.md",
+      "kinds": {
+        "symbol": 13,
+        "file_path": 1,
+        "external_path": 2
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "Backend/app/unityai_cli.py",
+          "resolved": "Backend/app/unityai_cli.py",
+          "how": "literal"
+        }
+      ],
+      "symbolAnchors": [
+        "run_command",
+        "serverUrl",
+        "streamable_http_client",
+        "call_tool",
+        "view_file",
+        "list_dir",
+        "grep_search",
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "disabledTools",
+        "mcp__unityMCP__manage_script",
+        "toolPermission"
+      ]
+    },
+    {
+      "note": "bekleyen-isler.md",
+      "kinds": {
+        "symbol": 6,
+        "file_path": 6,
+        "commit_sha": 4
+      },
+      "dropped": 138,
+      "pathAnchors": [
+        {
+          "value": ".delegate-runs/AUDIT/ledger.jsonl",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": "origin/main..HEAD",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": ".github/workflows/test.yml",
+          "resolved": ".github/workflows/test.yml",
+          "how": "literal"
+        },
+        {
+          "value": ".delegate-runs/ARCHIVE/2026-07-28-kimi-approval-gate/REPORT.md",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": ".delegate-runs/ARCHIVE/2026-07-28-codex-approval-gate/REPORT.md",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": "providers/workspace_config.py",
+          "resolved": "Backend/app/providers/workspace_config.py",
+          "how": "suffix"
+        }
+      ],
+      "symbolAnchors": [
+        "HEAD",
+        "is_running",
+        "already_running",
+        "start_server",
+        "port_occupant",
+        "get_status"
+      ]
+    },
+    {
+      "note": "codex-delegate-niyet.md",
+      "kinds": {
+        "symbol": 12,
+        "file_path": 2,
+        "commit_sha": 1,
+        "external_path": 1
+      },
+      "dropped": 7,
+      "pathAnchors": [
+        {
+          "value": "skills/codex-delegate/scripts/doctor.py",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": "references/lenses.md",
+          "resolved": null,
+          "how": "never_existed"
+        }
+      ],
+      "symbolAnchors": [
+        "unityMCP",
+        "mcp__codex__codex",
+        "IN_FLIGHT",
+        "BASELINE",
+        "node_modules",
+        "venv",
+        "repo_root",
+        "cyberPolicy",
+        "echo",
+        "kimi",
+        "finding",
+        "base_sha"
+      ]
+    },
+    {
+      "note": "csharp-zekasi-zinciri.md",
+      "kinds": {
+        "symbol": 15,
+        "external_path": 1
+      },
+      "dropped": 2,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "hostfxr_resolve_sdk2",
+        "initialize",
+        "dotnet",
+        "true",
+        "IsRiderOrFleetInstallation",
+        "kScriptsDefaultApp",
+        "Sync",
+        "LegacyStyleProjectGeneration",
+        "GenerateAndWriteSolutionAndProjects",
+        "CodeEditorProjectSync",
+        "ProjectGeneration",
+        "GetProjectHeader",
+        "ProjectText",
+        "SdkStyleProjectGeneration",
+        "didOpen"
+      ]
+    },
+    {
+      "note": "custom-tools-cs-eksik.md",
+      "kinds": {
+        "symbol": 3,
+        "file_path": 5
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "unity-mcp/Server/services/custom_tool_service.py",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": "services/tools/execute_custom_tool.py",
+          "resolved": "unity-mcp/Server/src/services/tools/execute_custom_tool.py",
+          "how": "suffix"
+        },
+        {
+          "value": "services/resources/custom_tools.py",
+          "resolved": "unity-mcp/Server/src/services/resources/custom_tools.py",
+          "how": "suffix"
+        },
+        {
+          "value": "Editor/Constants/EditorPrefKeys.cs",
+          "resolved": "unity-mcp/MCPForUnity/Editor/Constants/EditorPrefKeys.cs",
+          "how": "suffix"
+        },
+        {
+          "value": "Editor/Windows/EditorPrefs/EditorPrefsWindow.cs",
+          "resolved": "unity-mcp/MCPForUnity/Editor/Windows/EditorPrefs/EditorPrefsWindow.cs",
+          "how": "suffix"
+        }
+      ],
+      "symbolAnchors": [
+        "execute_custom_tool",
+        "CustomTool",
+        "SendRegisterToolsAsync"
+      ]
+    },
+    {
+      "note": "denetim-kapatma-dersi.md",
+      "kinds": {
+        "symbol": 15,
+        "commit_sha": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "islink",
+        "dest",
+        "_intact",
+        "_resolve_binary",
+        "_embedded_dotnet_root",
+        "DOTNET_ROOT",
+        "PATH",
+        "realpath",
+        "asset_key",
+        "onDone",
+        "onSkipOne",
+        "unverified",
+        "MCP_MSG_ID",
+        "return",
+        "ready"
+      ]
+    },
+    {
+      "note": "indirme-butunlugu-kutugu.md",
+      "kinds": {
+        "symbol": 7,
+        "file_path": 5
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "scripts/pinned_assets.json",
+          "resolved": "scripts/pinned_assets.json",
+          "how": "literal"
+        },
+        {
+          "value": "scripts/pinned_assets.py",
+          "resolved": "scripts/pinned_assets.py",
+          "how": "literal"
+        },
+        {
+          "value": "util/prunetags.sh",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": ".github/workflows/test.yml",
+          "resolved": ".github/workflows/test.yml",
+          "how": "literal"
+        },
+        {
+          "value": "release-metadata/10.0/10.0.0/release.json",
+          "resolved": null,
+          "how": "never_existed"
+        }
+      ],
+      "symbolAnchors": [
+        "fetch_uv",
+        "fetch_video_bins",
+        "refresh",
+        "check",
+        "latest",
+        "pwsh",
+        "_install"
+      ]
+    },
+    {
+      "note": "jarvan-asistan.md",
+      "kinds": {
+        "external_path": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": []
+    },
+    {
+      "note": "kabuk-olcum-tuzaklari.md",
+      "kinds": {
+        "symbol": 6,
+        "commit_sha": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "strings",
+        "find",
+        "MAX_ARG_STRLEN",
+        "mapfile",
+        "readarray",
+        "PreToolUse"
+      ]
+    },
+    {
+      "note": "kimi-provider-dogrulanmadi.md",
+      "kinds": {
+        "symbol": 7,
+        "file_path": 1,
+        "commit_sha": 2
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "Backend/app/providers/kimi_provider.py",
+          "resolved": "Backend/app/providers/kimi_provider.py",
+          "how": "literal"
+        }
+      ],
+      "symbolAnchors": [
+        "type",
+        "role",
+        "assistant",
+        "tool",
+        "_is_kimi",
+        "_is_kimi_k3",
+        "CLI_GROUPS"
+      ]
+    },
+    {
+      "note": "kritik-acik-tanimi.md",
+      "kinds": {
+        "symbol": 4
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "test_secret_file_hardening",
+        "test_local_token_file",
+        "agent_runner",
+        "providers"
+      ]
+    },
+    {
+      "note": "lisans-karari.md",
+      "kinds": {
+        "symbol": 1,
+        "commit_sha": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "LICENSE"
+      ]
+    },
+    {
+      "note": "macos-build-mekanigi.md",
+      "kinds": {
+        "symbol": 3,
+        "file_path": 4,
+        "commit_sha": 2
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "scripts/fetch_omnisharp.py",
+          "resolved": "scripts/fetch_omnisharp.py",
+          "how": "literal"
+        },
+        {
+          "value": "./fetch_video_bins.sh",
+          "resolved": "Backend/vendor/fetch_video_bins.sh",
+          "how": "suffix"
+        },
+        {
+          "value": "./build_backend.sh",
+          "resolved": "Backend/build_backend.sh",
+          "how": "suffix"
+        },
+        {
+          "value": "Frontend/frontend/package.json",
+          "resolved": "Frontend/frontend/package.json",
+          "how": "literal"
+        }
+      ],
+      "symbolAnchors": [
+        "_resolve_binary",
+        "_spawn_env",
+        "claude_agent_sdk"
+      ]
+    },
+    {
+      "note": "masaustu-guven-modeli.md",
+      "kinds": {
+        "symbol": 7,
+        "file_path": 2
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "helpers/ipc-trust.ts",
+          "resolved": "Frontend/frontend/main/helpers/ipc-trust.ts",
+          "how": "suffix"
+        },
+        {
+          "value": "userData/trusted-workspaces.json",
+          "resolved": null,
+          "how": "never_existed"
+        }
+      ],
+      "symbolAnchors": [
+        "handleSecure",
+        "senderFrame",
+        "workspacePath",
+        "adoptLegacyRoot",
+        "write_file",
+        "_validate_path",
+        "delete_file"
+      ]
+    },
+    {
+      "note": "mcp-derleme-kisir-dongu.md",
+      "kinds": {
+        "symbol": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "no_unity_session"
+      ]
+    },
+    {
+      "note": "olcum-subagent-kod-ana-dongu.md",
+      "kinds": {
+        "symbol": 2,
+        "commit_sha": 1,
+        "external_path": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "find",
+        "grep"
+      ]
+    },
+    {
+      "note": "onay-kapisi-kapsami.md",
+      "kinds": {
+        "symbol": 6,
+        "file_path": 6,
+        "commit_sha": 4
+      },
+      "dropped": 83,
+      "pathAnchors": [
+        {
+          "value": "Backend/app/providers/claude_sdk_session.py",
+          "resolved": "Backend/app/providers/claude_sdk_session.py",
+          "how": "literal"
+        },
+        {
+          "value": "Backend/app/agentic/agent_runner.py",
+          "resolved": "Backend/app/agentic/agent_runner.py",
+          "how": "literal"
+        },
+        {
+          "value": "transport/unity_instance_middleware.py",
+          "resolved": "unity-mcp/Server/src/transport/unity_instance_middleware.py",
+          "how": "suffix"
+        },
+        {
+          "value": "unity-mcp/CLAUDE.md",
+          "resolved": "unity-mcp/CLAUDE.md",
+          "how": "literal"
+        },
+        {
+          "value": "unity-mcp/Server/src/services/registry/tool_actions.json",
+          "resolved": "unity-mcp/Server/src/services/registry/tool_actions.json",
+          "how": "literal"
+        },
+        {
+          "value": "Server/tests/test_tool_actions_ledger.py",
+          "resolved": "unity-mcp/Server/tests/test_tool_actions_ledger.py",
+          "how": "suffix"
+        }
+      ],
+      "symbolAnchors": [
+        "run_command",
+        "manage_scene",
+        "read_console",
+        "disallowed_tools",
+        "mcp__unityMCP__manage_script",
+        "command_approval_needed"
+      ]
+    },
+    {
+      "note": "teslim-yolu-denetim-2.md",
+      "kinds": {
+        "symbol": 13,
+        "commit_sha": 3
+      },
+      "dropped": 9,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "HEAD",
+        "cyberPolicy",
+        "What",
+        "DecisionResult",
+        "respond",
+        "decide",
+        "decidedRef",
+        "onConfirm",
+        "null",
+        "activeGateRef",
+        "write_file",
+        "gate_id",
+        "LOCAL_APP_TOKEN"
+      ]
+    },
+    {
+      "note": "teslim-yolu-denetimi.md",
+      "kinds": {
+        "symbol": 13,
+        "commit_sha": 3
+      },
+      "dropped": 5,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "HEAD",
+        "ready",
+        "activeGate",
+        "messageId",
+        "pendingFix",
+        "original",
+        "return",
+        "EventSource",
+        "head_sha",
+        "cyberPolicy",
+        "unityMCP",
+        "workspace_path",
+        "gateId"
+      ]
+    },
+    {
+      "note": "test-standardi.md",
+      "kinds": {
+        "symbol": 14,
+        "file_path": 1,
+        "commit_sha": 1
+      },
+      "dropped": 4,
+      "pathAnchors": [
+        {
+          "value": "Frontend/frontend/vitest.config.ts",
+          "resolved": "Frontend/frontend/vitest.config.ts",
+          "how": "literal"
+        }
+      ],
+      "symbolAnchors": [
+        "test_secret_file_hardening",
+        "test_mcp_port_guard",
+        "test_mcp_server_cache_policy",
+        "mutmut",
+        "Hypothesis",
+        "command_safety",
+        "pinned_assets",
+        "waitFor",
+        "findByText",
+        "deferred",
+        "ChatPanel",
+        "FileCreationApproval",
+        "node_modules",
+        "ToastContainer"
+      ]
+    },
+    {
+      "note": "unity-architect-mimari.md",
+      "kinds": {
+        "symbol": 3,
+        "file_path": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "routes/conversation_routes.py",
+          "resolved": "Backend/app/routes/conversation_routes.py",
+          "how": "suffix"
+        }
+      ],
+      "symbolAnchors": [
+        "AuthScreen",
+        "ExportModal",
+        "session_token"
+      ]
+    },
+    {
+      "note": "unity-mcp-fork-atif.md",
+      "kinds": {
+        "symbol": 8,
+        "commit_sha": 2
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "ControllerTransitions",
+        "get_info",
+        "find_gameobjects",
+        "match_mode",
+        "batch_execute",
+        "_connectionGen",
+        "_socketKeepAliveInterval",
+        "main"
+      ]
+    },
+    {
+      "note": "unity-mcp-toggle-internet-bagimli.md",
+      "kinds": {
+        "symbol": 5,
+        "file_path": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "Packages/manifest.json",
+          "resolved": null,
+          "how": "ambiguous",
+          "count": 2
+        }
+      ],
+      "symbolAnchors": [
+        "_server_source_changed",
+        "_ensure_writable_resources",
+        "Server",
+        "server_dir",
+        "grep"
+      ]
+    },
+    {
+      "note": "unity-mcp-yerel-auth.md",
+      "kinds": {
+        "symbol": 4,
+        "file_path": 3,
+        "external_path": 3
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "workspace/.mcp.json",
+          "resolved": null,
+          "how": "never_existed"
+        },
+        {
+          "value": "unity-mcp/Server/tests/test_local_transport_auth_scope.py",
+          "resolved": "unity-mcp/Server/tests/test_local_transport_auth_scope.py",
+          "how": "literal"
+        },
+        {
+          "value": "Backend/app/local_token_file.py",
+          "resolved": "Backend/app/local_token_file.py",
+          "how": "literal"
+        }
+      ],
+      "symbolAnchors": [
+        "headers",
+        "http_headers",
+        "local_api_token",
+        "O_NOFOLLOW"
+      ]
+    },
+    {
+      "note": "windows-acikleri.md",
+      "kinds": {
+        "symbol": 4,
+        "file_path": 4
+      },
+      "dropped": 0,
+      "pathAnchors": [
+        {
+          "value": "Backend/run_mcp_server.cmd",
+          "resolved": "Backend/run_mcp_server.cmd",
+          "how": "literal"
+        },
+        {
+          "value": "Backend/unityai.cmd",
+          "resolved": "Backend/unityai.cmd",
+          "how": "literal"
+        },
+        {
+          "value": "Frontend/frontend/electron-builder.yml",
+          "resolved": "Frontend/frontend/electron-builder.yml",
+          "how": "literal"
+        },
+        {
+          "value": ".delegate-runs/AUDIT/ledger.jsonl",
+          "resolved": null,
+          "how": "never_existed"
+        }
+      ],
+      "symbolAnchors": [
+        "unityai",
+        "exec_module",
+        "getBackendPaths",
+        "isWin"
+      ]
+    },
+    {
+      "note": "windows-gecisi-tasima.md",
+      "kinds": {
+        "symbol": 2,
+        "commit_sha": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": [
+        "memory",
+        "JarvanVault"
+      ]
+    },
+    {
+      "note": "worktree-kullanimi.md",
+      "kinds": {
+        "commit_sha": 1
+      },
+      "dropped": 0,
+      "pathAnchors": [],
+      "symbolAnchors": []
+    }
+  ],
+  "windows": [
+    {
+      "idx": 1,
+      "from": "2026-06-04T07:50:00.000Z",
+      "to": "2026-06-11T07:50:00.000Z",
+      "commits": 0,
+      "changedFiles": 0,
+      "movedNoteCount": 0,
+      "movedNotes": [],
+      "movedCombinedCount": 0,
+      "movedCombined": []
+    },
+    {
+      "idx": 2,
+      "from": "2026-06-11T07:50:00.000Z",
+      "to": "2026-06-18T07:50:00.000Z",
+      "commits": 10,
+      "changedFiles": 39,
+      "movedNoteCount": 4,
+      "movedNotes": [
+        {
+          "note": "macos-build-mekanigi.md",
+          "anchors": [
+            "Frontend/frontend/package.json"
+          ]
+        },
+        {
+          "note": "onay-kapisi-kapsami.md",
+          "anchors": [
+            "Backend/app/agentic/agent_runner.py"
+          ]
+        },
+        {
+          "note": "unity-architect-mimari.md",
+          "anchors": [
+            "Backend/app/routes/conversation_routes.py"
+          ]
+        },
+        {
+          "note": "windows-acikleri.md",
+          "anchors": [
+            "Backend/run_mcp_server.cmd",
+            "Backend/unityai.cmd",
+            "Frontend/frontend/electron-builder.yml"
+          ]
+        }
+      ],
+      "movedCombinedCount": 23,
+      "movedCombined": [
+        "agy-model-secimi.md",
+        "agy-print-mcp-koprusu.md",
+        "bekleyen-isler.md",
+        "codex-delegate-niyet.md",
+        "csharp-zekasi-zinciri.md",
+        "denetim-kapatma-dersi.md",
+        "indirme-butunlugu-kutugu.md",
+        "kabuk-olcum-tuzaklari.md",
+        "kimi-provider-dogrulanmadi.md",
+        "kritik-acik-tanimi.md",
+        "lisans-karari.md",
+        "macos-build-mekanigi.md",
+        "masaustu-guven-modeli.md",
+        "olcum-subagent-kod-ana-dongu.md",
+        "onay-kapisi-kapsami.md",
+        "teslim-yolu-denetim-2.md",
+        "teslim-yolu-denetimi.md",
+        "test-standardi.md",
+        "unity-architect-mimari.md",
+        "unity-mcp-fork-atif.md",
+        "unity-mcp-toggle-internet-bagimli.md",
+        "windows-acikleri.md",
+        "windows-gecisi-tasima.md"
+      ]
+    },
+    {
+      "idx": 3,
+      "from": "2026-06-18T07:50:00.000Z",
+      "to": "2026-06-25T07:50:00.000Z",
+      "commits": 1,
+      "changedFiles": 4,
+      "movedNoteCount": 0,
+      "movedNotes": [],
+      "movedCombinedCount": 0,
+      "movedCombined": []
+    },
+    {
+      "idx": 4,
+      "from": "2026-06-25T07:50:00.000Z",
+      "to": "2026-07-02T07:50:00.000Z",
+      "commits": 6,
+      "changedFiles": 32,
+      "movedNoteCount": 3,
+      "movedNotes": [
+        {
+          "note": "onay-kapisi-kapsami.md",
+          "anchors": [
+            "Backend/app/providers/claude_sdk_session.py",
+            "Backend/app/agentic/agent_runner.py"
+          ]
+        },
+        {
+          "note": "unity-architect-mimari.md",
+          "anchors": [
+            "Backend/app/routes/conversation_routes.py"
+          ]
+        },
+        {
+          "note": "windows-acikleri.md",
+          "anchors": [
+            "Frontend/frontend/electron-builder.yml"
+          ]
+        }
+      ],
+      "movedCombinedCount": 23,
+      "movedCombined": [
+        "agy-model-secimi.md",
+        "agy-print-mcp-koprusu.md",
+        "bekleyen-isler.md",
+        "codex-delegate-niyet.md",
+        "csharp-zekasi-zinciri.md",
+        "denetim-kapatma-dersi.md",
+        "indirme-butunlugu-kutugu.md",
+        "kabuk-olcum-tuzaklari.md",
+        "kimi-provider-dogrulanmadi.md",
+        "kritik-acik-tanimi.md",
+        "macos-build-mekanigi.md",
+        "masaustu-guven-modeli.md",
+        "olcum-subagent-kod-ana-dongu.md",
+        "onay-kapisi-kapsami.md",
+        "teslim-yolu-denetim-2.md",
+        "teslim-yolu-denetimi.md",
+        "test-standardi.md",
+        "unity-architect-mimari.md",
+        "unity-mcp-fork-atif.md",
+        "unity-mcp-toggle-internet-bagimli.md",
+        "unity-mcp-yerel-auth.md",
+        "windows-acikleri.md",
+        "windows-gecisi-tasima.md"
+      ]
+    },
+    {
+      "idx": 5,
+      "from": "2026-07-02T07:50:00.000Z",
+      "to": "2026-07-09T07:50:00.000Z",
+      "commits": 3,
+      "changedFiles": 22,
+      "movedNoteCount": 2,
+      "movedNotes": [
+        {
+          "note": "onay-kapisi-kapsami.md",
+          "anchors": [
+            "Backend/app/providers/claude_sdk_session.py",
+            "Backend/app/agentic/agent_runner.py"
+          ]
+        },
+        {
+          "note": "unity-architect-mimari.md",
+          "anchors": [
+            "Backend/app/routes/conversation_routes.py"
+          ]
+        }
+      ],
+      "movedCombinedCount": 15,
+      "movedCombined": [
+        "agy-model-secimi.md",
+        "codex-delegate-niyet.md",
+        "csharp-zekasi-zinciri.md",
+        "denetim-kapatma-dersi.md",
+        "kabuk-olcum-tuzaklari.md",
+        "kimi-provider-dogrulanmadi.md",
+        "kritik-acik-tanimi.md",
+        "masaustu-guven-modeli.md",
+        "olcum-subagent-kod-ana-dongu.md",
+        "onay-kapisi-kapsami.md",
+        "teslim-yolu-denetim-2.md",
+        "teslim-yolu-denetimi.md",
+        "test-standardi.md",
+        "unity-architect-mimari.md",
+        "unity-mcp-yerel-auth.md"
+      ]
+    },
+    {
+      "idx": 6,
+      "from": "2026-07-09T07:50:00.000Z",
+      "to": "2026-07-16T07:50:00.000Z",
+      "commits": 28,
+      "changedFiles": 83,
+      "movedNoteCount": 4,
+      "movedNotes": [
+        {
+          "note": "macos-build-mekanigi.md",
+          "anchors": [
+            "Backend/vendor/fetch_video_bins.sh",
+            "Frontend/frontend/package.json"
+          ]
+        },
+        {
+          "note": "onay-kapisi-kapsami.md",
+          "anchors": [
+            "Backend/app/agentic/agent_runner.py"
+          ]
+        },
+        {
+          "note": "unity-architect-mimari.md",
+          "anchors": [
+            "Backend/app/routes/conversation_routes.py"
+          ]
+        },
+        {
+          "note": "windows-acikleri.md",
+          "anchors": [
+            "Frontend/frontend/electron-builder.yml"
+          ]
+        }
+      ],
+      "movedCombinedCount": 23,
+      "movedCombined": [
+        "agy-model-secimi.md",
+        "agy-print-mcp-koprusu.md",
+        "bekleyen-isler.md",
+        "codex-delegate-niyet.md",
+        "csharp-zekasi-zinciri.md",
+        "denetim-kapatma-dersi.md",
+        "indirme-butunlugu-kutugu.md",
+        "kabuk-olcum-tuzaklari.md",
+        "kimi-provider-dogrulanmadi.md",
+        "kritik-acik-tanimi.md",
+        "macos-build-mekanigi.md",
+        "masaustu-guven-modeli.md",
+        "olcum-subagent-kod-ana-dongu.md",
+        "onay-kapisi-kapsami.md",
+        "teslim-yolu-denetim-2.md",
+        "teslim-yolu-denetimi.md",
+        "test-standardi.md",
+        "unity-architect-mimari.md",
+        "unity-mcp-fork-atif.md",
+        "unity-mcp-toggle-internet-bagimli.md",
+        "unity-mcp-yerel-auth.md",
+        "windows-acikleri.md",
+        "windows-gecisi-tasima.md"
+      ]
+    },
+    {
+      "idx": 7,
+      "from": "2026-07-16T07:50:00.000Z",
+      "to": "2026-07-23T07:50:00.000Z",
+      "commits": 17,
+      "changedFiles": 61,
+      "movedNoteCount": 3,
+      "movedNotes": [
+        {
+          "note": "macos-build-mekanigi.md",
+          "anchors": [
+            "scripts/fetch_omnisharp.py",
+            "Frontend/frontend/package.json"
+          ]
+        },
+        {
+          "note": "onay-kapisi-kapsami.md",
+          "anchors": [
+            "Backend/app/agentic/agent_runner.py"
+          ]
+        },
+        {
+          "note": "windows-acikleri.md",
+          "anchors": [
+            "Frontend/frontend/electron-builder.yml"
+          ]
+        }
+      ],
+      "movedCombinedCount": 20,
+      "movedCombined": [
+        "agy-model-secimi.md",
+        "codex-delegate-niyet.md",
+        "csharp-zekasi-zinciri.md",
+        "denetim-kapatma-dersi.md",
+        "indirme-butunlugu-kutugu.md",
+        "kabuk-olcum-tuzaklari.md",
+        "kimi-provider-dogrulanmadi.md",
+        "kritik-acik-tanimi.md",
+        "macos-build-mekanigi.md",
+        "masaustu-guven-modeli.md",
+        "olcum-subagent-kod-ana-dongu.md",
+        "onay-kapisi-kapsami.md",
+        "teslim-yolu-denetim-2.md",
+        "teslim-yolu-denetimi.md",
+        "unity-architect-mimari.md",
+        "unity-mcp-fork-atif.md",
+        "unity-mcp-toggle-internet-bagimli.md",
+        "unity-mcp-yerel-auth.md",
+        "windows-acikleri.md",
+        "windows-gecisi-tasima.md"
+      ]
+    },
+    {
+      "idx": 8,
+      "from": "2026-07-23T07:50:00.000Z",
+      "to": "2026-07-30T07:50:00.000Z",
+      "commits": 65,
+      "changedFiles": 141,
+      "movedNoteCount": 9,
+      "movedNotes": [
+        {
+          "note": "agy-print-mcp-koprusu.md",
+          "anchors": [
+            "Backend/app/unityai_cli.py"
+          ]
+        },
+        {
+          "note": "bekleyen-isler.md",
+          "anchors": [
+            ".github/workflows/test.yml",
+            "Backend/app/providers/workspace_config.py"
+          ]
+        },
+        {
+          "note": "indirme-butunlugu-kutugu.md",
+          "anchors": [
+            "scripts/pinned_assets.json",
+            "scripts/pinned_assets.py",
+            ".github/workflows/test.yml"
+          ]
+        },
+        {
+          "note": "kimi-provider-dogrulanmadi.md",
+          "anchors": [
+            "Backend/app/providers/kimi_provider.py"
+          ]
+        },
+        {
+          "note": "macos-build-mekanigi.md",
+          "anchors": [
+            "scripts/fetch_omnisharp.py",
+            "Backend/vendor/fetch_video_bins.sh",
+            "Frontend/frontend/package.json"
+          ]
+        },
+        {
+          "note": "masaustu-guven-modeli.md",
+          "anchors": [
+            "Frontend/frontend/main/helpers/ipc-trust.ts"
+          ]
+        },
+        {
+          "note": "onay-kapisi-kapsami.md",
+          "anchors": [
+            "Backend/app/providers/claude_sdk_session.py",
+            "Backend/app/agentic/agent_runner.py",
+            "unity-mcp/Server/src/services/registry/tool_actions.json",
+            "unity-mcp/Server/tests/test_tool_actions_ledger.py"
+          ]
+        },
+        {
+          "note": "unity-architect-mimari.md",
+          "anchors": [
+            "Backend/app/routes/conversation_routes.py"
+          ]
+        },
+        {
+          "note": "unity-mcp-yerel-auth.md",
+          "anchors": [
+            "unity-mcp/Server/tests/test_local_transport_auth_scope.py",
+            "Backend/app/local_token_file.py"
+          ]
+        }
+      ],
+      "movedCombinedCount": 25,
+      "movedCombined": [
+        "agy-model-secimi.md",
+        "agy-print-mcp-koprusu.md",
+        "bekleyen-isler.md",
+        "codex-delegate-niyet.md",
+        "csharp-zekasi-zinciri.md",
+        "custom-tools-cs-eksik.md",
+        "denetim-kapatma-dersi.md",
+        "indirme-butunlugu-kutugu.md",
+        "kabuk-olcum-tuzaklari.md",
+        "kimi-provider-dogrulanmadi.md",
+        "kritik-acik-tanimi.md",
+        "lisans-karari.md",
+        "macos-build-mekanigi.md",
+        "masaustu-guven-modeli.md",
+        "olcum-subagent-kod-ana-dongu.md",
+        "onay-kapisi-kapsami.md",
+        "teslim-yolu-denetim-2.md",
+        "teslim-yolu-denetimi.md",
+        "test-standardi.md",
+        "unity-architect-mimari.md",
+        "unity-mcp-fork-atif.md",
+        "unity-mcp-toggle-internet-bagimli.md",
+        "unity-mcp-yerel-auth.md",
+        "windows-acikleri.md",
+        "windows-gecisi-tasima.md"
+      ]
+    }
+  ],
+  "symbolSample": {
+    "totalDistinctSymbols": 162,
+    "sampled": 162,
+    "perWindow": [
+      {
+        "idx": 1,
+        "symbolsHit": 0
+      },
+      {
+        "idx": 2,
+        "symbolsHit": 49
+      },
+      {
+        "idx": 3,
+        "symbolsHit": 0
+      },
+      {
+        "idx": 4,
+        "symbolsHit": 40
+      },
+      {
+        "idx": 5,
+        "symbolsHit": 17
+      },
+      {
+        "idx": 6,
+        "symbolsHit": 57
+      },
+      {
+        "idx": 7,
+        "symbolsHit": 40
+      },
+      {
+        "idx": 8,
+        "symbolsHit": 118
+      }
+    ],
+    "detail": {
+      "_AGY_MODEL_MAP": [
+        1781726803000
+      ],
+      "timeout": [
+        1785397800000,
+        1785315418000,
+        1785274578000,
+        1785269102000,
+        1785265036000,
+        1785257929000,
+        1785257900000,
+        1785247765000,
+        1785186869000,
+        1785186841000,
+        1785184799000,
+        1785177541000,
+        1785177511000,
+        1785162986000,
+        1785162201000,
+        1785162201000,
+        1784892250000,
+        1784888838000,
+        1784884427000,
+        1784839312000,
+        1784235557000,
+        1784197146000,
+        1784110358000,
+        1784108825000,
+        1784020572000,
+        1783953946000,
+        1783952901000,
+        1783946948000,
+        1783787335000,
+        1783091527000,
+        1782586798000,
+        1782410604000,
+        1782407636000,
+        1781711985000
+      ],
+      "_set_agy_model": [
+        1784884427000,
+        1784843289000
+      ],
+      "run_command": [
+        1785274578000,
+        1785272487000,
+        1785257929000,
+        1785148901000,
+        1784108825000,
+        1782407636000,
+        1781726803000,
+        1781711985000
+      ],
+      "serverUrl": [],
+      "streamable_http_client": [],
+      "call_tool": [
+        1785397800000
+      ],
+      "view_file": [
+        1784108825000,
+        1782482959000
+      ],
+      "list_dir": [
+        1784843289000,
+        1784108825000,
+        1783946948000,
+        1782482959000
+      ],
+      "grep_search": [
+        1784108825000
+      ],
+      "write_to_file": [
+        1781726803000
+      ],
+      "replace_file_content": [],
+      "multi_replace_file_content": [],
+      "disabledTools": [
+        1784108825000,
+        1783787335000
+      ],
+      "mcp__unityMCP__manage_script": [
+        1782407636000,
+        1781726803000
+      ],
+      "toolPermission": [
+        1784843289000,
+        1783787335000
+      ],
+      "HEAD": [
+        1785397800000,
+        1785274578000,
+        1785257929000,
+        1785247765000,
+        1785177541000,
+        1785177511000,
+        1785162299000,
+        1785162299000,
+        1785148827000,
+        1785147504000,
+        1785147407000,
+        1783946948000,
+        1782586798000
+      ],
+      "is_running": [
+        1785397800000,
+        1785257929000,
+        1785162986000,
+        1785147528000,
+        1785147423000,
+        1784843289000,
+        1784839312000,
+        1783946948000,
+        1782407636000,
+        1781711985000
+      ],
+      "already_running": [
+        1785397800000
+      ],
+      "start_server": [
+        1785397800000,
+        1785272487000,
+        1785257929000,
+        1785162986000,
+        1785162249000,
+        1785147528000,
+        1785147479000,
+        1781726803000,
+        1781719502000
+      ],
+      "port_occupant": [
+        1785397800000
+      ],
+      "get_status": [
+        1785397800000
+      ],
+      "unityMCP": [
+        1785397800000,
+        1785345927000,
+        1785324141000,
+        1785321685000,
+        1785318424000,
+        1785315418000,
+        1785272487000,
+        1785269102000,
+        1785162299000,
+        1785147528000,
+        1784893193000,
+        1784843289000,
+        1784839312000,
+        1784296718000,
+        1784108825000,
+        1783946948000,
+        1782407636000,
+        1781726803000,
+        1781711985000
+      ],
+      "mcp__codex__codex": [],
+      "IN_FLIGHT": [],
+      "BASELINE": [],
+      "node_modules": [
+        1785272487000,
+        1785269102000,
+        1785254138000,
+        1785184799000,
+        1785177488000,
+        1785163609000,
+        1785162986000,
+        1784839312000,
+        1783946948000,
+        1783790800000,
+        1782410604000,
+        1781711985000
+      ],
+      "venv": [
+        1785274578000,
+        1785257929000,
+        1785254138000,
+        1785162201000,
+        1785147479000,
+        1783787335000,
+        1781711985000
+      ],
+      "repo_root": [
+        1785247789000
+      ],
+      "cyberPolicy": [],
+      "echo": [
+        1785272487000,
+        1785254138000,
+        1785247789000,
+        1785162201000,
+        1785147423000,
+        1785147407000,
+        1784892250000,
+        1784839312000,
+        1784197146000,
+        1783946948000,
+        1783792137000,
+        1781726803000,
+        1781726792000,
+        1781711985000
+      ],
+      "kimi": [
+        1785274578000,
+        1785272487000,
+        1785257929000,
+        1785177541000,
+        1785162299000,
+        1785162249000,
+        1785147528000,
+        1784893193000,
+        1784892250000,
+        1784888838000,
+        1784883723000,
+        1784843289000,
+        1784839312000,
+        1784206379000,
+        1783947837000,
+        1783174520000
+      ],
+      "finding": [
+        1785320727000,
+        1785177541000,
+        1785162299000,
+        1784108825000,
+        1781726803000
+      ],
+      "base_sha": [],
+      "hostfxr_resolve_sdk2": [
+        1785184769000
+      ],
+      "initialize": [
+        1785186869000,
+        1785184799000,
+        1785184769000,
+        1785162299000,
+        1784839312000,
+        1784235557000,
+        1784197146000,
+        1784108825000,
+        1782586798000,
+        1782410604000,
+        1782407636000
+      ],
+      "dotnet": [
+        1785254138000,
+        1785251658000,
+        1785247765000,
+        1785186869000,
+        1785186841000,
+        1785184799000,
+        1785184769000,
+        1785162201000,
+        1784995515000,
+        1784235557000
+      ],
+      "true": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785321685000,
+        1785318424000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785272530000,
+        1785269102000,
+        1785265054000,
+        1785265036000,
+        1785257929000,
+        1785257900000,
+        1785254138000,
+        1785247814000,
+        1785247789000,
+        1785186869000,
+        1785184799000,
+        1785177511000,
+        1785177488000,
+        1785163609000,
+        1785148901000,
+        1785148859000,
+        1785147562000,
+        1785147389000,
+        1784906845000,
+        1784839312000,
+        1784296718000,
+        1784295738000,
+        1784284924000,
+        1784197236000,
+        1784197236000,
+        1784197191000,
+        1784197191000,
+        1784044907000,
+        1784035670000,
+        1784020572000,
+        1783965943000,
+        1783955608000,
+        1783953946000,
+        1783952901000,
+        1783946948000,
+        1783883946000,
+        1783795673000,
+        1783792137000,
+        1783790800000,
+        1783787335000,
+        1783098706000,
+        1782586798000,
+        1782410604000,
+        1781729284000,
+        1781728064000,
+        1781726803000,
+        1781711985000
+      ],
+      "IsRiderOrFleetInstallation": [],
+      "kScriptsDefaultApp": [],
+      "Sync": [
+        1785345927000,
+        1785324141000,
+        1785186869000,
+        1785184829000,
+        1785184799000,
+        1785177488000,
+        1785163609000,
+        1785162299000,
+        1785148859000,
+        1784197191000,
+        1784197146000,
+        1783952901000,
+        1781729284000,
+        1781722468000,
+        1781711985000
+      ],
+      "LegacyStyleProjectGeneration": [
+        1785184829000
+      ],
+      "GenerateAndWriteSolutionAndProjects": [
+        1785184829000
+      ],
+      "CodeEditorProjectSync": [
+        1785184829000
+      ],
+      "ProjectGeneration": [
+        1785184829000
+      ],
+      "GetProjectHeader": [
+        1785184829000
+      ],
+      "ProjectText": [
+        1785184829000
+      ],
+      "SdkStyleProjectGeneration": [
+        1785184829000
+      ],
+      "didOpen": [
+        1785254138000,
+        1785247765000,
+        1785186869000,
+        1785184799000,
+        1784197146000
+      ],
+      "execute_custom_tool": [
+        1785315418000
+      ],
+      "CustomTool": [],
+      "SendRegisterToolsAsync": [],
+      "islink": [
+        1785269102000,
+        1785251658000,
+        1785187963000,
+        1785186841000
+      ],
+      "dest": [
+        1785318424000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785269102000,
+        1785265054000,
+        1785257929000,
+        1785254138000,
+        1785251658000,
+        1785247814000,
+        1785247765000,
+        1785187963000,
+        1785186841000,
+        1785184799000,
+        1785184769000,
+        1785177541000,
+        1785177488000,
+        1785162249000,
+        1785162249000,
+        1785162201000,
+        1785148859000,
+        1785147528000,
+        1785147504000,
+        1784906845000,
+        1784843289000,
+        1784296718000,
+        1784235557000,
+        1784225471000,
+        1784206521000,
+        1784206379000,
+        1784206379000,
+        1784197146000,
+        1784036305000,
+        1784035670000,
+        1783965943000,
+        1783956128000,
+        1783954998000,
+        1783953946000,
+        1783952901000,
+        1783950044000,
+        1783946948000,
+        1783883946000,
+        1783792137000,
+        1783789647000,
+        1783787335000,
+        1783091527000,
+        1781726803000,
+        1781722468000,
+        1781719502000
+      ],
+      "_intact": [
+        1785254138000,
+        1785251658000,
+        1785247765000,
+        1785187963000,
+        1785186841000,
+        1785184769000
+      ],
+      "_resolve_binary": [
+        1785251658000,
+        1785247765000,
+        1785187963000,
+        1785184799000,
+        1785162249000,
+        1784197146000
+      ],
+      "_embedded_dotnet_root": [
+        1785251658000,
+        1785184799000
+      ],
+      "DOTNET_ROOT": [
+        1785251658000,
+        1785186869000,
+        1785184799000,
+        1784235557000
+      ],
+      "PATH": [
+        1785321685000,
+        1785315418000,
+        1785274578000,
+        1785272487000,
+        1785257929000,
+        1785254138000,
+        1785251658000,
+        1785247765000,
+        1785186869000,
+        1785184799000,
+        1785184769000,
+        1785177541000,
+        1785177511000,
+        1785177488000,
+        1785162299000,
+        1785162249000,
+        1785148901000,
+        1785147504000,
+        1784906845000,
+        1784839312000,
+        1784036305000,
+        1783955742000,
+        1783954998000,
+        1783953946000,
+        1783946948000,
+        1783787335000,
+        1781722468000,
+        1781711985000
+      ],
+      "realpath": [
+        1785269102000,
+        1785257929000,
+        1785251658000,
+        1785148859000,
+        1785147407000,
+        1784892250000
+      ],
+      "asset_key": [
+        1785254138000,
+        1785247765000
+      ],
+      "onDone": [
+        1785351317000,
+        1785345927000,
+        1785272530000
+      ],
+      "onSkipOne": [
+        1785351317000,
+        1785345927000,
+        1785272530000
+      ],
+      "unverified": [
+        1785247814000
+      ],
+      "MCP_MSG_ID": [
+        1785351317000,
+        1785345927000,
+        1785324141000
+      ],
+      "return": [
+        1785397800000,
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785321685000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785272530000,
+        1785272487000,
+        1785269102000,
+        1785265054000,
+        1785265036000,
+        1785257929000,
+        1785257900000,
+        1785254138000,
+        1785251658000,
+        1785247814000,
+        1785247789000,
+        1785247765000,
+        1785187963000,
+        1785186869000,
+        1785186841000,
+        1785184829000,
+        1785184799000,
+        1785184769000,
+        1785177541000,
+        1785177511000,
+        1785177488000,
+        1785163609000,
+        1785162986000,
+        1785162299000,
+        1785162299000,
+        1785162299000,
+        1785162249000,
+        1785162201000,
+        1785162201000,
+        1785148901000,
+        1785148901000,
+        1785148901000,
+        1785148859000,
+        1785148827000,
+        1785147562000,
+        1785147562000,
+        1785147562000,
+        1785147528000,
+        1785147504000,
+        1785147479000,
+        1785147423000,
+        1785147407000,
+        1785147389000,
+        1784918904000,
+        1784906845000,
+        1784892250000,
+        1784888838000,
+        1784843289000,
+        1784839312000,
+        1784296718000,
+        1784295738000,
+        1784284924000,
+        1784235557000,
+        1784206379000,
+        1784206379000,
+        1784197236000,
+        1784197236000,
+        1784197191000,
+        1784197191000,
+        1784197191000,
+        1784197146000,
+        1784197146000,
+        1784110358000,
+        1784108825000,
+        1784044907000,
+        1784036305000,
+        1784035670000,
+        1784026663000,
+        1783965943000,
+        1783955608000,
+        1783954998000,
+        1783953946000,
+        1783952901000,
+        1783950044000,
+        1783947837000,
+        1783946948000,
+        1783883946000,
+        1783787335000,
+        1783174520000,
+        1783091527000,
+        1782586798000,
+        1782580649000,
+        1782482959000,
+        1782410604000,
+        1782407636000,
+        1781729284000,
+        1781728064000,
+        1781722468000,
+        1781719502000,
+        1781711985000
+      ],
+      "ready": [
+        1785397800000,
+        1785351317000,
+        1785345927000,
+        1785321685000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785272530000,
+        1785272487000,
+        1785269102000,
+        1785265054000,
+        1785184829000,
+        1785184799000,
+        1785177541000,
+        1785162299000,
+        1785148901000,
+        1785147562000,
+        1785147562000,
+        1785147504000,
+        1784843289000,
+        1784284924000,
+        1784197236000,
+        1784197236000,
+        1784197191000,
+        1784197146000,
+        1781726803000
+      ],
+      "fetch_uv": [
+        1785247789000,
+        1785247765000,
+        1784296718000,
+        1783792137000,
+        1781726803000,
+        1781726792000,
+        1781719502000
+      ],
+      "fetch_video_bins": [
+        1785254138000,
+        1785247789000,
+        1784296718000,
+        1783792137000,
+        1783790800000
+      ],
+      "refresh": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785254138000,
+        1785247789000,
+        1785247765000,
+        1785186869000,
+        1785184799000,
+        1785147479000,
+        1784284924000,
+        1784197236000,
+        1784108825000,
+        1783955742000,
+        1783955608000,
+        1783953946000,
+        1783952901000,
+        1782410604000
+      ],
+      "check": [
+        1785345927000,
+        1785324141000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785272487000,
+        1785269102000,
+        1785265036000,
+        1785257900000,
+        1785254138000,
+        1785247814000,
+        1785247789000,
+        1785247765000,
+        1785186841000,
+        1785184829000,
+        1785177541000,
+        1785177511000,
+        1785177488000,
+        1785162299000,
+        1785162249000,
+        1785162201000,
+        1785162201000,
+        1785148859000,
+        1785147504000,
+        1785147389000,
+        1784906845000,
+        1784197146000,
+        1784108825000,
+        1784036305000,
+        1783954998000,
+        1783953946000,
+        1783792137000,
+        1783790800000,
+        1783787335000,
+        1782407636000,
+        1781726803000
+      ],
+      "latest": [
+        1785254138000,
+        1785247789000,
+        1785247765000,
+        1784197236000,
+        1783946948000,
+        1783792137000,
+        1783790800000,
+        1783787335000,
+        1781726792000,
+        1781719502000
+      ],
+      "pwsh": [
+        1785254138000,
+        1783792137000,
+        1783790800000,
+        1781726803000,
+        1781719502000
+      ],
+      "_install": [
+        1785275856000,
+        1785272487000,
+        1785257929000,
+        1785254138000,
+        1785251658000,
+        1785247765000,
+        1785187963000,
+        1785186841000,
+        1785184769000,
+        1785162249000,
+        1784839312000,
+        1783953946000,
+        1783946948000,
+        1781711985000
+      ],
+      "strings": [
+        1785345927000,
+        1785257929000,
+        1785186869000,
+        1785177511000
+      ],
+      "find": [
+        1785345927000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785272530000,
+        1785265036000,
+        1785247789000,
+        1785247765000,
+        1785184769000,
+        1785177541000,
+        1785163609000,
+        1785162299000,
+        1785148827000,
+        1785147423000,
+        1785147407000,
+        1784843289000,
+        1784296718000,
+        1784295738000,
+        1784197146000,
+        1784108825000,
+        1783946948000,
+        1783883946000,
+        1783792137000,
+        1783787335000,
+        1783091527000,
+        1782407636000,
+        1781726803000,
+        1781722468000
+      ],
+      "MAX_ARG_STRLEN": [
+        1785275856000
+      ],
+      "mapfile": [],
+      "readarray": [],
+      "PreToolUse": [],
+      "type": [
+        1785397800000,
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785321685000,
+        1785320727000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785269102000,
+        1785265036000,
+        1785257929000,
+        1785257900000,
+        1785247789000,
+        1785247765000,
+        1785186841000,
+        1785184829000,
+        1785184799000,
+        1785177541000,
+        1785177511000,
+        1785163609000,
+        1785162299000,
+        1785162299000,
+        1785162249000,
+        1785162201000,
+        1785148859000,
+        1785147504000,
+        1784906845000,
+        1784893193000,
+        1784892250000,
+        1784888838000,
+        1784843289000,
+        1784284924000,
+        1784206379000,
+        1784197236000,
+        1784197191000,
+        1784197146000,
+        1784110358000,
+        1784108825000,
+        1784044907000,
+        1784036305000,
+        1783955608000,
+        1783954998000,
+        1783953946000,
+        1783952901000,
+        1783950044000,
+        1783947837000,
+        1783946948000,
+        1783792137000,
+        1783790800000,
+        1783789647000,
+        1783787335000,
+        1783174520000,
+        1783091527000,
+        1782586798000,
+        1782580649000,
+        1782482959000,
+        1782410604000,
+        1782407636000,
+        1781729284000,
+        1781728075000,
+        1781726803000,
+        1781711985000
+      ],
+      "role": [
+        1785351317000,
+        1785324141000,
+        1785272530000,
+        1784843289000,
+        1783946948000,
+        1783789647000,
+        1783787335000,
+        1783091527000,
+        1782586798000,
+        1782580649000,
+        1782410604000,
+        1781728075000
+      ],
+      "assistant": [
+        1785324141000,
+        1785272530000,
+        1784843289000,
+        1783946948000,
+        1783789647000,
+        1783091527000,
+        1782580649000,
+        1782482959000,
+        1782410604000,
+        1781726803000
+      ],
+      "tool": [
+        1785397800000,
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785272487000,
+        1785265036000,
+        1785257929000,
+        1785247814000,
+        1785184829000,
+        1785177541000,
+        1785163609000,
+        1785162986000,
+        1785162299000,
+        1785162299000,
+        1785162201000,
+        1785162201000,
+        1785148901000,
+        1785147562000,
+        1785147504000,
+        1785147407000,
+        1784995515000,
+        1784906845000,
+        1784893193000,
+        1784892250000,
+        1784843289000,
+        1784839312000,
+        1784296718000,
+        1784295738000,
+        1784284924000,
+        1784197146000,
+        1784110358000,
+        1784108825000,
+        1784045540000,
+        1784020572000,
+        1783965943000,
+        1783950044000,
+        1783946948000,
+        1783789647000,
+        1783787335000,
+        1783098706000,
+        1783091527000,
+        1782482959000,
+        1782410604000,
+        1782407636000,
+        1781728064000,
+        1781726803000
+      ],
+      "_is_kimi": [
+        1784843289000
+      ],
+      "_is_kimi_k3": [
+        1784843289000
+      ],
+      "CLI_GROUPS": [
+        1783946948000
+      ],
+      "test_secret_file_hardening": [],
+      "test_local_token_file": [],
+      "agent_runner": [
+        1785274578000,
+        1785272487000,
+        1785269102000,
+        1785257929000,
+        1785162249000,
+        1785148901000,
+        1785147407000,
+        1784892250000,
+        1784888838000,
+        1784206379000,
+        1783953946000,
+        1783946948000,
+        1783787335000,
+        1783091527000,
+        1782586798000,
+        1782482959000
+      ],
+      "providers": [
+        1785274578000,
+        1785272487000,
+        1785269102000,
+        1785257929000,
+        1785177511000,
+        1785148901000,
+        1784918904000,
+        1784906845000,
+        1784893193000,
+        1784892250000,
+        1784888838000,
+        1784843289000,
+        1784839312000,
+        1784206379000,
+        1784108825000,
+        1783955742000,
+        1783954998000,
+        1783953946000,
+        1783950044000,
+        1783947837000,
+        1783946948000,
+        1783787335000,
+        1783091527000,
+        1782586798000,
+        1782482959000,
+        1782410604000,
+        1782407636000,
+        1781726803000
+      ],
+      "LICENSE": [
+        1784995515000,
+        1781726803000
+      ],
+      "_spawn_env": [
+        1785274578000,
+        1785272487000,
+        1785265036000,
+        1785257929000,
+        1785251658000,
+        1785186869000,
+        1785184799000,
+        1785162249000,
+        1784235557000
+      ],
+      "claude_agent_sdk": [
+        1785257929000,
+        1782407636000
+      ],
+      "handleSecure": [
+        1785148859000
+      ],
+      "senderFrame": [
+        1785148859000
+      ],
+      "workspacePath": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785272530000,
+        1785162299000,
+        1785148859000,
+        1784197191000,
+        1783952901000,
+        1783091527000,
+        1782580649000,
+        1782410604000,
+        1781728064000
+      ],
+      "adoptLegacyRoot": [
+        1785162299000,
+        1785148859000
+      ],
+      "write_file": [
+        1785351317000,
+        1785345927000,
+        1785274578000,
+        1785162249000,
+        1785148901000,
+        1781726803000
+      ],
+      "_validate_path": [
+        1785257929000,
+        1785162249000,
+        1785148901000,
+        1781728064000
+      ],
+      "delete_file": [
+        1785345927000,
+        1785272530000,
+        1785148901000,
+        1784843289000,
+        1783946948000,
+        1781726803000
+      ],
+      "no_unity_session": [],
+      "grep": [
+        1785272487000,
+        1785265036000,
+        1785247765000,
+        1785162201000,
+        1785148827000,
+        1785147423000,
+        1785147407000,
+        1784108825000
+      ],
+      "manage_scene": [
+        1785321685000,
+        1785318424000,
+        1785315418000,
+        1784843289000,
+        1784284924000,
+        1784108825000,
+        1783946948000,
+        1782580649000,
+        1782407636000,
+        1781726803000
+      ],
+      "read_console": [
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1784843289000,
+        1784284924000,
+        1784108825000,
+        1783946948000,
+        1782407636000
+      ],
+      "disallowed_tools": [
+        1782407636000
+      ],
+      "command_approval_needed": [
+        1785315418000,
+        1785265036000,
+        1785257929000,
+        1782410604000,
+        1782407636000
+      ],
+      "What": [
+        1785177541000,
+        1781726803000
+      ],
+      "DecisionResult": [
+        1785351317000
+      ],
+      "respond": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785257900000,
+        1785162201000,
+        1784995515000,
+        1784197146000
+      ],
+      "decide": [
+        1785351317000,
+        1785345927000,
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1785177541000,
+        1785162299000,
+        1785147562000,
+        1784296718000
+      ],
+      "decidedRef": [
+        1785351317000,
+        1785345927000
+      ],
+      "onConfirm": [
+        1785345927000,
+        1782410604000
+      ],
+      "null": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785265054000,
+        1785265036000,
+        1785257900000,
+        1785254138000,
+        1785247814000,
+        1785247789000,
+        1785184829000,
+        1785148859000,
+        1785148859000,
+        1785147562000,
+        1784839312000,
+        1784295738000,
+        1784206521000,
+        1784206379000,
+        1784197236000,
+        1784197236000,
+        1784197191000,
+        1784197191000,
+        1784045540000,
+        1784044907000,
+        1784035670000,
+        1784026663000,
+        1784021249000,
+        1784020572000,
+        1783965943000,
+        1783953946000,
+        1783952901000,
+        1783950044000,
+        1783947837000,
+        1783946948000,
+        1783883946000,
+        1783792137000,
+        1783790800000,
+        1783787335000,
+        1783174520000,
+        1783091527000,
+        1782586798000,
+        1782580649000,
+        1782410604000,
+        1782407636000,
+        1781729284000,
+        1781711985000
+      ],
+      "activeGateRef": [
+        1785345927000
+      ],
+      "gate_id": [
+        1785257929000,
+        1785257900000,
+        1785162201000,
+        1785147423000,
+        1784892250000,
+        1782410604000,
+        1782407636000,
+        1781726803000
+      ],
+      "LOCAL_APP_TOKEN": [
+        1785274578000,
+        1785272487000,
+        1785257929000,
+        1785186869000,
+        1785177511000,
+        1785162249000,
+        1785162249000,
+        1785148901000,
+        1785147389000,
+        1783946948000,
+        1781728064000,
+        1781726803000,
+        1781711985000
+      ],
+      "activeGate": [
+        1785351317000,
+        1785345927000
+      ],
+      "messageId": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785274578000,
+        1785272530000,
+        1785257900000,
+        1783946948000,
+        1782410604000,
+        1782407636000
+      ],
+      "pendingFix": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785274578000,
+        1785272530000
+      ],
+      "original": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785318424000,
+        1785274578000,
+        1785272530000,
+        1785272530000,
+        1785269102000,
+        1785254138000,
+        1785147479000,
+        1784995515000,
+        1784020572000,
+        1782410604000,
+        1781726803000
+      ],
+      "EventSource": [
+        1785324141000
+      ],
+      "head_sha": [],
+      "workspace_path": [
+        1785345927000,
+        1785269102000,
+        1785162201000,
+        1785148901000,
+        1785147423000,
+        1784892250000,
+        1784888838000,
+        1784197146000,
+        1783946948000,
+        1783787335000,
+        1783091527000,
+        1782410604000,
+        1782407636000,
+        1781726803000
+      ],
+      "gateId": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785274578000,
+        1785272530000,
+        1785257900000,
+        1782407636000
+      ],
+      "test_mcp_port_guard": [],
+      "test_mcp_server_cache_policy": [],
+      "mutmut": [],
+      "Hypothesis": [],
+      "command_safety": [
+        1785147423000,
+        1785147407000
+      ],
+      "pinned_assets": [
+        1785274578000,
+        1785272487000,
+        1785265036000,
+        1785254138000,
+        1785247789000,
+        1785247765000
+      ],
+      "waitFor": [
+        1785345927000,
+        1785274578000,
+        1785272530000
+      ],
+      "findByText": [
+        1785345927000,
+        1785272530000
+      ],
+      "deferred": [
+        1785272530000
+      ],
+      "ChatPanel": [
+        1785351317000,
+        1785345927000,
+        1785324141000,
+        1785272530000,
+        1785257900000,
+        1785163609000,
+        1783091527000,
+        1781726803000
+      ],
+      "FileCreationApproval": [
+        1785345927000,
+        1785274578000,
+        1785272530000
+      ],
+      "ToastContainer": [],
+      "AuthScreen": [
+        1785163609000
+      ],
+      "ExportModal": [],
+      "session_token": [
+        1785177511000,
+        1785162299000,
+        1785162201000,
+        1785148859000,
+        1784906845000,
+        1784206379000,
+        1784197146000,
+        1783953946000,
+        1783946948000,
+        1782407636000
+      ],
+      "ControllerTransitions": [
+        1783883946000
+      ],
+      "get_info": [
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1784045540000,
+        1783965943000,
+        1783883946000,
+        1782407636000
+      ],
+      "find_gameobjects": [
+        1785320727000,
+        1785318424000,
+        1785315418000,
+        1784843289000,
+        1784296718000,
+        1784295738000,
+        1784108825000
+      ],
+      "match_mode": [
+        1785315418000,
+        1784296718000,
+        1784295738000
+      ],
+      "batch_execute": [
+        1785315418000,
+        1784296718000,
+        1784295738000
+      ],
+      "_connectionGen": [
+        1784026663000
+      ],
+      "_socketKeepAliveInterval": [
+        1784023218000
+      ],
+      "main": [
+        1785318424000,
+        1785315418000,
+        1785274578000,
+        1785272530000,
+        1785265036000,
+        1785257929000,
+        1785254138000,
+        1785247814000,
+        1785247765000,
+        1785186869000,
+        1785177541000,
+        1785177511000,
+        1785177488000,
+        1785163609000,
+        1785162986000,
+        1785162249000,
+        1785162249000,
+        1785162201000,
+        1785148859000,
+        1785148827000,
+        1785147562000,
+        1785147562000,
+        1785147528000,
+        1785147504000,
+        1785147479000,
+        1785147407000,
+        1784995515000,
+        1784892250000,
+        1784843289000,
+        1784839312000,
+        1784295738000,
+        1784284924000,
+        1784197236000,
+        1784197146000,
+        1784108825000,
+        1784020572000,
+        1783946948000,
+        1783883946000,
+        1783789647000,
+        1783787335000,
+        1781726803000
+      ],
+      "_server_source_changed": [
+        1785257929000,
+        1785162249000,
+        1785147479000
+      ],
+      "_ensure_writable_resources": [
+        1785315418000,
+        1785257929000,
+        1781722468000
+      ],
+      "Server": [
+        1785397800000,
+        1785321685000,
+        1785315418000,
+        1785269102000,
+        1785177511000,
+        1785162986000,
+        1785148901000,
+        1785147479000,
+        1784197236000,
+        1784108825000,
+        1783946948000,
+        1782410604000,
+        1782407636000,
+        1781726803000,
+        1781722468000,
+        1781719502000,
+        1781711985000
+      ],
+      "server_dir": [
+        1785147479000,
+        1781722468000
+      ],
+      "headers": [
+        1785397800000,
+        1785345927000,
+        1785272487000,
+        1785269102000,
+        1785257900000,
+        1785247765000,
+        1785177541000,
+        1785177511000,
+        1785163609000,
+        1785162299000,
+        1785162299000,
+        1785162299000,
+        1785162249000,
+        1785162201000,
+        1785148901000,
+        1785148859000,
+        1785147528000,
+        1785147504000,
+        1784206379000,
+        1784197191000,
+        1784197146000,
+        1784108825000,
+        1783091527000,
+        1782407636000
+      ],
+      "http_headers": [
+        1785162299000,
+        1785162299000,
+        1785162249000
+      ],
+      "local_api_token": [
+        1785257929000,
+        1785177541000,
+        1785162299000,
+        1785162249000,
+        1785147528000,
+        1785147504000
+      ],
+      "O_NOFOLLOW": [
+        1785162249000
+      ],
+      "unityai": [
+        1785345927000,
+        1785324141000,
+        1785315418000,
+        1785274578000,
+        1785272487000,
+        1785257929000,
+        1785162249000,
+        1785148901000,
+        1785147407000,
+        1784906845000,
+        1784892250000,
+        1784843289000,
+        1784839312000,
+        1784108825000,
+        1783950044000,
+        1783946948000,
+        1783787335000,
+        1782482959000,
+        1782407636000,
+        1781726803000,
+        1781711985000
+      ],
+      "exec_module": [
+        1785321685000,
+        1785315418000,
+        1785247765000,
+        1785184769000
+      ],
+      "getBackendPaths": [],
+      "isWin": [
+        1781711985000
+      ],
+      "memory": [
+        1785320727000,
+        1785315418000,
+        1785177541000,
+        1785162201000,
+        1784197236000,
+        1784110358000,
+        1782586798000,
+        1781726803000
+      ],
+      "JarvanVault": []
+    }
+  }
+}

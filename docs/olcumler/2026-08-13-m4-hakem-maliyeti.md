@@ -103,3 +103,116 @@ notun çapası hareket etti.
   kaldıracı varsayım olarak duruyor.
 - Hakemin **doğruluğu** bu turda ölçülmedi; yalnız maliyet. Üretilen hükümler
   altın setle karşılaştırılmadı.
+
+---
+
+## 7. İkinci tur — üç ölçüm daha (aynı gün)
+
+Burak maliyet kısıtını kaldırdı ("20 dolarlık paket, o kadar da büyük maliyet
+yok"), ölçümler serbest bırakıldı. Üç şey ölçüldü.
+
+**Ayrım korunuyor:** token maliyeti bu projede kısıt değil, ama **duvar saati**
+ürün tasarımının kısıtı ve fiyattan bağımsız. Not başına 5-10 dakika, arka
+planda sessizce koşan bir denetçi için token bedava olsa da yavaştır.
+
+### 7.1 Değişim-tetikli koşumda kaç not oynuyor — KAPI KARARINI KURTARAN SAYI
+
+GaMachine, 8 hafta, 131 commit. Çapa çıkarımı `parse.ts`'in kurallarıyla.
+
+| | değer |
+|---|---|
+| haftalık oynayan not (yol çapası) | **ortalama 3,1 (%11)** |
+| kötü hafta | 9 (%32) |
+| 8 haftada en az bir kez oynayan | 10/28 |
+
+**Sonuç: tam tarama bir kereye mahsus.** Sürekli koşumda haftada 3-9 not →
+kabaca 20-60 dakika/hafta. Kapı kaldırma kararı (`2026-08-13-m4-kapi-tavani.md`
+§3) bu sayıyla **ayakta kalıyor**.
+
+### 7.2 İki kusur — ölçümün yan ürünü
+
+**(a) Notların yarısından fazlası tetiklenemez.** 28 notun **14'ünde hiç
+`file_path` çapası yok**; 2'si de yolunu `never_existed`/belirsiz diye
+kaybediyor. Hareket sinyali üretebilen yalnız **12/28**.
+
+Değişim-tetikleme tek başına kullanılırsa **16 not hiçbir zaman denetlenmez.**
+Bu, doğuştan-yanlış körlüğünün ikinci yüzü: orada "sinyal göremiyor" idi,
+burada "sinyal bakamıyor bile". Ve kapı kaldırma kararını bağımsız olarak
+destekliyor — kapı olsaydı o 16 not kalıcı olarak görünmez kalırdı.
+
+**(b) Sembol çapaları gürültü — ürün kusuru.** 162 sembol çapasının en çok
+vuranları: `return` (100 commit), `type`, `true`, `null`, `main`, `check`.
+`parse.ts`'in backtick içi sembol regex'i (`[A-Za-z_$][A-Za-z0-9_$]{3,}`)
+jenerik kelimeleri sembol sayıyor. Sembol tetikleyici olarak kullanılsaydı
+**haftada 16 not** oynuyor görünürdü — sinyal değil gürültü.
+Çapa dağılımı: symbol 177 · file_path 42 · commit_sha 30 · external_path 11
+(260 tutulan, 248 kotaya takılıp atılmış).
+
+### 7.3 Kanıtı önden vermek — kaldıraç GERÇEK ama KÜÇÜK
+
+Hipotez: mekanik katmanın çapa bulgularını isteme koymak keşfin çoğunu
+gereksiz kılar. Aynı 4 not, `--evidence` bayrağıyla:
+
+| not | süre A→B | taze girdi A→B |
+|---|---|---|
+| worktree-kullanimi | 295→259 sn | 55.729→57.913 (+%4) |
+| masaustu-guven-modeli | 299→354 sn | 106.658→120.070 (+%13) |
+| onay-kapisi-kapsami | 619→561 sn | 201.708→176.774 (−%12) |
+| bekleyen-isler | 583→524 sn | 333.197→182.902 (**−%45**) |
+| **toplam** | **1795→1698 sn (−%5)** | **697.292→537.659 (−%23)** |
+
+**Hipotez kısmen çürütüldü.** Girdi %23 azalıyor, süre yalnız %5. Kazanç
+büyük ve çapa yoğun notlarda toplanmış; küçük notlarda maliyet ARTIYOR (kanıt
+bloğu isteme ekleniyor ama keşfi azaltmıyor).
+
+Sebep: hakem zamanının çoğu çapaların hiç kapsamadığı iddiaları ölçmekle
+geçiyor — sayımlar, davranışlar, mantık. Çapa kanıtı o işi kısaltmıyor.
+
+### 7.4 Hakemin İLK DOĞRULUK SİNYALİ
+
+Maliyet koşumunun ürettiği hükümler altın setle karşılaştırıldı (3 not,
+`compare.ts` benzerlik kapısıyla).
+
+| | değer |
+|---|---|
+| hakem iddiası | 192 (altın set aynı 3 notta 68) |
+| bölme uyuşması | %9,2 — hakem çok daha ince bölüyor |
+| hüküm uyuşması (eşleşenlerde) | 17/22 → %77,3 |
+| **yakalama** (hedef iddia, örtüşen hüküm de "yanlış") | **6/10 → %60** |
+| yanlış alarm | 5 (192 iddia içinde) |
+
+Kaçanların **hepsi sayım iddiası**: "agent_runner.py 1682 satır",
+"providers/ 5713", "45 kayıtlı araç, 25'i karışık", "8080 canlılık sınaması".
+Bunlar dosya okumakla değil sayı üretmekle doğrulanıyor; hakem o yolu seçmedi.
+
+**Altın setin kendisi de sınandı:** yanlış alarmlardan biri
+(`bekleyen-isler:11`) muhtemelen hakemin haklı olduğu bir vaka — not
+"origin/main de b4065f1 ve 0 geride" diyor, hakem `origin/main=19c623f`
+ölçüp `curuk` demiş. Altın set orada `gecerli`. **Altın set ölçüttür,
+kutsal değildir.**
+
+**Uyarı:** 3 not, 10 hedef iddia. Ve üçü de mekanik katmanın zaten yakaladığı
+notlar (skor 0,70 / 0,40 / 0,70). M3'ün 6/17'siyle **doğrudan
+karşılaştırılamaz**.
+
+## 8. Bu turun bıraktığı iş kalemleri
+
+1. **`ExecutorResult` token taşımalı** — adaptör `-o`'dan `--json`'a geçmeli,
+   `turn.completed.usage` alanı taşınmalı. Maliyet kapısı yeniden
+   tasarlanacaksa ön koşul.
+2. **Sembol çapası regex'i ayırt etmiyor** (§7.2b). Tetikleyici olarak
+   kullanılamaz durumda.
+3. **16 notun tetikleyicisi yok** (§7.2a) — sıra/rotasyon mekanizması şart.
+4. **Sayım iddiaları kaçıyor** (§7.4) — hakemin istemi sayım ölçmeyi açıkça
+   istemiyor.
+
+## 9. Bu turda sınanmayanlar
+
+- Kanıt-önden karşılaştırması **4 notta, tek koşumda**. Küçük notlardaki
+  artış (+%4, +%13) gürültü de olabilir; koşumlar arası oynaklık ölçülmedi.
+- Churn ölçümü **tek depoda** (GaMachine) ve 8 haftada. Başka bir projede
+  haftalık oynama oranı bilinmiyor.
+- Sınırlı keşif (tur/komut tavanı) hiç denenmedi — §4'ün ikinci kaldıracı
+  hâlâ varsayım.
+- Hakemin doğruluğu **3 notta** ölçüldü, hepsi mekanik katmanın yakaladığı
+  notlar. Yakalanamayan notlarda hakem nasıl davranıyor bilinmiyor.

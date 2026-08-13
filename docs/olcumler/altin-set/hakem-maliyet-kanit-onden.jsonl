@@ -1,0 +1,4 @@
+{"note":"worktree-kullanimi","lines":14,"rc":0,"ms":259019,"evidence_fed":true,"input_tokens":432185,"cached_input_tokens":374272,"output_tokens":10259,"reasoning_output_tokens":6563,"claims":12}
+{"note":"masaustu-guven-modeli","lines":46,"rc":0,"ms":354343,"evidence_fed":true,"input_tokens":1264902,"cached_input_tokens":1144832,"output_tokens":15091,"reasoning_output_tokens":8359,"claims":32}
+{"note":"onay-kapisi-kapsami","lines":513,"rc":0,"ms":561190,"evidence_fed":true,"input_tokens":3583110,"cached_input_tokens":3406336,"output_tokens":23791,"reasoning_output_tokens":9933,"claims":73}
+{"note":"bekleyen-isler","lines":687,"rc":0,"ms":523749,"evidence_fed":true,"input_tokens":3561334,"cached_input_tokens":3378432,"output_tokens":22067,"reasoning_output_tokens":8231,"claims":88}
