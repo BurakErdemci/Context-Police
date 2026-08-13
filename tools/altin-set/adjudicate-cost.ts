@@ -33,7 +33,11 @@ import { evidenceFor } from "./evidence-block.ts";
 // keşfin ne kadarının gereksiz olduğunu ölçmek için var.
 const argvAll = process.argv.slice(2);
 const WITH_EVIDENCE = argvAll.includes("--evidence");
-const positional = argvAll.filter((a) => !a.startsWith("--"));
+// Paralellik yalnız DUVAR SAATİ için. Ölçülen token/süre değerleri çağrı
+// başına olduğu için paralellik onları bozmuyor; yalnız toplam bekleme kısalıyor.
+const pIdx = argvAll.indexOf("--parallel");
+const PARALLEL = pIdx !== -1 ? Math.max(1, Number(argvAll[pIdx + 1]) || 1) : 1;
+const positional = argvAll.filter((a, i) => !a.startsWith("--") && argvAll[i - 1] !== "--parallel");
 const [wt, notesDir, outPath, ...notes] = positional;
 if (!wt || !notesDir || !outPath || notes.length === 0) {
   console.error("kullanım: adjudicate-cost.ts <worktree> <notlar> <cikti.jsonl> <not>...");
@@ -90,6 +94,14 @@ Her iddia için hüküm:
 - olculemez        : depoya karşı doğrulanamaz (dış servis, ağ, kullanıcı
                      beyanı, tarihsel anlatı). Bu ONURLU bir cevap —
                      ölçemediğin şeye hüküm verme.
+
+SAYIM İDDİALARINI ATLAMA. Not bir sayı veriyorsa ("X.py 1682 satır",
+"45 kayıtlı araç var", "3 test geçiyor", "8 sağlayıcı yolu") o sayıyı KOŞTUR
+ve karşılaştır: \`wc -l\`, \`git grep -c\`, \`git ls-files | wc -l\`. Ölçülen
+kaçtı, notta kaç yazıyor, ikisini de evidence'a yaz. (Ölçüldü: hakemin
+kaçırdığı iddiaların hepsi bu sınıftandı.)
+
+Notun HER doğrulanabilir ifadesini kapsa — yalnız dikkat çekenleri değil.
 
 \`evidence\` alanına ölçtüğün somut şeyi yaz: SHA, dosya yolu, sembol adı,
 sayı. Özet yargı değil.
@@ -179,40 +191,42 @@ writeFileSync(outPath, "");
 console.log("not".padEnd(36) + "satır  süre(sn)  girdi   önbellek  çıktı  akıl   iddia");
 console.log("─".repeat(88));
 
-for (const note of notes) {
+async function one(note: string): Promise<void> {
   const body = readFileSync(join(notesDir, `${note}.md`), "utf8");
   const lines = body.split("\n").length;
   let evidence: string | null = null;
   if (WITH_EVIDENCE) {
-    const parsed = parseNote(body);
     const { anchors } = extractAnchors(body);
     const verdicts = await checkAnchors(gitCtx!, anchors, new Date(0).toISOString());
     evidence = evidenceFor(verdicts);
   }
   const r = await runCodex(buildPrompt(note, body, evidence), schemaPath);
-  // Ham akış saklanıyor: iddia sayacı sessizce 0 döndüğünde çağrının hiç
-  // hüküm üretmediği mi yoksa ayrıştırmanın mı kaçırdığı ancak böyle ayrılır.
   writeFileSync(`${outPath}.${note}.raw.jsonl`, r.raw);
   const u = r.usage ?? {};
-  const rec = {
+  appendFileSync(outPath, JSON.stringify({
     note, lines, rc: r.rc, ms: r.ms, evidence_fed: WITH_EVIDENCE,
     input_tokens: u.input_tokens ?? null,
     cached_input_tokens: u.cached_input_tokens ?? null,
     output_tokens: u.output_tokens ?? null,
     reasoning_output_tokens: u.reasoning_output_tokens ?? null,
     claims: r.claims,
-  };
-  appendFileSync(outPath, JSON.stringify(rec) + "\n");
+  }) + "\n");
   console.log(
-    note.padEnd(36) +
-      String(lines).padStart(5) +
-      String((r.ms / 1000).toFixed(0)).padStart(9) +
-      String(u.input_tokens ?? "-").padStart(8) +
-      String(u.cached_input_tokens ?? "-").padStart(10) +
-      String(u.output_tokens ?? "-").padStart(7) +
-      String(u.reasoning_output_tokens ?? "-").padStart(7) +
-      String(r.claims).padStart(7) +
-      (r.rc === 0 ? "" : `  rc=${r.rc}`),
+    note.padEnd(36) + String(lines).padStart(5) + String((r.ms / 1000).toFixed(0)).padStart(9) +
+    String(u.input_tokens ?? "-").padStart(8) + String(u.cached_input_tokens ?? "-").padStart(10) +
+    String(u.output_tokens ?? "-").padStart(7) + String(u.reasoning_output_tokens ?? "-").padStart(7) +
+    String(r.claims).padStart(7) + (r.rc === 0 ? "" : `  rc=${r.rc}`),
   );
 }
+
+const queue = [...notes];
+await Promise.all(
+  Array.from({ length: Math.min(PARALLEL, queue.length) }, async () => {
+    for (;;) {
+      const n = queue.shift();
+      if (!n) return;
+      try { await one(n); } catch (e) { console.log(`${n.padEnd(36)}  HATA: ${(e as Error).message}`); }
+    }
+  }),
+);
 console.log(`\nham kayıt: ${outPath}`);

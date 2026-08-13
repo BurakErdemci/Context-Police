@@ -216,3 +216,67 @@ karşılaştırılamaz**.
   hâlâ varsayım.
 - Hakemin doğruluğu **3 notta** ölçüldü, hepsi mekanik katmanın yakaladığı
   notlar. Yakalanamayan notlarda hakem nasıl davranıyor bilinmiyor.
+
+---
+
+## 10. TAM ÖLÇÜM — 28 notun hepsi, M4'ün çıkış kapısı sayısı
+
+İstem iki noktada düzeltildi (sayım iddialarını koştur; her doğrulanabilir
+ifadeyi kapsa), kanıt-önden açık, 5 paralel.
+
+**Maliyet:** 28 not · 54,9M ham girdi · 3,40M taze girdi · 484k çıktı ·
+not başına ortalama **482 sn / 1,96M ham girdi** · duvar saati 0,7 saat.
+Hakem 1210 iddia üretti (altın set 391).
+
+### 10.1 Çıkış kapısı
+
+| | hakem (M4) | mekanik skor (M3) |
+|---|---|---|
+| **iddia düzeyi yakalama** | **37/45 · %82,2** | — (M3'te iddia düzeyi yoktu) |
+| iddia düzeyi yanlış alarm | **39** (232 geçerli iddia içinde, %16,8) | — |
+| **not düzeyi yakalama** | **15/15 · %100** | 6/17 · %35,3 |
+| not düzeyi yanlış alarm | **7/13** | 0/11 |
+
+**Darboğaz yer değiştirdi.** M3'ün sorunu kapsamdı (%35 yakalama, sıfır gürültü);
+hakemin sorunu kesinlik (%100 not yakalama, ama 13 temiz notun 7'si işaretlendi).
+M4'ün kalan işi kapsama değil **hassasiyet**.
+
+### 10.2 Yanlış alarmların anatomisi — tek bir sınıf
+
+39 yanlış alarmın **27'si `dogustan-yanlis`** (12'si `curuk`).
+
+Hakem bu hükmü **yedek kova** gibi kullanıyor. "Doğuştan yanlış" demek,
+iddianın *yazıldığı gün de* yanlış olduğunu kanıtlamayı gerektirir — yani notun
+damgasına karşı geçmiş ölçümü. İstemde notun tarihi belirgin biçimde
+verilmedi, hakem de değişim kanıtı bulamadığında bu kovaya düşüyor.
+
+**Düzeltme (ölçülmedi, hipotez):** notun `modified` damgasını isteme koy ve
+`dogustan-yanlis` için "o tarihteki durumu ölçtün mü" şartı getir. Ölçülemiyorsa
+`curuk` değil `olculemez` doğru cevap.
+
+### 10.3 Kaçan 8 iddia — hâlâ aynı sınıf
+
+`45 kayıtlı araç var, 25'i karışık` · `agent_runner.py 1682 satır` ·
+`providers/ 5713, renderer/ 9390` · `/get-ai-config'in döndüğü alanlar` ·
+`~/.codex-worker'da unityMCP kayıtlı`.
+
+Sayım talimatı yakalamayı 6/10'dan (3 notluk ilk ölçüm) 37/45'e çıkardı ama
+sınıfı kapatmadı. Kalanlar ya depo dışını (`~/.codex-worker`) ya da çalışan
+sistemi gerektiriyor — bir kısmı gerçekten `olculemez` olabilir; altın setin
+o kayıtları yeniden gözden geçirilmeli.
+
+### 10.4 Hakem hüküm dağılımı (1210 iddia)
+
+`gecerli` 564 · **`olculemez` 498 (%41)** · `curuk` 83 · `dogustan-yanlis` 65.
+
+Hakemin de %41'i "ölçemedim" diyor — altın setteki %28,6 ile aynı yönde, daha
+yüksek. Bu kova hem ölçütte hem üründe büyük; "ölçülebilir nedir" sorusu
+projenin merkezinde duruyor.
+
+### 10.5 Bu turda sınanmayanlar
+
+- Tek koşum. Hakemin koşumlar arası oynaklığı ölçülmedi — %82,2'nin ne kadarı
+  kararlı bilinmiyor.
+- Yanlış alarmların **kaçının altın set hatası** olduğu incelenmedi. İlk turda
+  1/5'i öyleydi; aynı oran geçerliyse gerçek yanlış alarm sayısı daha düşük.
+- Maliyet tavanının doğruluğa etkisi ölçülmedi: bütçe konursa %82,2 ne olur?
