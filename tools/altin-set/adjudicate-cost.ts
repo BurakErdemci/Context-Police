@@ -29,12 +29,12 @@
 // sayılır — yakalama oranı SESSİZCE düşer ve düşüşün sebebi hakemin
 // kalitesiymiş gibi görünür. Kısmi çıktı dışarıda kalırsa not
 // "denetlenmeyen" listesinde raporlanır; bu doğru semantik.
-// Mekanizma: eksik koşumun ham akışı `<cikti>.<not>.raw.incomplete.jsonl`
-// adına yazılır — iddia çıkarımı `*.raw.jsonl` tarar, eksikleri görmez.
-// UYARI: bu koruma tarayan tarafın GLOB'una bağlı ve o adım elle koşuluyor.
-// `*.raw*` gibi gevşek bir kalıp `.raw.incomplete.jsonl`'i de yakalar ve
-// sözleşmeyi sessizce bozar — kısmi iddialar claims dosyasına sızar, yakalama
-// oranı düşer. Tarayan glob DAİMA `*.raw.jsonl` olmalı.
+// Mekanizma (YAPISAL, ad kuralına dayanmıyor): tam çıktının ham akışı çıktı
+// dosyasının yanına `<cikti>.<not>.raw.jsonl` olarak, EKSİK olanınki ayrı bir
+// alt dizine — `<cikti-dizini>/incomplete/<cikti-adı>.<not>.raw.jsonl` —
+// yazılır. Ayrım dizin düzeyinde olduğu için `*.raw*` gibi gevşek bir glob
+// bile eksiklere ULAŞAMAZ; önceki ad-eki çözümünde (`.raw.incomplete.jsonl`)
+// böyle bir glob sözleşmeyi sessizce bozuyordu.
 // Biçim pürüzü tek başına notu düşürmez: kod çiti (```json) ve birden çok
 // item'a bölünmüş küme için kurtarma katmanı var (bkz. extractClaims).
 // Ölçüt tavanın TÜRÜ değil çıktının TAMLIĞI: token tavanı post-hoc
@@ -47,9 +47,9 @@
 //     [--max-tokens 2000000] <worktree> <notlar-dizini> <cikti.jsonl> <not> [<not> ...]
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { parseNote, extractAnchors } from "../../core/src/importer/parse.ts";
 import { openGit } from "../../core/src/signals/git.ts";
 import { checkAnchors } from "../../core/src/signals/anchor-drift.ts";
@@ -81,7 +81,7 @@ const TIMEOUT_SEC = numFlag("--timeout-sec", 600);
 // 100: KALİBRE EDİLMEMİŞ tahmin. 28 notluk koşumda gözlenen item dağılımına
 // göre ayarlanacak.
 const MAX_ITEMS = numFlag("--max-items", 100);
-const MAX_TOKENS = numFlag("--max-tokens", 2_000_000); // input+cached+output+reasoning toplamı
+const MAX_TOKENS = numFlag("--max-tokens", 2_000_000); // USAGE_FIELDS toplamı (bkz. totalTokens)
 const positional = argvAll.filter((a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(argvAll[i - 1] ?? ""));
 const [wt, notesDir, outPath, ...notes] = positional;
 if (!wt || !notesDir || !outPath || notes.length === 0) {
@@ -165,9 +165,32 @@ ${body}
 type Usage = {
   input_tokens?: number;
   cached_input_tokens?: number;
+  cache_write_input_tokens?: number; // gerçek akışta var (14 Ağu json-probe), ücretlendiriliyor
   output_tokens?: number;
   reasoning_output_tokens?: number;
 };
+
+const USAGE_FIELDS = [
+  "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+  "output_tokens", "reasoning_output_tokens",
+] as const;
+
+/**
+ * Turların usage'ını TOPLAR (üzerine yazmaz).
+ *
+ * Eskiden `usage = o.usage` idi: son tur kazanıyordu. Çok turlu bir koşumda bu
+ * hem `--max-tokens` tavanını AZ uyguluyor hem manşet maliyet sayısını düşük
+ * raporluyordu. Ürün (core/src/adapters/codex.ts) zaten topluyor; ölçüm aracı
+ * ürünün göreceği sayıyı ölçmeli.
+ */
+function addUsage(acc: Usage | null, next: Record<string, unknown>): Usage {
+  const out: Usage = acc ?? {};
+  for (const f of USAGE_FIELDS) {
+    const v = next[f];
+    if (typeof v === "number") out[f] = (out[f] ?? 0) + v;
+  }
+  return out;
+}
 
 type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number };
 
@@ -230,8 +253,7 @@ function extractClaims(text: string): number | null {
 }
 
 function totalTokens(u: Usage): number {
-  return (u.input_tokens ?? 0) + (u.cached_input_tokens ?? 0) +
-    (u.output_tokens ?? 0) + (u.reasoning_output_tokens ?? 0);
+  return USAGE_FIELDS.reduce((s, f) => s + (u[f] ?? 0), 0);
 }
 
 /**
@@ -297,6 +319,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     // buraya girmez. Tamlık hükmü bu listenin sonuncusundan, tutmazsa sıralı
     // birleşiminden çıkarılır (finish içinde).
     const verdictTexts: string[] = [];
+    let lastItemIsVerdictMessage = false;
     let cap: Cap | null = null;
     // Süreç kapandıktan SONRA kill YASAK: PID'yi işletim sistemi geri
     // dönüştürmüş olabilir ve kill(-pid) alakasız bir grubu vurur. Gerçek yol:
@@ -339,7 +362,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
         const o = JSON.parse(s);
         if (o.type === "turn.completed") {
           turns++;
-          if (o.usage) usage = o.usage;
+          if (o.usage) usage = addUsage(usage, o.usage);
         }
         if (o.type === "item.completed") {
           items++;
@@ -354,7 +377,13 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
           // skor hattına sızdırıyor (ölçüldü, fix turu 2 review'ı) — yani
           // sözleşmenin engellemek için var olduğu sessiz deflasyon geri
           // geliyor. Bu yüzden reasoning item'ları kurtarmaya HİÇ girmiyor.
-          if (typeof txt === "string" && txt.includes("verdict") && o.item?.type !== "reasoning") {
+          const isVerdictMessage =
+            typeof txt === "string" && txt.includes("verdict") && o.item?.type !== "reasoning";
+          // Akışın SON item'ı iddia taşıyan mesaj mı: tamlık kanıtının ön
+          // koşulu (finish'teki nota bak). Her item.completed'da yeniden
+          // yazılıyor, yani "en son ne geldi" bilgisi taze kalıyor.
+          lastItemIsVerdictMessage = isVerdictMessage;
+          if (isVerdictMessage) {
             verdictTexts.push(txt);
             // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
             // "kaç iddia görünüyor" bilgisi için. Hüküm `finish`te veriliyor.
@@ -393,12 +422,20 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       if (pending) handleLine(pending);
       // TAMLIK HÜKMÜ BURADA VERİLİR, akış sırasında değil: "akıştaki herhangi
       // bir item parse edilebildi" ölçütü, kesilmeden ÖNCE gelen bir ara
-      // mesajı tam çıktı sayabiliyordu. Ölçüt SON iddia taşıyan mesaj;
-      // o tutmazsa (küme birden çok item'a bölünmüş olabilir) parçaların
-      // sıralı birleşimi denenir.
-      const last = verdictTexts[verdictTexts.length - 1];
+      // mesajı tam çıktı sayıyordu.
+      //
+      // GUARD: kanıt yalnız akışın SON `item.completed`'ından kabul edilir.
+      // Ölçülmüş dayanak (14 Ağu json-probe): gerçek `codex exec --json`
+      // akışında son item.completed final `agent_message`'ın kendisi;
+      // ondan sonra yalnız `turn.completed` geliyor — o bir item DEĞİL.
+      // Tek örneklem olduğu için HATA YÖNÜ BİLİNÇLİ SEÇİLDİ: akış ileride
+      // mesaj-dışı bir item'la biterse not GÜRÜLTÜLÜ şekilde `olculemez`
+      // olur (görülür ve düzeltilir), sessizce sızmaz.
+      const last = lastItemIsVerdictMessage ? verdictTexts[verdictTexts.length - 1] : undefined;
       const candidates = last === undefined ? [] : [last];
-      if (verdictTexts.length > 1) candidates.push(verdictTexts.join("\n"));
+      // Birleşim fallback'i de yalnız son item mesajken denenir: küme
+      // bölünmüşse son parça zaten mesajdır.
+      if (last !== undefined && verdictTexts.length > 1) candidates.push(verdictTexts.join("\n"));
       for (const c of candidates) {
         const n = extractClaims(c);
         if (n !== null) {
@@ -434,7 +471,10 @@ const schemaPath = join(tmp, "schema.json");
 writeFileSync(schemaPath, JSON.stringify(SCHEMA));
 
 writeFileSync(outPath, "");
-console.log("not".padEnd(36) + "satır  süre(sn)  girdi   önbellek  çıktı  akıl   iddia");
+// Eksik hamların yeri: çıktı dosyasının dizini altında `incomplete/`.
+const incompleteDir = join(dirname(outPath), "incomplete");
+mkdirSync(incompleteDir, { recursive: true });
+console.log("not".padEnd(36) + "satır  süre(sn)  girdi   önbellek  önb-yaz  çıktı  akıl   iddia");
 console.log("─".repeat(88));
 
 async function one(note: string): Promise<void> {
@@ -447,11 +487,15 @@ async function one(note: string): Promise<void> {
     evidence = evidenceFor(verdicts);
   }
   const r = await runCodex(buildPrompt(note, body, evidence), schemaPath);
-  // Ham akışın ADI hükme göre değişiyor: iddia çıkarımı yalnız `*.raw.jsonl`
-  // dosyalarını tarar, eksik çıktı `*.raw.incomplete.jsonl` olarak durur
-  // (bkz. dosya başındaki "EKSİK ÇIKTI SÖZLEŞMESİ"). Kanıt atılmıyor,
-  // yalnız skor hattının erişemeyeceği bir ada konuyor.
-  writeFileSync(`${outPath}.${note}.raw${r.claimsComplete ? "" : ".incomplete"}.jsonl`, r.raw);
+  // Ham akışın YERİ hükme göre değişiyor: tam çıktılar çıktı dosyasının
+  // yanında, eksikler AYRI BİR ALT DİZİNDE (`incomplete/`). Ad eki yerine
+  // dizin, çünkü ayrım YAPISAL olmalı: `*.raw*` gibi gevşek bir glob bile
+  // alt dizine inemez (bkz. dosya başındaki "EKSİK ÇIKTI SÖZLEŞMESİ").
+  // Kanıt atılmıyor, yalnız skor hattının erişemeyeceği yere konuyor.
+  const rawPath = r.claimsComplete
+    ? `${outPath}.${note}.raw.jsonl`
+    : join(incompleteDir, `${basename(outPath)}.${note}.raw.jsonl`);
+  writeFileSync(rawPath, r.raw);
   const parseFailed = !r.claimsComplete && r.cap === null && r.rc === 0;
   const u = r.usage ?? {};
   appendFileSync(outPath, JSON.stringify({
@@ -477,6 +521,7 @@ async function one(note: string): Promise<void> {
     leaked_pid: r.leakedPid,
     input_tokens: u.input_tokens ?? null,
     cached_input_tokens: u.cached_input_tokens ?? null,
+    cache_write_input_tokens: u.cache_write_input_tokens ?? null,
     output_tokens: u.output_tokens ?? null,
     reasoning_output_tokens: u.reasoning_output_tokens ?? null,
     claims: r.claims,
@@ -484,6 +529,7 @@ async function one(note: string): Promise<void> {
   console.log(
     note.padEnd(36) + String(lines).padStart(5) + String((r.ms / 1000).toFixed(0)).padStart(9) +
     String(u.input_tokens ?? "-").padStart(8) + String(u.cached_input_tokens ?? "-").padStart(10) +
+    String(u.cache_write_input_tokens ?? "-").padStart(9) +
     String(u.output_tokens ?? "-").padStart(7) + String(u.reasoning_output_tokens ?? "-").padStart(7) +
     String(r.claims).padStart(7) + (r.rc === 0 ? "" : `  rc=${r.rc}`) +
     (r.cap ? `  CAP ${r.cap.kind} ${r.cap.observed}/${r.cap.limit}` : "") +

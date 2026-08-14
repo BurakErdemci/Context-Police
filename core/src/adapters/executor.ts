@@ -57,6 +57,12 @@ export interface ExecutorCapExceeded {
 export interface ExecutorUsage {
   inputTokens?: number;
   cachedInputTokens?: number;
+  /**
+   * Önbelleğe YAZILAN girdi token'ı (`cache_write_input_tokens`). Gerçek akışta
+   * var (14 Ağu json-probe) ama düşürülüyordu; ücretlendirilen bir kalem olduğu
+   * için maliyet kalibrasyonunda eksik bıraktığı sayı görünmüyordu.
+   */
+  cacheWriteInputTokens?: number;
   outputTokens?: number;
   reasoningOutputTokens?: number;
   /**

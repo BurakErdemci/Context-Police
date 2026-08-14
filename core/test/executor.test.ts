@@ -172,15 +172,18 @@ test("CodexExecutor: --json akışı hiç gelmezse usage undefined kalır", asyn
 test("CodexExecutor: birden çok turn.completed geldiğinde usage toplanır", async () => {
   const bin = fakeCodexBinary("ok", [
     '{"type":"item.completed"}',
-    '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":5,"reasoning_output_tokens":1}}',
+    '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"cache_write_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":1}}',
     '{"type":"item.completed"}',
     '{"type":"item.completed"}',
-    '{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":20,"output_tokens":7,"reasoning_output_tokens":2}}',
+    '{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":20,"cache_write_input_tokens":4,"output_tokens":7,"reasoning_output_tokens":2}}',
   ]);
   const res = await createCodexExecutor({ binary: bin }).run({ prompt: "x" });
+  // cache_write_input_tokens gerçek akışta var (14 Ağu json-probe) ve
+  // ücretlendiriliyor; taşınmazsa maliyet kalibrasyonunda görünmeyen kalem olur.
   assert.deepEqual(res.usage, {
     inputTokens: 300,
     cachedInputTokens: 30,
+    cacheWriteInputTokens: 7,
     outputTokens: 12,
     reasoningOutputTokens: 3,
     items: 3,

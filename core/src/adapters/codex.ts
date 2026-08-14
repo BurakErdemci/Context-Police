@@ -161,6 +161,8 @@ function untrack(kind: "dir" | "group", value: string | number | undefined): voi
 const USAGE_FIELDS = [
   ["input_tokens", "inputTokens"],
   ["cached_input_tokens", "cachedInputTokens"],
+  // Ücretlendirilen bir kalem → tavan toplamına da girer (bkz. ExecutorUsage).
+  ["cache_write_input_tokens", "cacheWriteInputTokens"],
   ["output_tokens", "outputTokens"],
   ["reasoning_output_tokens", "reasoningOutputTokens"],
 ] as const;
@@ -384,17 +386,21 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             closed = true;
             clearTimeout(timer);
             untrack("group", child.pid);
-            // SIRA BAĞIMLILIĞI: `usage` alanı `capExceeded`ten ÖNCE yazılmalı —
-            // finish() kuyruktaki son satırı işlerken capExceeded'i doldurabilir
-            // ve nesne değeri o anda okunur (JS alanları soldan sağa değerlendirir).
-            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage: usageCollector.finish(), capExceeded });
+            // finish() kuyruktaki son satırı işlerken `capExceeded`i
+            // doldurabiliyor. Eskiden bu, resolve literal'indeki alan SIRASINA
+            // bırakılmıştı (soldan sağa değerlendirme) — sessizce kırılabilecek
+            // bir bağımlılık. Artık yapıyla çözülü: finish() resolve'dan ÖNCE
+            // koşar, capExceeded o çağrıdan SONRA okunur.
+            const usage = usageCollector.finish();
+            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage, capExceeded });
           });
           child.on("close", (code) => {
             closed = true;
             clearTimeout(timer);
             untrack("group", child.pid);
-            // `usage` alanı `capExceeded`ten ÖNCE (bkz. error handler'daki not).
-            resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage: usageCollector.finish(), capExceeded });
+            // finish() resolve'dan ÖNCE (bkz. error handler'daki not).
+            const usage = usageCollector.finish();
+            resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage, capExceeded });
           });
           child.stdin.on("error", (err: NodeJS.ErrnoException) => {
             if (stdinError === null) stdinError = err.code ? `${err.code}: ${err.message}` : err.message;
