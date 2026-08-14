@@ -72,7 +72,20 @@ const DEFAULT_STREAM_LINES = [
   '{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":90,"reasoning_output_tokens":40}}',
 ];
 
-function fakeCodexBinary(behavior: "ok" | "fail" | "hang", streamLines: string[] = DEFAULT_STREAM_LINES): string {
+/**
+ * M4.1: tavan denetimi AKIŞ SÜRERKEN kesmek zorunda. "ok"/"fail" varyantları
+ * akışı tek seferde basıp hemen çıkıyor — kesmenin gerçekten olup olmadığı
+ * orada ölçülemez (süreç zaten ölmüş olurdu). "drip" satırları aralıklı basar
+ * ve sonunda ASILIR: tavan çalışmazsa test zaman aşımına düşer, yani yeşil
+ * kalmakla kesmeyi ispat etmek aynı şey olur.
+ */
+const DRIP_TURN_LINES = (turns: number, tokensPerTurn: number): string[] =>
+  Array.from({ length: turns }, () => [
+    '{"type":"item.completed"}',
+    `{"type":"turn.completed","usage":{"input_tokens":${tokensPerTurn}}}`,
+  ]).flat();
+
+function fakeCodexBinary(behavior: "ok" | "fail" | "hang" | "drip", streamLines: string[] = DEFAULT_STREAM_LINES): string {
   const dir = mkdtempSync(join(tmpdir(), "cp-fake-codex-"));
   fakeBinDirs.push(dir);
   const bin = join(dir, "codex");
@@ -95,7 +108,14 @@ cat <<'CP_STREAM_EOF'
 ${streamLines.join("\n")}
 CP_STREAM_EOF
 echo "kota doldu" >&2; exit 1`
-        : `#!/bin/sh
+        : behavior === "drip"
+          ? // Satır tek tırnakla sarılıyor: akış olayları JSON, içlerinde tek
+            // tırnak yok — varsa burada sessizce bozulurdu.
+            `#!/bin/sh
+cat > /dev/null   # stdin'deki prompt'u tüket
+${streamLines.map((l) => `echo '${l}'\nsleep 0.05`).join("\n")}
+sleep 60`
+          : `#!/bin/sh
 cat <<'CP_STREAM_EOF'
 ${streamLines.join("\n")}
 CP_STREAM_EOF
@@ -180,9 +200,78 @@ test("CodexExecutor: zaman aşımında harcanan usage kaybolmaz", async () => {
   const res = await exec.run({ prompt: "x" });
   assert.equal(res.ok, false);
   assert.match(res.error!, /zaman aşımı/);
+  assert.equal(res.capExceeded, undefined, "süre aşımı tavan aşımı değildir (M4.1)");
   assert.deepEqual(res.usage, {
     inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, turns: 2,
   });
+});
+
+// --- M4.1 Task 2: token + tur tavanı -------------------------------------
+// Gerekçe ölçüldü: istemdeki "60 sn içinde bitir" talimatı BAĞLAMADI, bir hakem
+// 3 dakikalık döngü koştu. Tavan istemde değil kodda duruyor.
+//
+// timeoutMs bu testlerde bilerek bol (10 sn): kesmenin sebebi SÜRE olursa test
+// tavanı değil zaman aşımını ölçmüş olur. Ölçülmüş ders (önceki tur): suite
+// yükü altında sahte binary'nin ilk stdout chunk'ı ~419 ms gecikebiliyor.
+test("CodexExecutor: tur tavanı aşılınca süreç kesilir ve capExceeded döner", async () => {
+  const bin = fakeCodexBinary("drip", DRIP_TURN_LINES(10, 1));
+  const exec = createCodexExecutor({ binary: bin, timeoutMs: 10_000 });
+  const res = await exec.run({ prompt: "x", caps: { maxTurns: 3 } });
+  assert.equal(res.ok, false);
+  assert.equal(res.output, "", "ok=false iken output boş dize");
+  assert.equal(res.capExceeded?.kind, "turns");
+  assert.equal(res.capExceeded?.limit, 3);
+  assert.ok(res.capExceeded!.observed >= 3, `observed=${res.capExceeded!.observed}`);
+  assert.doesNotMatch(res.error!, /zaman aşımı/, "kesme sebebi süre değil tavan olmalı");
+  // Kesilen koşum da harcadığını raporlar: tavanın girdisi o ana kadarki toplam.
+  assert.ok(res.usage!.turns! >= 3, `usage.turns=${res.usage?.turns}`);
+  // Süreç 10 turu bitirmeden öldü — yoksa akış 20 satır basardı.
+  assert.ok(res.usage!.turns! < 10, `10 turun tamamı akmış: ${res.usage?.turns}`);
+});
+
+test("CodexExecutor: token tavanı aşılınca kesilir, capExceeded.kind tokens", async () => {
+  const bin = fakeCodexBinary("drip", DRIP_TURN_LINES(10, 600));
+  const exec = createCodexExecutor({ binary: bin, timeoutMs: 10_000 });
+  const res = await exec.run({ prompt: "x", caps: { maxTotalTokens: 1000 } });
+  assert.equal(res.ok, false);
+  assert.equal(res.output, "");
+  assert.equal(res.capExceeded?.kind, "tokens");
+  assert.equal(res.capExceeded?.limit, 1000);
+  // İkinci turda kesilir: 600 tavanın altında, 1200 üstünde.
+  assert.equal(res.capExceeded?.observed, 1200);
+  assert.equal(res.usage?.inputTokens, 1200);
+});
+
+test("CodexExecutor: caps verilmezse kesme yok, davranış eskisiyle aynı", async () => {
+  const bin = fakeCodexBinary("ok", DRIP_TURN_LINES(10, 600));
+  const res = await createCodexExecutor({ binary: bin }).run({ prompt: "x" });
+  assert.equal(res.ok, true);
+  assert.equal(res.output, '{"findings":[]}');
+  assert.equal(res.capExceeded, undefined);
+  assert.deepEqual(res.usage, { inputTokens: 6000, turns: 10 });
+});
+
+// Tavanın ALTINDA kalan koşum başarısız sayılmamalı: aşım STRICT (>) ölçülür,
+// yoksa bütçesini tam kullanan meşru bir koşum kesilirdi.
+test("CodexExecutor: tavana eşit maliyet aşım değildir", async () => {
+  const bin = fakeCodexBinary("ok", DRIP_TURN_LINES(2, 500));
+  const res = await createCodexExecutor({ binary: bin }).run({
+    prompt: "x",
+    caps: { maxTotalTokens: 1000, maxTurns: 2 },
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.capExceeded, undefined);
+});
+
+// Üç eksen ayrık: süre aşımı capExceeded TAŞIMAZ ki çağıran taraf
+// budgetExhausted / measurementFailed ayrımını yapabilsin.
+test("CodexExecutor: süre aşımı capExceeded taşımaz", async () => {
+  const bin = fakeCodexBinary("drip", DRIP_TURN_LINES(10, 1));
+  const exec = createCodexExecutor({ binary: bin, timeoutMs: 300 });
+  const res = await exec.run({ prompt: "x", caps: { maxTurns: 100 } });
+  assert.equal(res.ok, false);
+  assert.match(res.error!, /zaman aşımı/);
+  assert.equal(res.capExceeded, undefined);
 });
 
 test("CodexExecutor: sıfır-dışı çıkış ok=false ve stderr kuyruğu taşır", async () => {

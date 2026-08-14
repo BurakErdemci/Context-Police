@@ -10,6 +10,17 @@ export interface ExecutorDetection {
   error?: string;
 }
 
+/**
+ * Çağrı başına maliyet tavanı. Aşımda çağrı KODLA kesilir — istemdeki "60 sn
+ * içinde bitir" talimatı bağlamıyor (ölçüldü: bir hakem 3 dakikalık döngü
+ * koştu). Verilmeyen alan sınırsızdır.
+ */
+export interface ExecutorCaps {
+  /** input+cached+output+reasoning TOPLAMI üstünden. */
+  maxTotalTokens?: number;
+  maxTurns?: number;
+}
+
 export interface ExecutorRequest {
   prompt: string;
   /** Çıktının uyması gereken JSON Şeması — modele iletilir (codex --output-schema). */
@@ -17,6 +28,19 @@ export interface ExecutorRequest {
   /** Çalışma dizini. Gözlemci vermez (D-M2-8); araçlı hakem (M4) verecek. */
   cwd?: string;
   timeoutMs?: number;
+  /** Verilmezse tavan denetimi hiç koşmaz; davranış tavan öncesiyle birebir aynı. */
+  caps?: ExecutorCaps;
+}
+
+/**
+ * Tavanı aşan koşumun sebebi. `observed` STRICT aşımdır (> limit): bütçesini
+ * tam kullanan meşru bir koşum kesilmez, ancak bir sonraki ölçüm tavanı geçince
+ * kesilir.
+ */
+export interface ExecutorCapExceeded {
+  kind: "tokens" | "turns";
+  limit: number;
+  observed: number;
 }
 
 /**
@@ -42,6 +66,12 @@ export interface ExecutorResult {
   /** Ölçülemediyse undefined (bkz. ExecutorUsage). Başarısız koşumda da dolabilir:
    *  zaman aşımına uğrayan bir hakem de token harcamıştır, tavan onu da görmeli. */
   usage?: ExecutorUsage;
+  /**
+   * Yalnız tavan aşımıyla kesilen koşumda dolar. SÜRE aşımı (timeoutMs) bunu
+   * TAŞIMAZ: üç eksen (süre / token / tur) ayrık kalmalı ki çağıran taraf
+   * anchor-drift'in budgetExhausted ↔ measurementFailed ayrımına eşleyebilsin.
+   */
+  capExceeded?: ExecutorCapExceeded;
 }
 
 export interface ExecutorAdapter {
