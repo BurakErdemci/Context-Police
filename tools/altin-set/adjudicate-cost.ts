@@ -58,7 +58,8 @@ import { evidenceFor } from "./evidence-block.ts";
 // kardeş modülde; bu dosya import edildiği anda argv ayrıştırıp çıkıyor.
 import {
   type Usage, addUsage, totalTokens,
-  decideCompleteness, appendTail, cleanupCommand, validateRoot,
+  decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName,
+  buildPrompt,
 } from "./adjudicate-lib.ts";
 
 // --evidence: mekanik katmanın ZATEN ölçtüğü çapa kanıtını isteme koyar.
@@ -101,6 +102,15 @@ if (!rootCheck.ok) {
   process.exit(2);
 }
 const wt = rootCheck.root;
+// Not adları da yol bileşeni oluyor (girdi `<notlar>/<not>.md`, ham çıktı
+// `<cikti>.<not>.raw.jsonl`) — kökle AYNI kalıpla, işe başlamadan önce
+// doğrulanıyorlar. Reddetme sessiz değil: hangi ad neden reddedildi yazılıyor.
+const badNames = notes.map((n) => [n, validateNoteName(n)] as const)
+  .filter((pair): pair is readonly [string, { ok: false; reason: string }] => !pair[1].ok);
+if (badNames.length > 0) {
+  for (const [, check] of badNames) console.error(`not adı reddedildi: ${check.reason}`);
+  process.exit(2);
+}
 // Kapıdan sonra tipi `string`e sabitle: daralma kapanışların (one()) içine
 // taşınmıyor, `string | undefined` olarak görülüyordu.
 const notesDir: string = notesDirArg;
@@ -130,54 +140,6 @@ const SCHEMA = {
     },
   },
 };
-
-// ÇERÇEVE (CLAUDE.md §2.1): ölçüm görevi, hatırlama görevi değil. Modele
-// "bu not doğru mu" diye sorulmuyor; "diske karşı ÖLÇ" deniyor. Emir kipiyle
-// "kır / saldır" da yok — o dil sağlayıcı reddine yol açıyor
-// (codex-cyberpolicy-reddi, 11 Ağu ölçümü).
-function buildPrompt(note: string, body: string, evidence: string | null): string {
-  const ev = evidence
-    ? `\n--- ÖNCEDEN ÖLÇÜLMÜŞ KANIT (mekanik katman, aynı commit) ---\n${evidence}\n--- KANIT SONU ---\n\nBu kanıt zaten ölçüldü; yeniden ölçme. Yalnız kanıtın YETMEDİĞİ yerlerde depoya bak.\n`
-    : "";
-  return `Bir yazılım deposunun kök dizinindesin. Depo \`b4065f1\` commit'ine sabitlenmiş.
-
-Aşağıda o depoya ait bir hafıza notu var. Görevin bu notu OKUMAK değil, ÖLÇMEK:
-notun her doğrulanabilir iddiasının bu commit'te geçerli olup olmadığını
-depodan tespit et.
-
-Yöntem: dosyaları oku, \`git log\`/\`git show\`/\`git ls-files\` çalıştır.
-Hükmü koddan çıkar, notun kendi anlatısından değil. Not bir şeyin var
-olduğunu söylüyorsa bak; olmadığını söylüyorsa yine bak.
-
-Her iddia için hüküm:
-- gecerli          : bu commit'te doğru
-- curuk            : yazıldığında doğruydu, bu commit'te yanlış
-- dogustan-yanlis  : yazıldığı an da yanlıştı (kod hiç öyle olmamış)
-- olculemez        : depoya karşı doğrulanamaz (dış servis, ağ, kullanıcı
-                     beyanı, tarihsel anlatı). Bu ONURLU bir cevap —
-                     ölçemediğin şeye hüküm verme.
-
-SAYIM İDDİALARINI ATLAMA. Not bir sayı veriyorsa ("X.py 1682 satır",
-"45 kayıtlı araç var", "3 test geçiyor", "8 sağlayıcı yolu") o sayıyı KOŞTUR
-ve karşılaştır: \`wc -l\`, \`git grep -c\`, \`git ls-files | wc -l\`. Ölçülen
-kaçtı, notta kaç yazıyor, ikisini de evidence'a yaz. (Ölçüldü: hakemin
-kaçırdığı iddiaların hepsi bu sınıftandı.)
-
-Notun HER doğrulanabilir ifadesini kapsa — yalnız dikkat çekenleri değil.
-
-\`evidence\` alanına ölçtüğün somut şeyi yaz: SHA, dosya yolu, sembol adı,
-sayı. Özet yargı değil.
-
-\`line_start\`/\`line_end\`, iddianın notun kaçıncı satırlarından geldiği
-(1'den başlayarak, aşağıdaki gövdeye göre).
-
-Ölçüm bütçesi: hiçbir komut 60 saniyeyi geçmesin, arka planda süreç bırakma.
-
-${ev}
---- NOT: ${note}.md ---
-${body}
---- NOT SONU ---`;
-}
 
 type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number };
 

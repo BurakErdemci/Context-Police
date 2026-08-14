@@ -7,7 +7,13 @@
 // Buraya YALNIZ o kararlar taşındı; akış (spawn, sinyal, raporlama) CLI'da kaldı.
 
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+// ÜRÜNÜN sınır ilkeli — KOPYALANMIYOR, import ediliyor. Gerekçe: bu denetimin
+// bulduğu kusurun kendisi "araç ile ürünün sınır tanımı ıraksamış" idi; ıraksamış
+// bir kopya aynı kusuru yeniden üretir. Modül saf ve yan etkisiz, `tools/tsconfig.json`
+// ile tip denetimine giriyor. (Kill/sinyal kalıbındaki bilinçli kopya AYRI bir karar:
+// o davranışsal ve araç/ürün ayrımını korumak için var; bu ise bir İLKEL.)
+import { DATA_FENCE_RULE, fenceUntrusted } from "../../core/src/prompt-fence.ts";
 
 export type Usage = {
   input_tokens?: number;
@@ -184,4 +190,91 @@ export function validateRoot(raw: string | undefined): RootCheck {
     return { ok: false, reason: `kök bir git deposu değil (.git yok): ${raw}` };
   }
   return { ok: true, root: real };
+}
+
+export type NameCheck = { ok: true; name: string } | { ok: false; reason: string };
+
+/**
+ * Not adını yol bileşeni yapmadan ÖNCE doğrular.
+ *
+ * Bulgu (M4.1 ikinci dalga, unvalidated-output-path-component): `note` hem girdi
+ * yolunun (`<notlar>/<note>.md`) hem HAM ÇIKTI adının parçasıydı ve hiç
+ * doğrulanmıyordu. Ölçülen iki arıza:
+ *   - `../../../escaped` → ham kayıt ilan edilen `incomplete/` ağacının DIŞINA
+ *     yazıldı, yani dosyanın kendi "eksik çıktı sözleşmesi" delindi;
+ *   - `nested/child` → araç rc=0 ile bitti ama o notun ham kaydı hiç yazılmadı
+ *     (ara dizin yok; istisna yutuldu). SESSİZ kanıt kaybı.
+ * O yüzden reddetme gürültülü: kapı argv ayrıştırmasında, çıkış kodu 2.
+ *
+ * Ölçüt tek bir yol BİLEŞENİ olması: ayraç yok, `.`/`..` değil, mutlak değil.
+ * `name.with.dot` gibi noktalı adlar geçerli — altın sette kullanılıyorlar.
+ */
+export function validateNoteName(raw: string | undefined): NameCheck {
+  if (!raw) return { ok: false, reason: "not adı boş" };
+  if (isAbsolute(raw)) return { ok: false, reason: `not adı mutlak yol olamaz: ${raw}` };
+  // Windows ayracı da reddediliyor: bu araç POSIX'te koşuyor, orada `\` ada
+  // gömülü meşru bir karakter sanılır ve başka bir platformda ayraç olur.
+  if (/[/\\]/.test(raw)) return { ok: false, reason: `not adı yol ayracı içeremez: ${raw}` };
+  if (raw === "." || raw === "..") return { ok: false, reason: `not adı yol bileşeni olamaz: ${raw}` };
+  return { ok: true, name: raw };
+}
+
+/**
+ * Hakem istemini kurar.
+ *
+ * SINIR (bulgu: untrusted-prompt-boundary-divergence): not gövdesi ve mekanik
+ * kanıt GÜVENİLMEYEN metin — ürün istemleriyle (observer/prompt.ts,
+ * signals/classify.ts) AYNI veri çitinden geçiyorlar. Eskiden gövde ham konuyor
+ * ve bölüm sonu `--- NOT SONU ---` ile işaretleniyordu: gövdenin İÇİNDE aynı
+ * dizge geçtiğinde hakemin gördüğü "not burada bitti" sınırı tek anlamlı
+ * değildi. Çit hem sınırı etiketliyor hem metindeki sahte kapanışı
+ * etkisizleştiriyor.
+ *
+ * ÇERÇEVE (CLAUDE.md §2.1): ölçüm görevi, hatırlama görevi değil. Modele "bu not
+ * doğru mu" diye sorulmuyor; "diske karşı ÖLÇ" deniyor. Emir kipiyle "kır /
+ * saldır" da yok — o dil sağlayıcı reddine yol açıyor (codex-cyberpolicy-reddi,
+ * 11 Ağu ölçümü).
+ */
+export function buildPrompt(note: string, body: string, evidence: string | null): string {
+  const ev = evidence
+    ? `\n${fenceUntrusted("ÖNCEDEN ÖLÇÜLMÜŞ KANIT (mekanik katman, aynı commit)", evidence)}\n\nBu kanıt zaten ölçüldü; yeniden ölçme. Yalnız kanıtın YETMEDİĞİ yerlerde depoya bak.\n`
+    : "";
+  return `Bir yazılım deposunun kök dizinindesin. Depo \`b4065f1\` commit'ine sabitlenmiş.
+
+Aşağıda o depoya ait bir hafıza notu var. Görevin bu notu OKUMAK değil, ÖLÇMEK:
+notun her doğrulanabilir iddiasının bu commit'te geçerli olup olmadığını
+depodan tespit et.
+
+${DATA_FENCE_RULE}
+
+Yöntem: dosyaları oku, \`git log\`/\`git show\`/\`git ls-files\` çalıştır.
+Hükmü koddan çıkar, notun kendi anlatısından değil. Not bir şeyin var
+olduğunu söylüyorsa bak; olmadığını söylüyorsa yine bak.
+
+Her iddia için hüküm:
+- gecerli          : bu commit'te doğru
+- curuk            : yazıldığında doğruydu, bu commit'te yanlış
+- dogustan-yanlis  : yazıldığı an da yanlıştı (kod hiç öyle olmamış)
+- olculemez        : depoya karşı doğrulanamaz (dış servis, ağ, kullanıcı
+                     beyanı, tarihsel anlatı). Bu ONURLU bir cevap —
+                     ölçemediğin şeye hüküm verme.
+
+SAYIM İDDİALARINI ATLAMA. Not bir sayı veriyorsa ("X.py 1682 satır",
+"45 kayıtlı araç var", "3 test geçiyor", "8 sağlayıcı yolu") o sayıyı KOŞTUR
+ve karşılaştır: \`wc -l\`, \`git grep -c\`, \`git ls-files | wc -l\`. Ölçülen
+kaçtı, notta kaç yazıyor, ikisini de evidence'a yaz. (Ölçüldü: hakemin
+kaçırdığı iddiaların hepsi bu sınıftandı.)
+
+Notun HER doğrulanabilir ifadesini kapsa — yalnız dikkat çekenleri değil.
+
+\`evidence\` alanına ölçtüğün somut şeyi yaz: SHA, dosya yolu, sembol adı,
+sayı. Özet yargı değil.
+
+\`line_start\`/\`line_end\`, iddianın notun kaçıncı satırlarından geldiği
+(1'den başlayarak, aşağıdaki blok içindeki gövdeye göre).
+
+Ölçüm bütçesi: hiçbir komut 60 saniyeyi geçmesin, arka planda süreç bırakma.
+
+${ev}
+${fenceUntrusted(`NOT: ${note}.md`, body)}`;
 }
