@@ -15,6 +15,7 @@ import { claudeCodeAdapter, readCwdDetailed } from "../src/adapters/claude-code.
 import { scanOnce, type IdentityProbe } from "../src/scan.ts";
 import { listEvents, countEvents } from "../src/store/events.ts";
 import { parseObserverOutput } from "../src/observer/prompt.ts";
+import { createCodexExecutor } from "../src/adapters/codex.ts";
 import { getCursor } from "../src/store/projects.ts";
 import { tmpDir } from "./helpers.ts";
 import type { Turn } from "../src/types.ts";
@@ -45,8 +46,16 @@ function errno(code: string): NodeJS.ErrnoException {
 
 // --- class: silent-fallback-breaks-delivery-contract (scan.ts) ---
 
-test("[silent-fallback-breaks-delivery-contract] realpath ölçüm arızasında oturum ATLANIR, ham yola düşülmez", async () => {
-  const { root } = fakeRoot();
+// GÜNCELLENDİ (doğrulama turu, 14 Ağu — sınıf: persistent-identity-starvation):
+// bu iki test eskiden "realpath arızası → HİÇ teslimat" davranışını sabitliyordu.
+// O davranış takası yanlış tarafa kaydırıyordu: sürekli realpath arızası
+// (EIO) olan ama dosyası okunabilen bir oturum HER taramada atlanıyor, yani
+// mükerrer teslimat yerine sürekli TESLİMATSIZLIK oluşuyordu. Yeni sözleşme:
+// kimlik iki ölçümden birinden kurulabilir; atlama ancak İKİSİ de düşerse.
+// (Mükerrer teslimatı önleyen şey inode indeksi — aşağıda ayrıca sınanıyor.)
+
+test("[persistent-identity-starvation] realpath arızasında kimlik inode'dan kurulur, teslimat DURMAZ", async () => {
+  const { root, file } = fakeRoot();
   const store = openStore(":memory:");
   const seen: Turn[] = [];
 
@@ -57,47 +66,77 @@ test("[silent-fallback-breaks-delivery-contract] realpath ölçüm arızasında 
     onTurns: ({ turns }) => void seen.push(...turns),
   });
 
-  // DAVRANIŞ: hiçbir teslimat yapılmadı ve hiçbir imleç yazılmadı. Eski hâl
-  // ham yola düşüp turn'ü teslim ediyor ve o ham yolu anahtar olarak
-  // yazıyordu — aynı akış gerçek yolla ikinci kez teslim edilebilirdi.
-  assert.equal(seen.length, 0, "kimlik ölçülemeden teslimat yapılmamalı");
-  assert.equal(sum.turns, 0);
+  assert.equal(seen.length, 1, "okunabilir bir oturum realpath yüzünden aç kalmamalı");
+  assert.equal(sum.turns, 1);
+  // Arıza YİNE de bir arıza: sayılıyor ve olaya yazılıyor.
   assert.equal(sum.sessionErrors, 1);
 
   const ev = listEvents(store, { kind: "cursor_identity_failed", limit: 5 });
   assert.equal(ev.length, 1);
-  const d = JSON.parse(ev[0]!.detail ?? "{}") as { probe: string; code: string; missing: boolean };
+  const d = JSON.parse(ev[0]!.detail ?? "{}") as {
+    probe: string; code: string; missing: boolean;
+    tried: { probe: string; code: string }[]; resolved: boolean; recoveredBy: string | null;
+  };
   assert.equal(d.probe, "realpath");
   assert.equal(d.code, "EACCES");
   assert.equal(d.missing, false, "ölçüm arızası 'dosya yok' ile karıştırılmamalı");
+  // Hangi ölçümlerin denendiği ve sonucun ne olduğu olayda YAZILI olmalı.
+  assert.deepEqual(d.tried.map((t) => t.probe), ["realpath"]);
+  assert.equal(d.resolved, true);
+  assert.equal(d.recoveredBy, "stat");
+
+  // İmleç yazıldı ve inode'u taşıyor: mükerrer teslimatı önleyen indeks bu.
+  const cursor = getCursor(store, file);
+  assert.ok(cursor, "kimlik kurulduysa imleç de yazılmalı");
+  assert.equal(cursor!.inode, String(statSync(file).ino));
   store.close();
 });
 
-test("[silent-fallback-breaks-delivery-contract] atlanan oturum SONRAKİ taramada tam teslim edilir (en-az-bir-kez korunur)", async () => {
+test("[persistent-identity-starvation] SÜREKLİ realpath arızasında ikinci tarama AYNI turn'ü tekrar teslim etmez", async () => {
   const { root } = fakeRoot("kritik-turn");
   const storePath = join(tmpDir(), "s.db");
 
   const store = openStore(storePath);
-  let fail = true;
   const seen: string[] = [];
+  // Arıza HİÇ geçmiyor — ölçülen arıza sınıfı buydu (kalıcı EIO).
   const probe: IdentityProbe = {
-    realpath: (p) => (fail ? Promise.reject(errno("EIO")) : realProbe.realpath(p)),
+    realpath: () => Promise.reject(errno("EIO")),
     stat: realProbe.stat,
   };
 
-  await scanOnce(store, {
-    adapter: claudeCodeAdapter, root, identityProbe: probe,
-    onTurns: ({ turns }) => void seen.push(...turns.map((t) => t.text)),
-  });
-  assert.equal(seen.length, 0, "arıza turunda teslimat yok");
+  for (let i = 0; i < 2; i++) {
+    await scanOnce(store, {
+      adapter: claudeCodeAdapter, root, identityProbe: probe,
+      onTurns: ({ turns }) => void seen.push(...turns.map((t) => t.text)),
+    });
+  }
+  assert.deepEqual(seen, ["kritik-turn"], "ilk taramada teslim, ikincisinde TEKRAR YOK");
+  assert.equal(countEvents(store, "cursor_identity_failed"), 2, "her tur arıza kaydı düşmeli");
+  store.close();
+});
 
-  // Arıza geçti: aynı baytlar BAŞTAN okunur, çünkü imleç ilerlemedi.
-  fail = false;
-  await scanOnce(store, {
-    adapter: claudeCodeAdapter, root, identityProbe: probe,
-    onTurns: ({ turns }) => void seen.push(...turns.map((t) => t.text)),
+test("[persistent-identity-starvation] İKİ ölçüm de düşerse oturum atlanır ve iki deneme de kaydedilir", async () => {
+  const { root } = fakeRoot();
+  const store = openStore(":memory:");
+  const seen: Turn[] = [];
+
+  const sum = await scanOnce(store, {
+    adapter: claudeCodeAdapter,
+    root,
+    identityProbe: {
+      realpath: () => Promise.reject(errno("EIO")),
+      stat: () => Promise.reject(errno("EACCES")),
+    },
+    onTurns: ({ turns }) => void seen.push(...turns),
   });
-  assert.deepEqual(seen, ["kritik-turn"], "ertelenen teslimat kaybolmamalı");
+
+  assert.equal(seen.length, 0, "kimlik HİÇ kurulamıyorsa teslimat yapılmamalı");
+  assert.equal(sum.sessionErrors, 1);
+  const d = JSON.parse(listEvents(store, { kind: "cursor_identity_failed", limit: 1 })[0]!.detail ?? "{}") as
+    { probe: string; tried: { probe: string; code: string }[]; resolved: boolean };
+  assert.deepEqual(d.tried.map((t) => t.probe), ["realpath", "stat"], "denenen ölçümler yazılmalı");
+  assert.deepEqual(d.tried.map((t) => t.code), ["EIO", "EACCES"]);
+  assert.equal(d.resolved, false);
   store.close();
 });
 
@@ -153,8 +192,9 @@ test("[silent-fallback-breaks-delivery-contract] arıza taramanın tamamını ö
     adapter: claudeCodeAdapter,
     root,
     identityProbe: {
+      // -tmp-a'da İKİ ölçüm de düşüyor → o oturum atlanır; öbürü sağlam.
       realpath: (p) => (p.includes("-tmp-a") ? Promise.reject(errno("ELOOP")) : realProbe.realpath(p)),
-      stat: realProbe.stat,
+      stat: (p) => (p.includes("-tmp-a") ? Promise.reject(errno("ELOOP")) : realProbe.stat(p)),
     },
   });
   assert.equal(sum.turns, 1, "sağlam projenin turn'ü işlenmeli");
@@ -315,34 +355,110 @@ test("[cleanup-clobbers-result] closeQuietly temiz yolda true döner ve susar", 
 });
 
 // --- class: unguarded-timeout-kill (adapters/codex.ts) ---
-// Gerçek `codex` ÇAĞRILMIYOR (kota). Sınanan şey kaynak sözleşmesi: timeout
-// yolları da `cleanupNow` ile aynı canlılık sınamasını yapıyor mu.
+//
+// GÜNCELLENDİ (doğrulama turu, 14 Ağu — sınıf: source-text-test): bu test
+// eskiden KAYNAK METNİ tarıyordu. Ölçüldü: üç korumalı çağrı bellekte
+// `if (closed) killProcessGroup(...)` gibi GÜVENSİZ hâle mutasyona uğratıldığında
+// metin taraması SIFIR hata verdi — yani timeout güvenliğini kanıtlamıyordu.
+// Artık ölçülen şey ÇALIŞMA ZAMANI davranışı: sahte binary, gerçek zamanlama,
+// `process.kill` çağrılarının gerçek dizisi.
+//
+// Gerçek `codex` ÇAĞRILMIYOR (kota); sahte binary geçici dizinde, sonda siliniyor.
 
-test("[unguarded-timeout-kill] her timeout kill'i canlılık sınamasından geçiyor", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const { fileURLToPath } = await import("node:url");
-  const src = await readFile(
-    fileURLToPath(new URL("../src/adapters/codex.ts", import.meta.url)), "utf8",
+/**
+ * Testin KENDİ üst sınırı. Gerekçe: koruma güvensiz hâle mutasyona uğradığında
+ * (ölçüldü, 14 Ağu) sahte binary hiç öldürülmüyor ve test ASILIYOR — süresiz
+ * bir asılma "kırmızı" değil, sadece durmuş bir koşum. Sınır o hâli hızlı bir
+ * BAŞARISIZLIĞA çeviriyor.
+ */
+const KILL_TEST_OPTS = { timeout: 15_000 };
+
+/** `process.kill` çağrılarını kaydeder; sinyal GERÇEKTEN gönderilir. */
+function recordKills(): { calls: { pid: number; signal: unknown }[]; restore: () => void } {
+  const calls: { pid: number; signal: unknown }[] = [];
+  const original = process.kill.bind(process);
+  process.kill = ((pid: number, signal?: unknown) => {
+    calls.push({ pid, signal: signal ?? "SIGTERM" });
+    return original(pid, signal as never);
+  }) as typeof process.kill;
+  return { calls, restore: () => { process.kill = original; } };
+}
+
+/** Süresiz çalışan, stdin'i tüketen sahte binary. */
+function fakeHangingBinary(dir: string, body: string): string {
+  const p = join(dir, "fake-codex");
+  writeFileSync(p, `#!/bin/sh\n${body}\n`);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+test("[unguarded-timeout-kill] timeout GERÇEKTEN öldürüyor ve önce canlılık sınıyor", KILL_TEST_OPTS, async () => {
+  const dir = tmpDir();
+  // stdin'i tüket, sonra asıl: timeout'un tek çıkış yolu kill olsun.
+  const binary = fakeHangingBinary(dir, "cat > /dev/null\nwhile true; do sleep 1; done");
+  const rec = recordKills();
+  try {
+    const res = await createCodexExecutor({ binary, timeoutMs: 300 }).run({ prompt: "x" });
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /zaman aşımı/, "koşum timeout ile bitmeli");
+
+    // DAVRANIŞ 1: SIGKILL gerçekten gönderildi (mutasyon `if (closed) kill`
+    // altında hiç gönderilmez ve koşum timeout'a rağmen asılı kalırdı).
+    const kills = rec.calls.filter((c) => c.signal === "SIGKILL");
+    assert.ok(kills.length > 0, "timeout'ta süreç grubu öldürülmeli");
+    assert.ok(kills.some((c) => c.pid < 0), "grup öldürme negatif PID ile gider (torunlar)");
+
+    // DAVRANIŞ 2: SIGKILL'den ÖNCE sinyal-0 canlılık sınaması var. Koruma
+    // kaldırıldığında bu sıra kaybolur — ölçülen şey kaynak metni değil,
+    // sürecin gerçekten gönderdiği sinyaller.
+    const firstKill = rec.calls.findIndex((c) => c.signal === "SIGKILL");
+    const probeBefore = rec.calls.slice(0, firstKill).some((c) => c.signal === 0);
+    assert.ok(probeBefore, "öldürmeden önce kill(pid, 0) ile canlılık sınanmalı");
+  } finally {
+    rec.restore();
+  }
+});
+
+test("[unguarded-timeout-kill] detect() timeout'u da aynı korumadan geçiyor", KILL_TEST_OPTS, async () => {
+  const dir = tmpDir();
+  const binary = fakeHangingBinary(dir, "while true; do sleep 1; done");
+  const rec = recordKills();
+  try {
+    const d = await createCodexExecutor({ binary, detectTimeoutMs: 300 }).detect();
+    assert.equal(d.found, false, "asılan --version tespiti başarısız saymalı");
+    const firstKill = rec.calls.findIndex((c) => c.signal === "SIGKILL");
+    assert.ok(firstKill >= 0, "detect timeout'unda da süreç öldürülmeli");
+    assert.ok(
+      rec.calls.slice(0, firstKill).some((c) => c.signal === 0),
+      "detect yolunda da önce canlılık sınaması",
+    );
+  } finally {
+    rec.restore();
+  }
+});
+
+test("[unguarded-timeout-kill] maliyet tavanı kesmesi de aynı korumadan geçiyor", KILL_TEST_OPTS, async () => {
+  const dir = tmpDir();
+  // Tavanı aşacak tek bir turn.completed bas, sonra asıl.
+  const binary = fakeHangingBinary(
+    dir,
+    `cat > /dev/null\nprintf '{"type":"turn.completed","usage":{"input_tokens":5000}}\\n'\nwhile true; do sleep 1; done`,
   );
-
-  // `killProcessGroup(` çağrılarının HEPSİ ya isProcessAlive korumasının
-  // içinde ya da fonksiyon tanımının kendisinde olmalı. Ölçüm: korumasız bir
-  // çağrı, çocuk `exit` ile `close` arasındayken (ölçülen aralık ~1,1–1,4 ms)
-  // geri dönüştürülmüş bir PID'nin grubuna SIGKILL atabiliyor.
-  const korumasiz = src
-    .split("\n")
-    .map((l, i) => [i + 1, l] as const)
-    .filter(([, l]) => /killProcessGroup\(/.test(l))
-    .filter(([, l]) => !/function killProcessGroup/.test(l))
-    .filter(([, l]) => !/isProcessAlive\(/.test(l))
-    // Akış yolundaki karşılığı `closed` bayrağı; o da meşru bir koruma.
-    .filter(([, l]) => !/closed/.test(l));
-
-  assert.deepEqual(
-    korumasiz.map(([n]) => n),
-    [],
-    `korumasız killProcessGroup çağrısı: satır ${korumasiz.map(([n]) => n).join(", ")}`,
-  );
+  const rec = recordKills();
+  try {
+    const res = await createCodexExecutor({ binary, timeoutMs: 10_000 })
+      .run({ prompt: "x", caps: { maxTotalTokens: 10 } });
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /maliyet tavanı/, "koşumu bitiren karar tavan olmalı");
+    const firstKill = rec.calls.findIndex((c) => c.signal === "SIGKILL");
+    assert.ok(firstKill >= 0, "tavan aşımında süreç öldürülmeli");
+    assert.ok(
+      rec.calls.slice(0, firstKill).some((c) => c.signal === 0),
+      "tavan yolunda da önce canlılık sınaması",
+    );
+  } finally {
+    rec.restore();
+  }
 });
 
 // --- class: unknown-item-keys-uncounted (observer/prompt.ts) ---

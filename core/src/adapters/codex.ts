@@ -234,6 +234,10 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
   // atlamanın sonuçta görünür olması.
   let unparsedLines = 0;
   let unknownEvents = 0;
+  let oversizeDrops = 0;
+  // Sınırı aşıp atılan bir satırın KUYRUĞUNU yutmak için: kesme noktasından
+  // sonraki parça bağımsız bir satır değil.
+  let dropping = false;
   // Tavan denetimi için AYRICA tutuluyor: totals'ı her olayda toplamak akış
   // uzadıkça boşuna iş; burada artımlı büyüyor.
   let totalTokens = 0;
@@ -277,24 +281,47 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       rest += chunk;
       let nl: number;
       while ((nl = rest.indexOf("\n")) !== -1) {
-        handleLine(rest.slice(0, nl));
+        const line = rest.slice(0, nl);
         rest = rest.slice(nl + 1);
+        // Atılan satırın KUYRUĞU yeni bir satır değil: `dropping` olmadan bu
+        // parça handleLine'a giriyor ve kesme noktası şansa `{`'a denk gelirse
+        // "bozuk satır" diye ikinci kez sayılıyordu.
+        if (dropping) dropping = false;
+        else handleLine(line);
       }
-      if (rest.length > MAX_STREAM_LINE) rest = "";
+      // Sınırı aşan tampon atılıyor ama SAYILIYOR: atılan şey bozuk bir ikili
+      // çıktı da olabilir, sınırın üstünde GEÇERLİ bir olay da (ölçüldü, doğrulama
+      // turu 14 Ağu: 1,1 MiB'lık geçerli bir olay hiçbir sayacı artırmadan
+      // siliniyordu — "akış gelmedi" ile "akış anlaşılmadı" ayrımı bu yolda hâlâ
+      // kapalıydı). Satır başına TEK sayım: sınır tekrar tekrar aşılsa da atılan
+      // şey hâlâ aynı satır.
+      if (!dropping && rest.length > MAX_STREAM_LINE) {
+        rest = "";
+        dropping = true;
+        oversizeDrops++;
+        // Aynı olay `unparsedLines`'a da yazılıyor: o alan "satır geldi, ölçüme
+        // dönüşmedi" sorusunun cevabı ve atılan tampon o kümenin içinde.
+        // `oversizeDrops` ise SEBEBİ ayırıyor (uzunluk mu, bozuk JSON mu).
+        unparsedLines++;
+      } else if (dropping) {
+        rest = ""; // hâlâ aynı atılmış satırın içindeyiz; biriktirmenin anlamı yok
+      }
     },
     /** Akış kapandığında son (yeni-satırsız) satırı da işler. */
     finish(): ExecutorUsage | undefined {
-      if (rest) {
+      // `dropping` iken elde kalan şey atılmış bir satırın kuyruğu — işlenmez.
+      if (rest && !dropping) {
         handleLine(rest);
-        rest = "";
       }
+      rest = "";
       // Hiçbir olay görülmediyse ölçüm YOK: undefined döner, 0 uydurulmaz.
       // Yalnız item görüldüyse ölçüm VAR (item sayısı) ama token bilinmiyor —
       // o durumda token alanları yokluğuyla, items değeriyle raporlanır.
       // Anlaşılmayan satır/olay da bir ölçümdür: hiçbir olay tanınmasa bile
       // usage BASILIR (yalnız kayma sayaçlarıyla), yoksa "akış gelmedi" ile
       // "akış geldi ama anlaşılmadı" aynı `undefined`'a düşerdi.
-      if (turns === 0 && items === 0 && unparsedLines === 0 && unknownEvents === 0) return undefined;
+      if (turns === 0 && items === 0 && unparsedLines === 0 && unknownEvents === 0 && oversizeDrops === 0)
+        return undefined;
       const usage: ExecutorUsage = {};
       for (const [, camel] of USAGE_FIELDS) {
         const v = totals.get(camel);
@@ -308,6 +335,8 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       }
       if (unparsedLines > 0) usage.unparsedLines = unparsedLines;
       if (unknownEvents > 0) usage.unknownEvents = unknownEvents;
+      // "yokken yazma, 0 uydurma": alan yalnız gerçekten atılan tampon varken var.
+      if (oversizeDrops > 0) usage.oversizeDrops = oversizeDrops;
       return usage;
     },
   };
@@ -564,12 +593,20 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
         failure = err;
         failed = true;
       }
-      untrack("dir", tmp);
+      // SAHİPLİK SİLME BİTENE KADAR BIZDE. Doğrulama turu ölçtü (14 Ağu): kayıt
+      // `await rm` ÖNCESİNDE düşürülünce, o pencerede gelen bir SIGINT dizini
+      // artık defterde GÖRMÜYOR — ve `rm` de sinyalle kesildiği için dizin
+      // sızıyordu. Çift silme zararsız (`force: true`), erken bırakma değil.
       let cleanupError: string | undefined;
       try {
         await rm(tmp, { recursive: true, force: true });
       } catch (err) {
         cleanupError = describeError(err);
+      } finally {
+        // `finally`: silme patlasa da kayıt düşer. Aksi hâlde defterde ölü bir
+        // giriş kalır ve sinyal işleyicisi her seferinde onu silmeye kalkar
+        // (ayrıca dinleyici hiç kaldırılmaz — bkz. untrack/uninstall).
+        untrack("dir", tmp);
       }
       if (failed) {
         // İlkel bir değer fırlatılmışsa alan yazılamaz; kayıp bilinçli (lock.ts).

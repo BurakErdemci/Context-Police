@@ -88,6 +88,19 @@ export interface ExecutorUsage {
    * gelecekteki bir ad değişikliğini sessiz kalmaktan çıkarmak için var.
    */
   unknownEvents?: number;
+  /**
+   * Yeni-satır beklenirken üst sınırı (MAX_STREAM_LINE) aşıp ATILAN tampon
+   * sayısı. Ayrı bir alan, çünkü ayrı bir arıza: `unparsedLines` "satırı gördüm,
+   * anlamadım" der; bu ise "satırı hiç görmedim, tamamlanmadan attım".
+   *
+   * Doğrulama turu ölçtü (14 Ağu): 1,1 MiB'lık GEÇERLİ tek bir olay hiçbir
+   * sayacı artırmadan siliniyordu — yani sayaçların kapatmak için eklendiği
+   * ayrım ("akış hiç gelmedi" ile "akış anlaşılmadı") bu yolda hâlâ açıktı.
+   *
+   * Aynı olay `unparsedLines`'ı da artırır (o alan "satır geldi, ölçüme
+   * dönüşmedi" kümesinin tamamı); bu alan yalnız SEBEBİ ayırır.
+   */
+  oversizeDrops?: number;
 }
 
 export interface ExecutorResult {

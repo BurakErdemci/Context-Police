@@ -277,8 +277,8 @@ async function scanSession(
   // Anahtar GERÇEK yol: aynı fiziksel dosyaya iki yoldan ulaşılabiliyordu
   // (sembolik bağ, sabit bağ) ve aynı akış iki kez teslim ediliyordu.
   //
-  // KİMLİK ÖLÇÜLEMEZSE OTURUM BU TURDA ATLANIR — sessizce ham yola DÜŞÜLMEZ.
-  // Eski hâl `realpath(...).catch(() => session.filePath)` idi ve arızayı
+  // HİÇBİR ÖLÇÜM KİMLİĞİ KURAMAZSA oturum bu turda ATLANIR — sessizce ham yola
+  // DÜŞÜLMEZ. Eski hâl `realpath(...).catch(() => session.filePath)` idi ve arızayı
   // errno'ya bakmadan yutuyordu: anahtar "gerçek yol" olmaktan çıkıyor, aynı
   // fiziksel akış bir sembolik bağ üzerinden İKİNCİ bir anahtarla kaydediliyor
   // ve İKİ KEZ teslim ediliyordu — yani bir satır yukarıdaki gerekçenin tam
@@ -295,45 +295,84 @@ async function scanSession(
   // okuma arasında silinmiş, atlanması zaten doğru; ENOENT dışı her errno bir
   // ÖLÇÜM ARIZASI (izin, ELOOP, EIO) ve düzeltilebilir bir durumu işaret eder.
   const probe = opts.identityProbe ?? defaultIdentityProbe;
-  const identityFailed = (which: "realpath" | "stat", err: unknown): void => {
+  // Denenen ölçümlerin dökümü olayın detayına giriyor: "kimlik kurulamadı"
+  // tek başına teşhis değil, HANGİ ölçümün neden düştüğü teşhis.
+  const tried: { probe: "realpath" | "stat"; code: string | null; error: string }[] = [];
+  const noteFailure = (which: "realpath" | "stat", err: unknown): void => {
+    tried.push({ probe: which, code: errnoOf(err) ?? null, error: describeErr(err) });
+  };
+  /**
+   * Ölçüm arızasını olaya çevirir. `resolved`, kimliğin arızaya RAĞMEN
+   * kurulup kurulmadığını söyler — ikisi ayrı sorular ve ayrı raporlanıyor.
+   *
+   * `probe`/`code`/`missing` alanları İLK arızayı anlatır (geriye dönük uyumlu;
+   * denenenlerin tamamı `tried`'da). İlk arıza seçildi çünkü sonraki ölçüm
+   * çoğu zaman ilkinin sebebini tekrar ediyor (silinmiş dosya: iki kez ENOENT).
+   */
+  const logIdentityFailure = (resolved: boolean, recoveredBy: string | null): void => {
+    if (tried.length === 0) return;
     sum.sessionErrors++;
-    const code = errnoOf(err);
+    const first = tried[0]!;
     logEvent(store, {
       projectId,
       kind: "cursor_identity_failed",
       detail: {
         sessionId: session.sessionId,
         filePath: session.filePath,
-        probe: which,
-        code: code ?? null,
-        missing: code === "ENOENT",
-        error: describeErr(err),
+        probe: first.probe,
+        code: first.code,
+        missing: first.code === "ENOENT",
+        error: first.error,
+        tried,
+        resolved,
+        recoveredBy,
       },
     });
   };
 
-  let cursorKey: string;
+  // Kimliğin İKİ ölçümü var ve ikisi de tek başına yeterli: gerçek yol
+  // (realpath) ve inode (stat). Doğrulama turu ölçtü (14 Ağu): realpath
+  // arızasında doğrudan dönmek, sürekli EIO veren ama dosyası okunabilen bir
+  // oturumu HER taramada atlıyor — imleç ilerlemediği için mükerrer teslimat
+  // yerine SÜREKLİ TESLİMATSIZLIK oluyor, yani takas yanlış tarafa kayıyor.
+  // Atlama artık son çare: ancak İKİ ölçüm de kimliği kuramazsa.
+  let realPath: string | null = null;
   try {
-    cursorKey = await probe.realpath(session.filePath);
+    realPath = await probe.realpath(session.filePath);
   } catch (err) {
-    identityFailed("realpath", err);
-    return;
+    noteFailure("realpath", err);
   }
 
+  // realpath düşse de ham yol bir ANAHTAR ADAYI. Mükerrer teslimatı önleyen şey
+  // anahtarın "gerçek yol" olması DEĞİL, inode indeksinin aynı fiziksel akışı
+  // tek kayıtta buluşturması: aşağıda kayıt bulunamazsa inode aranıyor, ve
+  // yazılan imleç `res.inode`'u taşıdığı için sonraki taramalar (realpath
+  // çalışsın ya da çalışmasın) aynı kaydı buluyor.
+  const cursorKey = realPath ?? session.filePath;
   let cursor = getCursor(store, cursorKey);
+  let recoveredBy: string | null = realPath === null && cursor ? "cursor-path" : null;
   if (!cursor) {
     // Yol bilinmiyor: aynı akış başka bir adla (sabit bağ) kayıtlı olabilir.
     // Bu sorunun cevabı ALINAMIYORSA "kayıtlı değil" varsayılamaz — o varsayım
     // tam olarak mükerrer teslimat demek.
-    let ino: string;
+    let ino: string | null = null;
     try {
       ino = String((await probe.stat(session.filePath)).ino);
     } catch (err) {
-      identityFailed("stat", err);
+      noteFailure("stat", err);
+    }
+    if (ino === null) {
+      // Burada gerçekten kimlik YOK: ne kayıtlı bir yol eşleşmesi ne inode.
+      // (realpath başarılı olsa bile: kayıt başka bir adla duruyor olabilir ve
+      // bunu eleyecek ölçüm inode'du.) Atlanıyor — imleç yazılmadığı için
+      // "en az bir kez teslim" sözleşmesi korunuyor, teslimat yalnız erteleniyor.
+      logIdentityFailure(false, null);
       return;
     }
     cursor = getCursorByInode(store, ino);
+    if (realPath === null) recoveredBy = cursor ? "inode" : "stat";
   }
+  logIdentityFailure(true, recoveredBy);
   const from = cursor?.byteOffset ?? 0;
 
   // Burada "dosya büyümemişse atla" kısayolu YOK, bilerek. Önceki hâlinde

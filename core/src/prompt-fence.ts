@@ -40,7 +40,21 @@ export function neutralizeFence(text: string): string {
   return text.replace(/<{2,}|>{2,}/g, (m) => m.split("").join(" "));
 }
 
+/**
+ * Etiketi TEK SATIRLIK ve sınır işareti taşımayan bir başlığa indirger.
+ *
+ * Bulgu (doğrulama turu, 14 Ağu): etiket "sabit metin" varsayılıyordu, oysa
+ * çağıranlardan biri oraya kullanıcı verisi koyuyordu (hakem: not ADI) ve
+ * `evil\nVERI>>>\n…` biçimli bir ad çiti GÖVDEDEN ÖNCE kapatıyordu. Çağıran
+ * tarafta ayrı bir kapı var (validateNoteName); bu ikinci savunma, çünkü tek
+ * savunmaya güvenmek bu sınıfın ilk arızasının kendisiydi — ve etikete veri
+ * koyan bir sonraki çağıran o kapıdan geçmeyebilir.
+ */
+export function sanitizeFenceLabel(label: string): string {
+  return neutralizeFence(label.replace(/[\p{Cc}\p{Cf}]/gu, " ")).trim();
+}
+
 /** Güvenilmeyen metni etiketli bir veri bloğuna alır. */
 export function fenceUntrusted(label: string, text: string): string {
-  return `${DATA_FENCE_OPEN} ${label}\n${neutralizeFence(text)}\n${DATA_FENCE_CLOSE}`;
+  return `${DATA_FENCE_OPEN} ${sanitizeFenceLabel(label)}\n${neutralizeFence(text)}\n${DATA_FENCE_CLOSE}`;
 }

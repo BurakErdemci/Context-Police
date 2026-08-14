@@ -6,14 +6,16 @@
 // zaman test edilemedi; M4.1 denetiminin 6 bulgusunun 6'sı da o dosyadaydı.
 // Buraya YALNIZ o kararlar taşındı; akış (spawn, sinyal, raporlama) CLI'da kaldı.
 
-import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 // ÜRÜNÜN sınır ilkeli — KOPYALANMIYOR, import ediliyor. Gerekçe: bu denetimin
 // bulduğu kusurun kendisi "araç ile ürünün sınır tanımı ıraksamış" idi; ıraksamış
 // bir kopya aynı kusuru yeniden üretir. Modül saf ve yan etkisiz, `tools/tsconfig.json`
 // ile tip denetimine giriyor. (Kill/sinyal kalıbındaki bilinçli kopya AYRI bir karar:
 // o davranışsal ve araç/ürün ayrımını korumak için var; bu ise bir İLKEL.)
-import { DATA_FENCE_RULE, fenceUntrusted } from "../../core/src/prompt-fence.ts";
+import {
+  DATA_FENCE_CLOSE, DATA_FENCE_OPEN, DATA_FENCE_RULE, fenceUntrusted,
+} from "../../core/src/prompt-fence.ts";
 
 export type Usage = {
   input_tokens?: number;
@@ -172,6 +174,8 @@ export type RootCheck = { ok: true; root: string } | { ok: false; reason: string
  *
  * Yol ayrıca canonicalize ediliyor: alt sürece sembolik bağ değil gerçek yol
  * gider, böylece `-C` değeri ile ölçümün raporladığı yol aynı şey olur.
+ *
+ * "beklenen depo mu" ölçümü checkGitMarker'da: varlık kontrolü YETMİYOR.
  */
 export function validateRoot(raw: string | undefined): RootCheck {
   if (!raw) return { ok: false, reason: "kök argümanı boş" };
@@ -186,10 +190,55 @@ export function validateRoot(raw: string | undefined): RootCheck {
   } catch {
     return { ok: false, reason: `kök okunamadı: ${raw}` };
   }
-  if (!existsSync(join(real, ".git"))) {
+  return checkGitMarker(real, raw);
+}
+
+/**
+ * `.git` işaretçisinin GERÇEKTEN bir depoya işaret ettiğini ölçer.
+ *
+ * Bulgu (doğrulama turu, 14 Ağu): kapı yalnız `existsSync(<root>/.git)` idi —
+ * `mkdir .git` ile kurulmuş BOŞ bir dizin depo sayılıyordu, yani kapı "yanlış
+ * dizinde ölçüm yapma" işini yapmıyordu.
+ *
+ * İki biçim de MEŞRU ve ikisi de kabul ediliyor:
+ *   - normal depo: `.git` bir DİZİN → içinde HEAD + objects + refs olmalı;
+ *   - bağlı worktree / submodule: `.git` bir DOSYA → `gitdir: <yol>` satırı
+ *     taşır ve gösterdiği yönetim dizini var olmalı.
+ * İkinci biçim kırılırsa bu projenin kendi ölçüm koşumları durur: onlar
+ * worktree'de koşuyor (bkz. audit-lanes).
+ */
+function checkGitMarker(real: string, raw: string): RootCheck {
+  const marker = join(real, ".git");
+  let st;
+  try {
+    st = statSync(marker);
+  } catch {
     return { ok: false, reason: `kök bir git deposu değil (.git yok): ${raw}` };
   }
-  return { ok: true, root: real };
+  if (st.isDirectory()) {
+    const missing = ["HEAD", "objects", "refs"].filter((n) => !existsSync(join(marker, n)));
+    if (missing.length > 0) {
+      return { ok: false, reason: `kök bir git deposu değil (.git içinde eksik: ${missing.join(", ")}): ${raw}` };
+    }
+    return { ok: true, root: real };
+  }
+  if (st.isFile()) {
+    let text: string;
+    try {
+      text = readFileSync(marker, "utf8");
+    } catch {
+      return { ok: false, reason: `.git dosyası okunamadı: ${raw}` };
+    }
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(text);
+    if (!m) return { ok: false, reason: `.git dosyası 'gitdir:' satırı taşımıyor: ${raw}` };
+    // Göreli gitdir gerçek bir hâl (taşınabilir worktree): köke göre çözülür.
+    const target = isAbsolute(m[1]!) ? m[1]! : resolve(real, m[1]!);
+    if (!existsSync(join(target, "HEAD"))) {
+      return { ok: false, reason: `.git dosyasının gösterdiği git dizini yok: ${target}` };
+    }
+    return { ok: true, root: real };
+  }
+  return { ok: false, reason: `.git ne dizin ne dosya: ${raw}` };
 }
 
 export type NameCheck = { ok: true; name: string } | { ok: false; reason: string };
@@ -216,6 +265,16 @@ export function validateNoteName(raw: string | undefined): NameCheck {
   // gömülü meşru bir karakter sanılır ve başka bir platformda ayraç olur.
   if (/[/\\]/.test(raw)) return { ok: false, reason: `not adı yol ayracı içeremez: ${raw}` };
   if (raw === "." || raw === "..") return { ok: false, reason: `not adı yol bileşeni olamaz: ${raw}` };
+  // İKİNCİ ARIZA SINIFI (doğrulama turu, 14 Ağu): ad yalnız bir yol bileşeni
+  // değil, PROMPT'taki veri çitinin ETİKETİ. Yeni satır + `VERI>>>` taşıyan bir
+  // ad çiti GÖVDEDEN ÖNCE kapatıyor, yani gövde talimat alanına düşüyordu.
+  // Kontrol karakterleri ayrıca dosya adı olarak da meşru değil.
+  if (/[\p{Cc}\p{Cf}]/u.test(raw)) {
+    return { ok: false, reason: "not adı kontrol karakteri (yeni satır dahil) içeremez" };
+  }
+  if (raw.includes(DATA_FENCE_OPEN) || raw.includes(DATA_FENCE_CLOSE)) {
+    return { ok: false, reason: `not adı veri çiti dizgesi içeremez: ${raw}` };
+  }
   return { ok: true, name: raw };
 }
 
@@ -243,11 +302,20 @@ export type OutPathCheck = { ok: true; path: string } | { ok: false; reason: str
  */
 export function validateOutPath(raw: string | undefined): OutPathCheck {
   if (!raw) return { ok: false, reason: "çıktı yolu boş" };
+  // HAM DEĞERE ÖNCE BAKILIYOR. Bulgu (doğrulama turu, 14 Ağu): kural
+  // `resolve(raw)` SONRASI basename'e bakıyordu, oysa `resolve` sondaki ayracı
+  // KIRPIYOR — yani "sonda yol ayracı varsa reddet" kuralı hiç çalışmadı ve
+  // var olmayan `.../eksik-dizin/` kabul edilip oraya normal bir DOSYA yazıldı.
+  // Kullanıcının yazdığı şey bir DİZİN adıydı; niyet ham değerde duruyor.
+  const rawTail = raw.split(/[/\\]/).pop() ?? "";
+  if (rawTail === "") return { ok: false, reason: `çıktı yolu yol ayracıyla bitemez: ${raw}` };
+  if (rawTail === "." || rawTail === "..") {
+    return { ok: false, reason: `çıktı yolu bir dosya adıyla bitmeli: ${raw}` };
+  }
   const abs = resolve(raw);
   const name = basename(abs);
-  // `resolve` sonrası bir yol ayracıyla bitiyorsa ya da `.`/`..` ise basename
-  // dosya adı olmaz. Ham kayıt adları basename'den kurulduğu için bu sessiz
-  // bozulma demek; kapıda tutuluyor.
+  // `resolve` sonrası da sınanıyor (kök yolu gibi uç hâller): basename dosya adı
+  // olmazsa ham kayıt adları sessizce bozulur.
   if (name === "" || name === "." || name === "..") {
     return { ok: false, reason: `çıktı yolu bir dosya adıyla bitmeli: ${raw}` };
   }
