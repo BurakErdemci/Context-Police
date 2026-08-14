@@ -5,12 +5,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addUsage, totalTokens, firstBalancedBlock, parseClaimsCount, decideCompleteness,
-  appendTail, STDERR_TAIL, cleanupCommand, validateRoot, validateNoteName, buildPrompt,
+  appendTail, STDERR_TAIL, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
+  buildPrompt,
 } from "../adjudicate-lib.ts";
 import { DATA_FENCE_OPEN, DATA_FENCE_CLOSE } from "../../../core/src/prompt-fence.ts";
 
@@ -243,4 +244,66 @@ test("unvalidated-output-path-component: sıradan ve noktalı adlar geçer", () 
   // Altın sette noktalı adlar var; kapı onları düşürmemeli.
   assert.deepEqual(validateNoteName("plain"), { ok: true, name: "plain" });
   assert.deepEqual(validateNoteName("name.with.dot"), { ok: true, name: "name.with.dot" });
+});
+
+// Aynı sınıfın ÖBÜR YARISI: `note` bir önceki dalgada kapıya alındı, `outPath`
+// açık kalmıştı — oysa ham kayıt adları `basename(outPath)` üzerinden kuruluyor
+// ve sonuç dosyası ondan türetiliyor.
+
+test("unvalidated-output-path-component: boş çıktı yolu reddedilir", () => {
+  assert.equal(validateOutPath(undefined).ok, false);
+  assert.equal(validateOutPath("").ok, false);
+});
+
+test("unvalidated-output-path-component: var olmayan çıktı dizini reddedilir", () => {
+  const r = validateOutPath(join(tmpdir(), "boyle-bir-dizin-yok-4711", "out.jsonl"));
+  assert.equal(r.ok, false);
+  assert.ok(!r.ok && r.reason.includes("çıktı dizini yok"));
+});
+
+test("unvalidated-output-path-component: dosya adıyla bitmeyen yol reddedilir", () => {
+  // `basename` boş/`.`/`..` kalırsa ham kayıt adları anlamsız kurulur.
+  for (const bad of [".", "..", "/"]) {
+    const r = validateOutPath(bad);
+    assert.equal(r.ok, false, `kabul edilmemeliydi: ${bad}`);
+  }
+});
+
+test("unvalidated-output-path-component: hedefin kendisi dizinse reddedilir", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adj-test-"));
+  try {
+    mkdirSync(join(dir, "sonuclar"));
+    const r = validateOutPath(join(dir, "sonuclar"));
+    assert.equal(r.ok, false);
+    assert.ok(!r.ok && r.reason.includes("dizin"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unvalidated-output-path-component: yazılabilir dizindeki yol geçer ve mutlaklaşır", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adj-test-"));
+  try {
+    const r = validateOutPath(join(dir, "alt", "..", "out.jsonl"));
+    assert.equal(r.ok, true);
+    // Kanonik yol dönüyor (validateRoot ile aynı gerekçe: raporlanan yol ile
+    // yazılan yol aynı şey olsun). `alt/..` sadeleşmiş olmalı.
+    assert.ok(r.ok && r.path.endsWith("out.jsonl"));
+    assert.ok(r.ok && !r.path.includes(".."));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unvalidated-output-path-component: yazılamayan dizin reddedilir", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adj-test-"));
+  try {
+    chmodSync(dir, 0o500); // okunur ama yazılamaz
+    const r = validateOutPath(join(dir, "out.jsonl"));
+    assert.equal(r.ok, false);
+    assert.ok(!r.ok && r.reason.includes("yazılabilir değil"));
+  } finally {
+    chmodSync(dir, 0o700); // temizlik yapılabilsin
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

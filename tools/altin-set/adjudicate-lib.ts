@@ -6,8 +6,8 @@
 // zaman test edilemedi; M4.1 denetiminin 6 bulgusunun 6'sı da o dosyadaydı.
 // Buraya YALNIZ o kararlar taşındı; akış (spawn, sinyal, raporlama) CLI'da kaldı.
 
-import { existsSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 // ÜRÜNÜN sınır ilkeli — KOPYALANMIYOR, import ediliyor. Gerekçe: bu denetimin
 // bulduğu kusurun kendisi "araç ile ürünün sınır tanımı ıraksamış" idi; ıraksamış
 // bir kopya aynı kusuru yeniden üretir. Modül saf ve yan etkisiz, `tools/tsconfig.json`
@@ -217,6 +217,66 @@ export function validateNoteName(raw: string | undefined): NameCheck {
   if (/[/\\]/.test(raw)) return { ok: false, reason: `not adı yol ayracı içeremez: ${raw}` };
   if (raw === "." || raw === "..") return { ok: false, reason: `not adı yol bileşeni olamaz: ${raw}` };
   return { ok: true, name: raw };
+}
+
+export type OutPathCheck = { ok: true; path: string } | { ok: false; reason: string };
+
+/**
+ * Çıktı yolunu, ondan TÜRETİLEN yollar kurulmadan ÖNCE doğrular.
+ *
+ * Bulgu (M4.1 üçüncü dalga, unvalidated-output-path-component): önceki dalga
+ * `note` adını kapıya aldı (validateNoteName) ama `outPath` doğrulanmadan
+ * kalmıştı — oysa aynı sınıfın öbür yarısı o. `outPath` üç yol üretiyor:
+ *   - sonuç JSONL'i (`writeFileSync(outPath, "")`),
+ *   - tam hamlar (`<outPath>.<note>.raw.jsonl`),
+ *   - eksik hamlar (`<dirname(outPath)>/incomplete/<basename(outPath)>.<note>...`).
+ * Doğrulanmadığında ölçülen arıza sınıfı `note`'unkiyle aynı: var olmayan bir
+ * dizin verilirse araç ilk yazmada patlar (koşum kaybı), `basename` boş kalan
+ * bir yol (`out/`, `.`, `..`) verilirse ham kayıt adları anlamsız kurulur ve
+ * `incomplete/` sözleşmesi sessizce bozulur.
+ *
+ * Ölçütler ucuz ve hepsi YAZMADAN ÖNCE sınanabilir: dizin var mı, dizin mi,
+ * YAZILABİLİR mi, ve dosya adı tek anlamlı bir bileşen mi. Dizin canonicalize
+ * ediliyor (validateRoot ile aynı gerekçe: raporlanan yol ile yazılan yol aynı
+ * şey olsun). Reddetme sessiz DEĞİL — çağıran gerekçeyi basıp çıkış kodu 2 ile
+ * ölüyor; sessiz reddetme bu sınıfın ilk arızasının ta kendisiydi.
+ */
+export function validateOutPath(raw: string | undefined): OutPathCheck {
+  if (!raw) return { ok: false, reason: "çıktı yolu boş" };
+  const abs = resolve(raw);
+  const name = basename(abs);
+  // `resolve` sonrası bir yol ayracıyla bitiyorsa ya da `.`/`..` ise basename
+  // dosya adı olmaz. Ham kayıt adları basename'den kurulduğu için bu sessiz
+  // bozulma demek; kapıda tutuluyor.
+  if (name === "" || name === "." || name === "..") {
+    return { ok: false, reason: `çıktı yolu bir dosya adıyla bitmeli: ${raw}` };
+  }
+  const dir = dirname(abs);
+  let realDir: string;
+  try {
+    realDir = realpathSync(dir);
+  } catch {
+    return { ok: false, reason: `çıktı dizini yok: ${dir}` };
+  }
+  try {
+    if (!statSync(realDir).isDirectory()) {
+      return { ok: false, reason: `çıktı dizini bir dizin değil: ${dir}` };
+    }
+  } catch {
+    return { ok: false, reason: `çıktı dizini okunamadı: ${dir}` };
+  }
+  try {
+    accessSync(realDir, constants.W_OK);
+  } catch {
+    return { ok: false, reason: `çıktı dizini yazılabilir değil: ${dir}` };
+  }
+  // Hedefin KENDİSİ bir dizinse (`out/sonuclar`) yazma EISDIR ile patlardı.
+  try {
+    if (statSync(join(realDir, name)).isDirectory()) {
+      return { ok: false, reason: `çıktı yolu bir dizin: ${raw}` };
+    }
+  } catch { /* yok — normal hâl, birazdan yaratılacak */ }
+  return { ok: true, path: join(realDir, name) };
 }
 
 /**

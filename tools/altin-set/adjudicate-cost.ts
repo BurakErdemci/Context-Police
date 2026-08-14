@@ -58,7 +58,7 @@ import { evidenceFor } from "./evidence-block.ts";
 // kardeş modülde; bu dosya import edildiği anda argv ayrıştırıp çıkıyor.
 import {
   type Usage, addUsage, totalTokens,
-  decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName,
+  decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
   buildPrompt,
 } from "./adjudicate-lib.ts";
 
@@ -111,10 +111,18 @@ if (badNames.length > 0) {
   for (const [, check] of badNames) console.error(`not adı reddedildi: ${check.reason}`);
   process.exit(2);
 }
+// Çıktı yolu da doğrulanıyor — `note` ile AYNI sınıfın öbür yarısı: ondan üç
+// yol türetiliyor (sonuç JSONL'i, `<outPath>.<not>.raw.jsonl`, ve
+// `incomplete/<basename(outPath)>...`). Bkz. validateOutPath.
+const outCheck = validateOutPath(outPathArg);
+if (!outCheck.ok) {
+  console.error(`çıktı yolu reddedildi: ${outCheck.reason}`);
+  process.exit(2);
+}
 // Kapıdan sonra tipi `string`e sabitle: daralma kapanışların (one()) içine
 // taşınmıyor, `string | undefined` olarak görülüyordu.
 const notesDir: string = notesDirArg;
-const outPath: string = outPathArg;
+const outPath: string = outCheck.path;
 
 // Çıktı şeması: hakem iddia düzeyinde hüküm verir. Altın setin şemasıyla
 // aynı hüküm kümesi — yoksa doğruluk ölçülemez.
@@ -142,6 +150,13 @@ const SCHEMA = {
 };
 
 type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number };
+
+/**
+ * Ayrıştırıcının BEKLEDİĞİ olay adları; dışındaki her ad ŞEMA KAYMASI sayılır.
+ * Ürünle (`core/src/adapters/codex.ts:217`) aynı küme — araç ürünün göreceği
+ * akışı ölçmeli, kendi genişletilmiş kümesini değil.
+ */
+const KNOWN_EVENT_TYPES = new Set(["item.completed", "turn.completed"]);
 
 // SIGKILL'den sonra çekirdeğin süreci toplaması milisaniyeler sürer; 5 sn
 // cömert bir üst sınır. Bu süre dolduysa kill GERÇEKTEN tutmamıştır.
@@ -183,6 +198,18 @@ function killHard(pid: number | undefined): void {
   try { process.kill(pid, "SIGKILL"); } catch { /* zaten ölmüş */ }
 }
 
+/**
+ * Süreç HÂLÂ yaşıyor mu? `kill(pid, 0)` sinyal göndermez, yalnız varlığı sınar.
+ *
+ * Bulgu (M4.1 üçüncü dalga, stale-process-group-registration): bu fonksiyon
+ * dosyada zaten VARDI ama yalnız `leaked_pid` raporunda kullanılıyordu; sinyal
+ * temizliği (cleanupNow) defterdeki her PID'yi KOŞULSUZ öldürüyordu. Oysa
+ * defterden düşüş `finish()` içinde, yani `close`'da — çocuk ondan ÖNCE ölüyor.
+ * Ölçüldü (bu dalga, probe1-stale-group.sh): pencere normalde ~0,67 ms, ama
+ * çocuğun TORUNU stdout borusunu açık tutuyorsa `close` saniyelerce gecikiyor
+ * ve kayıt o boyunca bayat kalıyor. O aralıkta gelen bir SIGINT, işletim
+ * sisteminin GERİ DÖNÜŞTÜRDÜĞÜ bir PID'nin grubuna SIGKILL atabilir.
+ */
 function isAlive(pid: number | undefined): boolean {
   if (pid == null) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -207,9 +234,29 @@ function isAlive(pid: number | undefined): boolean {
 const liveTempDirs = new Set<string>();
 const liveGroups = new Set<number>();
 
-/** Sinyal işleyicisi senkron olmak zorunda: süreç kapanmadan önce bitmeli. */
+/**
+ * Sinyal işleyicisi senkron olmak zorunda: süreç kapanmadan önce bitmeli.
+ *
+ * NEDEN ÜRÜNÜN KALIBI BİREBİR KOPYALANIYOR (`core/src/adapters/codex.ts:137`,
+ * `if (isProcessAlive(pid)) killProcessGroup(pid)`): buradaki karar bir ölçüm
+ * tercihi değil, SİNYAL GÜVENLİĞİ kararı — "hangi süreci öldürmek meşru"
+ * sorusunun cevabı araçta ve üründe farklı olamaz. Yukarıdaki killProcessGroup
+ * notunda gerekçelenen araç/ürün kopya ayrımı davranışın ÖLÇÜM tarafı içindi
+ * (araç ürünün iç API'sine bağlanmasın); alt süreç öldürmenin doğru kalıbı ise
+ * ortak bir emniyet ilkesi ve ıraksaması, ürün tarafında kapatılan bir bulgunun
+ * araçta açık kalması demek. Kopya, import değil: bağımlılık yönü korunuyor.
+ *
+ * İki fark, ikisi de bilinçli:
+ *   - ÖNCE canlılık sınanıyor (yukarıdaki isAlive notu): bayat kayıt geri
+ *     dönüştürülmüş bir PID'yi gösterebilir.
+ *   - `killHard` DEĞİL `killProcessGroup` çağrılıyor: killHard grup denemesi
+ *     BAŞARILI olsa bile ayrıca düz PID'yi de vuruyor, yani sinyal yüzeyi
+ *     ürünün iki katı. killHard'ın geniş yüzeyi `retryKill` için var — orada
+ *     ilk denemenin TUTMADIĞI ölçülmüş bir olgu (adjudicate-kill-failure-leaks),
+ *     burada ise öyle bir kanıt yok.
+ */
 function cleanupNow(): void {
-  for (const pid of liveGroups) killHard(pid);
+  for (const pid of liveGroups) if (isAlive(pid)) killProcessGroup(pid);
   liveGroups.clear();
   for (const dir of liveTempDirs) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* silinemiyorsa geç */ }
@@ -247,6 +294,8 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
   cap: Cap | null;
   items: number;
   turns: number;
+  unparsedLines: number;
+  unknownEvents: number;
   claimsComplete: boolean;
   killFailed: boolean;
   leakedPid: number | null;
@@ -278,6 +327,20 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     let claims = 0;
     let items = 0;
     let turns = 0;
+    // ŞEMA KAYMASI SAYAÇLARI (bulgu: silent-stream-schema-drift).
+    //
+    // Davranış değişmiyor — bu satırlar eskiden de atlanıyordu; değişen tek şey
+    // atlamanın GÖRÜNÜR olması. Neden bu araçta kritik: bu dosyanın bütün
+    // varlık sebebi hakemin TAVAN kararını beslemek, ve tavan kararının girdisi
+    // (`usage`, `items`, `turns`, `claims`) tek tek bu ayrıştırıcıdan geliyor.
+    // Yükseltilen bir codex sürümü olay adlarını ya da satır biçimini
+    // değiştirirse ayrıştırıcı sessizce hiçbir şey görmez: maliyet ölçümü
+    // SIFIRA düşer, `--max-tokens` tavanı hiç ateşlenmez ve 28 notluk koşumun
+    // manşet sayısı — "tam sweep kaç token" — yanlış çıkar. Yanlış çıktığı da
+    // hiçbir yerde belli olmaz, çünkü "akış gelmedi" ile "akış geldi ama
+    // anlaşılmadı" aynı boş sonuca düşüyordu. Sayaçlar tam bu ayrımı yapıyor.
+    let unparsedLines = 0;
+    let unknownEvents = 0;
     // Şemalı iddia kümesi EKSİKSİZ ayrıştırıldı mı. Bu bayrak `olculemez`
     // hükmünün tek ölçütü: tavan türü değil ÇIKTININ TAMLIĞI belirler.
     // Yalnız katı JSON.parse başarısı sayılır — regex'le "verdict" saymak
@@ -338,48 +401,70 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
 
     function handleLine(line: string): void {
       const s = line.trim();
+      // `{` ile başlamayan satır sayaca GİRMİYOR — ürünle bilinçli parite
+      // (codex.ts:245). Gerçek akışta ilerleme/uyarı satırları düz metin
+      // geliyor; onları kayma saymak sayacı normal koşumda da doldurur ve
+      // sinyal olmaktan çıkarırdı.
       if (!s.startsWith("{")) return;
+      // Ayrıştırma HATASI ile olay işleme hatası ayrı tutuluyor: eskiden tek
+      // `try` her ikisini de yutuyordu, o yüzden hangisinin olduğu bilinemezdi.
+      let o: {
+        type?: unknown;
+        usage?: Record<string, unknown>;
+        item?: { type?: unknown; text?: unknown; content?: unknown };
+      };
       try {
-        const o = JSON.parse(s);
-        if (o.type === "turn.completed") {
-          turns++;
-          if (o.usage) usage = addUsage(usage, o.usage);
+        o = JSON.parse(s);
+      } catch {
+        unparsedLines++;
+        return; // bozuk/yarım satır ölçümü düşürmez, yalnız sayılır
+      }
+      const type = typeof o?.type === "string" ? o.type : "";
+      // TANINMAYAN OLAY: ayrıştırıldı ama adı beklenen kümede değil. `usage`
+      // taşımayan `turn.completed` tanınan bir olaydır (ürünle aynı ayrım) —
+      // sayaca yalnız adını hiç bilmediğimiz olay girer.
+      if (!KNOWN_EVENT_TYPES.has(type)) {
+        unknownEvents++;
+        return; // ölçümü değiştirmeyen satır tavanı da değiştiremez
+      }
+      if (type === "turn.completed") {
+        turns++;
+        if (o.usage) usage = addUsage(usage, o.usage);
+      }
+      if (type === "item.completed") {
+        items++;
+        // Son mesaj metin olarak geliyor; şemalı çıktı o metnin İÇİNDE
+        // JSON. Olayın kendisini JSON.stringify edip "verdict" saymak
+        // kaçırıyordu (kaçış karakterleri) — metni ayrıca ayrıştır.
+        const rawTxt = o.item?.text ?? o.item?.content;
+        const txt = typeof rawTxt === "string" ? rawTxt : "";
+        // AKIL YÜRÜTME METNİ VERİ DEĞİLDİR. Prompt çıktı şemasını tarif
+        // ettiği için modelin reasoning'inde biçimi örnekleyen çitli bir
+        // blok görülebiliyor; o blok tamlık kanıtı sayılırsa SONRADAN
+        // tavanla kesilen bir koşum "tam" damgası alıp kısmi iddialarını
+        // skor hattına sızdırıyor (ölçüldü, fix turu 2 review'ı) — yani
+        // sözleşmenin engellemek için var olduğu sessiz deflasyon geri
+        // geliyor. Bu yüzden reasoning item'ları kurtarmaya HİÇ girmiyor.
+        //
+        // ADAY SÜZGECİ METİN SEZGİSİ DEĞİL: eskiden `txt.includes("verdict")`
+        // aranıyordu; şemaya uygun `{"claims":[]}` o anahtarı taşımadığı için
+        // aday bile olamıyor ve `parse_failed` damgası yiyordu (M4.1,
+        // adjudicate-empty-claims-rejected). Aday = reasoning OLMAYAN, metni
+        // boş olmayan item; tamlık hükmünü yalnız yapısal ayrıştırma veriyor
+        // (adjudicate-lib.ts:decideCompleteness).
+        const isMessage = txt.length > 0 && o.item?.type !== "reasoning";
+        // Akışın SON item'ı böyle bir mesaj mı: tamlık kanıtının ön koşulu
+        // (decideCompleteness'taki guard). Her item.completed'da yeniden
+        // yazılıyor, yani "en son ne geldi" bilgisi taze kalıyor.
+        lastItemIsMessage = isMessage;
+        if (isMessage) {
+          verdictTexts.push(txt);
+          // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
+          // "kaç iddia görünüyor" bilgisi için. Hüküm `finish`te veriliyor.
+          const m = txt.match(/"verdict"/g);
+          if (m) claims = Math.max(claims, m.length);
         }
-        if (o.type === "item.completed") {
-          items++;
-          // Son mesaj metin olarak geliyor; şemalı çıktı o metnin İÇİNDE
-          // JSON. Olayın kendisini JSON.stringify edip "verdict" saymak
-          // kaçırıyordu (kaçış karakterleri) — metni ayrıca ayrıştır.
-          const txt = o.item?.text ?? o.item?.content ?? "";
-          // AKIL YÜRÜTME METNİ VERİ DEĞİLDİR. Prompt çıktı şemasını tarif
-          // ettiği için modelin reasoning'inde biçimi örnekleyen çitli bir
-          // blok görülebiliyor; o blok tamlık kanıtı sayılırsa SONRADAN
-          // tavanla kesilen bir koşum "tam" damgası alıp kısmi iddialarını
-          // skor hattına sızdırıyor (ölçüldü, fix turu 2 review'ı) — yani
-          // sözleşmenin engellemek için var olduğu sessiz deflasyon geri
-          // geliyor. Bu yüzden reasoning item'ları kurtarmaya HİÇ girmiyor.
-          //
-          // ADAY SÜZGECİ METİN SEZGİSİ DEĞİL: eskiden `txt.includes("verdict")`
-          // aranıyordu; şemaya uygun `{"claims":[]}` o anahtarı taşımadığı için
-          // aday bile olamıyor ve `parse_failed` damgası yiyordu (M4.1,
-          // adjudicate-empty-claims-rejected). Aday = reasoning OLMAYAN, metni
-          // boş olmayan item; tamlık hükmünü yalnız yapısal ayrıştırma veriyor
-          // (adjudicate-lib.ts:decideCompleteness).
-          const isMessage =
-            typeof txt === "string" && txt.length > 0 && o.item?.type !== "reasoning";
-          // Akışın SON item'ı böyle bir mesaj mı: tamlık kanıtının ön koşulu
-          // (decideCompleteness'taki guard). Her item.completed'da yeniden
-          // yazılıyor, yani "en son ne geldi" bilgisi taze kalıyor.
-          lastItemIsMessage = isMessage;
-          if (isMessage) {
-            verdictTexts.push(txt);
-            // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
-            // "kaç iddia görünüyor" bilgisi için. Hüküm `finish`te veriliyor.
-            const m = txt.match(/"verdict"/g);
-            if (m) claims = Math.max(claims, m.length);
-          }
-        }
-      } catch { /* akışta JSON olmayan satırlar olabilir */ }
+      }
       checkCaps();
     }
 
@@ -444,6 +529,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       if (child.pid != null) liveGroups.delete(child.pid);
       resolve({
         rc, usage, ms: Date.now() - t0, claims, raw: out, cap, items, turns,
+        unparsedLines, unknownEvents,
         claimsComplete,
         killFailed: opts?.killFailed === true,
         leakedPid,
@@ -521,6 +607,14 @@ async function one(note: string): Promise<void> {
     // usage null kalıyor.
     items: r.items,
     turns: r.turns,
+    // ŞEMA KAYMASI SAYAÇLARI (bulgu: silent-stream-schema-drift).
+    // Burada 0 UYDURMA DEĞİL, ölçümün kendisi: ayrıştırıcı bu koşumda gerçekten
+    // koştu ve sıfır bozuk satır/tanınmayan olay gördü. Ayrıştırıcının HİÇ
+    // koşmadığı tek yol işçi istisnası satırı — orada bu alanlar `null`
+    // (aşağıdaki catch). Ürün (`ExecutorUsage`) aynı ayrımı alanın YOKLUĞUYLA
+    // yapıyor; burada satır şeması sabit olduğu için `null` ile yapılıyor.
+    unparsed_lines: r.unparsedLines,
+    unknown_events: r.unknownEvents,
     kill_failed: r.killFailed,
     leaked_pid: r.leakedPid,
     // Sızan süreç için operatörün kopyalayacağı komut; kalıcı satıra da girer
@@ -544,6 +638,11 @@ async function one(note: string): Promise<void> {
     String(r.claims).padStart(7) + (r.rc === 0 ? "" : `  rc=${r.rc}`) +
     (r.cap ? `  CAP ${r.cap.kind} ${r.cap.observed}/${r.cap.limit}` : "") +
     (r.claimsComplete ? "" : `  ${parseFailed ? "PARSE ARIZASI" : "EKSİK ÇIKTI"} → olculemez`) +
+    // Kayma sessiz kalmasın: kalıcı satırda zaten var, ama operatör koşumu
+    // izlerken de görmeli — kalibrasyon kararı bu sayılara bakılarak veriliyor.
+    (r.unparsedLines > 0 || r.unknownEvents > 0
+      ? `  ŞEMA KAYMASI (bozuk satır ${r.unparsedLines}, tanınmayan olay ${r.unknownEvents})`
+      : "") +
     (r.killFailed ? `  KILL BAŞARISIZ (sızan pid ${r.leakedPid})` : "") +
     (r.rc !== 0 && r.stderrTail ? `  stderr: ${r.stderrTail.trim()}` : ""),
   );
@@ -572,7 +671,11 @@ try {
             note: n, lines: null, rc: null, ms: null, evidence_fed: WITH_EVIDENCE,
             worker_error: msg,
             cap: null, olculemez: true, claims_complete: false, parse_failed: false,
-            items: 0, turns: 0, kill_failed: false, leaked_pid: null,
+            items: 0, turns: 0,
+            // Ayrıştırıcı HİÇ koşmadı → ölçüm yok. 0 yazmak "sıfır kayma
+            // ölçtüm" derdi; doğrusu "ölçemedim".
+            unparsed_lines: null, unknown_events: null,
+            kill_failed: false, leaked_pid: null,
             cleanup_command: null, stderr_tail: null,
             input_tokens: null, cached_input_tokens: null, cache_write_input_tokens: null,
             output_tokens: null, reasoning_output_tokens: null, claims: 0,
