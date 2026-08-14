@@ -186,14 +186,40 @@ const KILL_GRACE_MS = 5_000;
  * yoluydu. Kurtarma: çiti soy → doğrudan parse → metindeki en dış {…} bloğunu
  * parse et. Hepsi tutmazsa gerçekten okunamıyor demektir.
  */
+/**
+ * İlk `{`'dan başlayıp DENGELİ parantez sayarak ilk kapanan bloğu döndürür.
+ *
+ * Neden `lastIndexOf("}")` değil: geçerli JSON'un ARKASINDA süslü parantez
+ * içeren düz metin varsa ("… {bkz. şema} …") son `}` yanlış yeri kapatıyor ve
+ * kurtarma tutmuyordu. Dize içindeki parantezler sayılmaz — kaçış karakteri
+ * takip ediliyor.
+ */
+function firstBalancedBlock(s: string): string | null {
+  const start = s.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return s.slice(start, i + 1);
+  }
+  return null;
+}
+
 function extractClaims(text: string): number | null {
   const stripped = text.replace(/```(?:json)?/gi, "").trim();
   const tries = [stripped];
-  // En dış {…}: cevabın önünde/arkasında düz metin varsa onu atar. İç içe
-  // süslü parantezler ilk/son eşleşmenin arasında kaldığı için bu yeterli.
-  const a = stripped.indexOf("{");
-  const b = stripped.lastIndexOf("}");
-  if (a !== -1 && b > a) tries.push(stripped.slice(a, b + 1));
+  const block = firstBalancedBlock(stripped);
+  if (block !== null && block !== stripped) tries.push(block);
   for (const t of tries) {
     try {
       const parsed = JSON.parse(t);
@@ -265,10 +291,11 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     // hükmünün tek ölçütü: tavan türü değil ÇIKTININ TAMLIĞI belirler.
     // Yalnız katı JSON.parse başarısı sayılır — regex'le "verdict" saymak
     // yarım kesilmiş bir metinde de sayı üretir, yani tamlık kanıtı değildir.
+    // Hüküm akış sırasında DEĞİL `finish` içinde veriliyor (oradaki nota bak).
     let claimsComplete = false;
-    // İddia taşıyan item metinleri sırayla saklanıyor: küme birden çok
-    // item.completed'a bölünmüşse tek tek parse edilemez, birleştirilmiş
-    // hâli üzerinden kurtarma denenir (finish içinde).
+    // İddia taşıyan MESAJ item'larının metinleri sırayla. Reasoning item'ları
+    // buraya girmez. Tamlık hükmü bu listenin sonuncusundan, tutmazsa sıralı
+    // birleşiminden çıkarılır (finish içinde).
     const verdictTexts: string[] = [];
     let cap: Cap | null = null;
     // Süreç kapandıktan SONRA kill YASAK: PID'yi işletim sistemi geri
@@ -320,18 +347,19 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
           // JSON. Olayın kendisini JSON.stringify edip "verdict" saymak
           // kaçırıyordu (kaçış karakterleri) — metni ayrıca ayrıştır.
           const txt = o.item?.text ?? o.item?.content ?? "";
-          if (typeof txt === "string" && txt.includes("verdict")) {
+          // AKIL YÜRÜTME METNİ VERİ DEĞİLDİR. Prompt çıktı şemasını tarif
+          // ettiği için modelin reasoning'inde biçimi örnekleyen çitli bir
+          // blok görülebiliyor; o blok tamlık kanıtı sayılırsa SONRADAN
+          // tavanla kesilen bir koşum "tam" damgası alıp kısmi iddialarını
+          // skor hattına sızdırıyor (ölçüldü, fix turu 2 review'ı) — yani
+          // sözleşmenin engellemek için var olduğu sessiz deflasyon geri
+          // geliyor. Bu yüzden reasoning item'ları kurtarmaya HİÇ girmiyor.
+          if (typeof txt === "string" && txt.includes("verdict") && o.item?.type !== "reasoning") {
             verdictTexts.push(txt);
-            const n = extractClaims(txt);
-            if (n !== null) {
-              claims = Math.max(claims, n);
-              claimsComplete = true;
-            } else {
-              // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
-              // "kaç iddia görünüyor" bilgisi için.
-              const m = txt.match(/"verdict"/g);
-              if (m) claims = Math.max(claims, m.length);
-            }
+            // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
+            // "kaç iddia görünüyor" bilgisi için. Hüküm `finish`te veriliyor.
+            const m = txt.match(/"verdict"/g);
+            if (m) claims = Math.max(claims, m.length);
           }
         }
       } catch { /* akışta JSON olmayan satırlar olabilir */ }
@@ -363,13 +391,20 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
       if (pending) handleLine(pending);
-      // Son çare: küme item'lara bölünmüşse parçalar tek başına parse
-      // edilemez. Sıralı birleşim üzerinden aynı kurtarma denenir.
-      if (!claimsComplete && verdictTexts.length > 1) {
-        const n = extractClaims(verdictTexts.join("\n"));
+      // TAMLIK HÜKMÜ BURADA VERİLİR, akış sırasında değil: "akıştaki herhangi
+      // bir item parse edilebildi" ölçütü, kesilmeden ÖNCE gelen bir ara
+      // mesajı tam çıktı sayabiliyordu. Ölçüt SON iddia taşıyan mesaj;
+      // o tutmazsa (küme birden çok item'a bölünmüş olabilir) parçaların
+      // sıralı birleşimi denenir.
+      const last = verdictTexts[verdictTexts.length - 1];
+      const candidates = last === undefined ? [] : [last];
+      if (verdictTexts.length > 1) candidates.push(verdictTexts.join("\n"));
+      for (const c of candidates) {
+        const n = extractClaims(c);
         if (n !== null) {
           claims = Math.max(claims, n);
           claimsComplete = true;
+          break;
         }
       }
       if (opts?.killFailed) {
