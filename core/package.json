@@ -12,6 +12,7 @@
   },
   "scripts": {
     "test": "node --test --disable-warning=ExperimentalWarning test/*.test.ts",
+    "test:tools": "node --test --disable-warning=ExperimentalWarning ../tools/altin-set/test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "scan": "node --disable-warning=ExperimentalWarning src/cli.ts scan"
   },

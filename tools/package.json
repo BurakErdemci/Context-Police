@@ -1,0 +1,10 @@
+{
+  "name": "context-police-tools",
+  "private": true,
+  "type": "module",
+  "description": "ölçüm araçları — ürün değil; core'un bağımlılığı DEĞİL, tersi de değil",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --disable-warning=ExperimentalWarning altin-set/test/*.test.ts"
+  }
+}
