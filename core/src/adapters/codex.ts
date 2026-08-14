@@ -295,7 +295,13 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       // siliniyordu — "akış gelmedi" ile "akış anlaşılmadı" ayrımı bu yolda hâlâ
       // kapalıydı). Satır başına TEK sayım: sınır tekrar tekrar aşılsa da atılan
       // şey hâlâ aynı satır.
-      if (!dropping && rest.length > MAX_STREAM_LINE) {
+      // The ceiling bounds MEMORY, so it must be measured in bytes: `.length`
+      // counts UTF-16 code units, and a 1.2 MB UTF-8 line of accented text sat
+      // under 1,000,000 units and sailed through (verification round 2, 15 Aug).
+      // The `* 3` pre-check keeps the common path free: UTF-8 never spends more
+      // than 3 bytes per code unit, so under that bound the ceiling is
+      // unreachable and byteLength does not need to walk the buffer.
+      if (!dropping && rest.length * 3 > MAX_STREAM_LINE && Buffer.byteLength(rest, "utf8") > MAX_STREAM_LINE) {
         rest = "";
         dropping = true;
         oversizeDrops++;
