@@ -207,6 +207,15 @@ export function validateRoot(raw: string | undefined): RootCheck {
  * İkinci biçim kırılırsa bu projenin kendi ölçüm koşumları durur: onlar
  * worktree'de koşuyor (bkz. audit-lanes).
  */
+/** True only when the path exists AND is a directory; a broken symlink is false. */
+function isDirSafe(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function checkGitMarker(real: string, raw: string): RootCheck {
   const marker = join(real, ".git");
   let st;
@@ -216,9 +225,17 @@ function checkGitMarker(real: string, raw: string): RootCheck {
     return { ok: false, reason: `kök bir git deposu değil (.git yok): ${raw}` };
   }
   if (st.isDirectory()) {
+    // `objects` and `refs` must be DIRECTORIES, not merely present: existence
+    // alone accepted a directory holding regular files with those names
+    // (verification round 2). The gate exists to catch a mistyped root before
+    // measurements run there, so it has to measure shape, not spelling.
     const missing = ["HEAD", "objects", "refs"].filter((n) => !existsSync(join(marker, n)));
     if (missing.length > 0) {
       return { ok: false, reason: `kök bir git deposu değil (.git içinde eksik: ${missing.join(", ")}): ${raw}` };
+    }
+    const notDir = ["objects", "refs"].filter((n) => !isDirSafe(join(marker, n)));
+    if (notDir.length > 0) {
+      return { ok: false, reason: `kök bir git deposu değil (.git içinde dizin olmayan: ${notDir.join(", ")}): ${raw}` };
     }
     return { ok: true, root: real };
   }
@@ -235,6 +252,14 @@ function checkGitMarker(real: string, raw: string): RootCheck {
     const target = isAbsolute(m[1]!) ? m[1]! : resolve(real, m[1]!);
     if (!existsSync(join(target, "HEAD"))) {
       return { ok: false, reason: `.git dosyasının gösterdiği git dizini yok: ${target}` };
+    }
+    // A lone HEAD is not enough — any directory can hold one. The two real
+    // shapes are distinguished by what sits beside it: a linked worktree's
+    // admin dir carries `commondir` (its objects live in the main repo), a
+    // submodule's carries `objects/`. Requiring objects/ alone would reject
+    // every worktree, which is where this project's own measurement runs.
+    if (!existsSync(join(target, "commondir")) && !isDirSafe(join(target, "objects"))) {
+      return { ok: false, reason: `.git dosyasının gösterdiği dizin git yönetim dizini değil: ${target}` };
     }
     return { ok: true, root: real };
   }
