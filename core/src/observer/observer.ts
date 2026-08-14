@@ -181,8 +181,8 @@ export class Observer {
   private async processBatch(
     projectId: number, sessionId: string, batch: Batch, deliveryKey: string, processedTurns: number,
   ): Promise<"done" | "budget"> {
-    const projectPath =
-      this.store.get<{ path: string }>("SELECT path FROM projects WHERE id = ?", projectId)?.path ?? "(bilinmiyor)";
+    const knownPath = this.store.get<{ path: string }>("SELECT path FROM projects WHERE id = ?", projectId)?.path;
+    const projectPath = knownPath ?? "(bilinmiyor)";
 
     // Durum her partide TAZE okunur: önceki partinin bulguları sonrakinin
     // başlık listesinde görünmeli, yoksa aynı taramada mükerrer üretilir.
@@ -190,7 +190,14 @@ export class Observer {
     const { titles, omitted } = buildStateTitles(active);
     const prompt = buildObserverPrompt({ projectPath, titles, omitted, turns: batch.turns });
 
-    const outcome = await this.callWithRecovery(prompt);
+    // Çalışma kökü AÇIKÇA veriliyor: verilmezse alt süreç, CLI'nin başlatıldığı
+    // yerin cwd'sini miras alıyor — yani ölçülen proje ile ajanın içinde durduğu
+    // dizin ayrışabiliyor. Kaynak `projects.path`, yani bu koşumun ölçtüğü
+    // projenin kaydı. SINIR: bu bir OKUMA HAPSİ DEĞİL — codex 0.146.0'ın
+    // `exec --help` çıktısında depo dışını okumayı engelleyen bir bayrak yok
+    // (lane ölçtü, 14 Ağu); `-C` yalnız çalışma kökünü seçer. Yol bilinmiyorsa
+    // uydurulmaz: undefined geçilir ve eski (miras) davranış sürer.
+    const outcome = await this.callWithRecovery(prompt, knownPath);
     // Bütçe bitişi: parti İŞLENMEDİ sayılmaz (batches de artmaz), filigran da
     // ilerlemez — yapılmamış iş "işlenemedi" diye işaretlenirse D-M2-3 gereği
     // turn'ler kalıcı olarak atlanırdı. `batches` sayacı bu yüzden burada artar:
@@ -321,6 +328,7 @@ export class Observer {
    */
   private async callWithRecovery(
     prompt: string,
+    cwd: string | undefined,
   ): Promise<
     | { ok: true; items: ObserverItem[]; droppedAnchors: number }
     | { ok: false; error: string; budget?: true }
@@ -328,10 +336,10 @@ export class Observer {
     const stop = { ok: false, error: "maliyet bütçesi (maxCalls) doldu", budget: true } as const;
 
     if (!this.hasBudget()) return stop;
-    let res = await this.runOnce(prompt);
+    let res = await this.runOnce(prompt, cwd);
     if (!res.ok) {
       if (!this.hasBudget()) return stop;
-      res = await this.runOnce(prompt); // geçici hata tekrarı (ağ, kota)
+      res = await this.runOnce(prompt, cwd); // geçici hata tekrarı (ağ, kota)
     }
     if (!res.ok) return { ok: false, error: `yürütücü: ${res.error}` };
 
@@ -342,15 +350,15 @@ export class Observer {
       `${prompt}\n\nÖNCEKİ ÇIKTIN GEÇERSİZDİ: ${parsed.error}.\n` +
       `Yalnız istenen şemaya uyan JSON döndür, başka hiçbir şey yazma.`;
     if (!this.hasBudget()) return stop;
-    const retry = await this.runOnce(corrective);
+    const retry = await this.runOnce(corrective, cwd);
     if (!retry.ok) return { ok: false, error: `yürütücü (düzeltme turu): ${retry.error}` };
     parsed = parseObserverOutput(retry.output);
     if (parsed.ok) return parsed;
     return { ok: false, error: `geçersiz JSON (iki deneme): ${parsed.error}` };
   }
 
-  private async runOnce(prompt: string) {
+  private async runOnce(prompt: string, cwd: string | undefined) {
     this.stats.calls++;
-    return this.executor.run({ prompt, outputSchema: OBSERVER_OUTPUT_SCHEMA });
+    return this.executor.run({ prompt, outputSchema: OBSERVER_OUTPUT_SCHEMA, cwd });
   }
 }

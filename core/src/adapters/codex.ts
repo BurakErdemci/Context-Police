@@ -47,6 +47,19 @@ const DEFAULT_DETECT_TIMEOUT_MS = 10_000;
 const STDERR_TAIL = 500;
 
 /**
+ * Hatayı teşhis edilebilir bir dizeye çevirir. `code` (errno) mesajın ÖNÜNE
+ * konur: "EACCES" ile "ENOENT" farklı işler gerektiriyor ve yalnız `message`
+ * taşınırsa bu ayrım çağırana ulaşmıyor.
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code ? `${code}: ${err.message}` : err.message;
+  }
+  return String(err);
+}
+
+/**
  * Süreç GRUBUNU öldürür, olmazsa tekil PID'ye düşer.
  *
  * Bulgu (orphaned-descendant-on-timeout): timeout yalnız doğrudan çocuğa SIGKILL
@@ -93,9 +106,35 @@ function killProcessGroup(pid: number | undefined): void {
 const liveTempDirs = new Set<string>();
 const liveGroups = new Set<number>();
 
+/**
+ * Kaydı düşmüş ama HÂLÂ yaşayan bir süreç mi? `kill(pid, 0)` sinyal göndermez,
+ * yalnız varlığı sınar (ESRCH → yok).
+ *
+ * Neden gerekli: kayıt `liveGroups`'tan ancak `close`/`error` işleyicisinde
+ * düşüyor, oysa çocuk ondan ÖNCE ölüyor. Lane ölçtü (14 Ağu,
+ * probes/signal-cleanup-stale-group.sh): `exit`→`close` arası ~1,1–1,4 ms ve o
+ * anda `kill(pid, 0)` zaten ESRCH veriyor — yani çocuk çıkmışken gelen bir
+ * SIGINT, işletim sisteminin GERİ DÖNÜŞTÜRDÜĞÜ bir PID'nin grubuna SIGKILL
+ * atabilirdi. Akış yolunda aynı koruma `closed` bayrağıyla zaten vardı; bu,
+ * onun sinyal yolundaki karşılığı.
+ *
+ * Kaydı `exit`te düşürmek yerine burada sınamanın sebebi: `exit` ile `close`
+ * arasında çocuğun TORUNLARI hâlâ yaşıyor olabilir ve grup öldürme onlar için
+ * var (killProcessGroup). Kaydı erken düşürmek o yeteneği kaybettirirdi;
+ * canlılık sınaması yalnız çocuğun ispatlı biçimde gittiği durumda susturuyor.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Sinyal işleyicisi senkron olmak zorunda: süreç kapanmadan önce bitmeli. */
 function cleanupNow(): void {
-  for (const pid of liveGroups) killProcessGroup(pid);
+  for (const pid of liveGroups) if (isProcessAlive(pid)) killProcessGroup(pid);
   liveGroups.clear();
   for (const dir of liveTempDirs) {
     try {
@@ -174,6 +213,9 @@ const USAGE_FIELDS = [
  */
 const MAX_STREAM_LINE = 1_000_000;
 
+/** Ayrıştırıcının BEKLEDİĞİ olay adları; dışındaki her ad şema kayması sayılır. */
+const KNOWN_EVENT_TYPES = new Set(["item.completed", "turn.completed"]);
+
 /**
  * `--json` akışından maliyet toplar. Ham akış RAM'de BİRİKTİRİLMEZ: gerçek bir
  * hakem koşumu ~1,9M token girdi raporluyor, akışın kendisi de o ölçekte —
@@ -187,6 +229,11 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
   let rest = "";
   let items = 0;
   let turns = 0;
+  // Şema kayması sayaçları (bkz. ExecutorUsage.unparsedLines/unknownEvents).
+  // Davranış DEĞİŞMİYOR — bu satırlar eskiden de atlanıyordu; değişen tek şey
+  // atlamanın sonuçta görünür olması.
+  let unparsedLines = 0;
+  let unknownEvents = 0;
   // Tavan denetimi için AYRICA tutuluyor: totals'ı her olayda toplamak akış
   // uzadıkça boşuna iş; burada artımlı büyüyor.
   let totalTokens = 0;
@@ -199,10 +246,12 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
     try {
       event = JSON.parse(s);
     } catch {
+      unparsedLines++;
       return; // yarım/bozuk satır ölçümü düşürmez, yalnız atlanır
     }
-    if (event?.type === "item.completed") items++;
-    else if (event?.type === "turn.completed" && event.usage) {
+    const type = typeof event?.type === "string" ? event.type : "";
+    if (type === "item.completed") items++;
+    else if (type === "turn.completed" && event.usage) {
       turns++;
       for (const [snake, camel] of USAGE_FIELDS) {
         const v = event.usage[snake];
@@ -211,7 +260,13 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
           totalTokens += v;
         }
       }
-    } else return; // ölçümü değiştirmeyen satır tavanı da değiştiremez
+    } else {
+      // usage'sız `turn.completed` TANINAN bir olaydır (ölçüm taşımıyor sadece);
+      // sayaca yalnız adı hiç bilmediğimiz olay girer, yoksa sayaç normal
+      // akışta da dolar ve sinyal olmaktan çıkardı.
+      if (!KNOWN_EVENT_TYPES.has(type)) unknownEvents++;
+      return; // ölçümü değiştirmeyen satır tavanı da değiştiremez
+    }
     // Tavan, akış SÜRERKEN denetlenir: sonuca bakmak "harcandıktan sonra"
     // öğrenmek olurdu, kesmenin bütün amacı ise harcamayı durdurmak.
     onProgress?.({ totalTokens, items });
@@ -236,14 +291,23 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       // Hiçbir olay görülmediyse ölçüm YOK: undefined döner, 0 uydurulmaz.
       // Yalnız item görüldüyse ölçüm VAR (item sayısı) ama token bilinmiyor —
       // o durumda token alanları yokluğuyla, items değeriyle raporlanır.
-      if (turns === 0 && items === 0) return undefined;
+      // Anlaşılmayan satır/olay da bir ölçümdür: hiçbir olay tanınmasa bile
+      // usage BASILIR (yalnız kayma sayaçlarıyla), yoksa "akış gelmedi" ile
+      // "akış geldi ama anlaşılmadı" aynı `undefined`'a düşerdi.
+      if (turns === 0 && items === 0 && unparsedLines === 0 && unknownEvents === 0) return undefined;
       const usage: ExecutorUsage = {};
       for (const [, camel] of USAGE_FIELDS) {
         const v = totals.get(camel);
         if (v !== undefined) usage[camel] = v;
       }
-      usage.items = items;
-      if (turns > 0) usage.turns = turns;
+      // items/turns yalnız TANINAN olay görüldüyse yazılır: hiç tanınmamışken
+      // `items: 0` yazmak "0 item ölçtüm" derdi, oysa doğrusu "ölçemedim".
+      if (turns > 0 || items > 0) {
+        usage.items = items;
+        if (turns > 0) usage.turns = turns;
+      }
+      if (unparsedLines > 0) usage.unparsedLines = unparsedLines;
+      if (unknownEvents > 0) usage.unknownEvents = unknownEvents;
       return usage;
     },
   };
@@ -305,11 +369,11 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
 
     async run(req: ExecutorRequest): Promise<ExecutorResult> {
       const started = Date.now();
-      // Geçici dosyalar çağrı başına izole dizinde; finally'de silinir —
+      // Geçici dosyalar çağrı başına izole dizinde; koşum bitince silinir —
       // temizlik isteğe bağlı değil (çalışma sözleşmesi §3).
       const tmp = await mkdtemp(join(tmpdir(), "cp-codex-"));
       trackTempDir(tmp); // sinyalle kapanışta da silinsin (bkz. sinyal temizliği)
-      try {
+      const execute = async (): Promise<ExecutorResult> => {
         const outPath = join(tmp, "son-mesaj.txt");
         let schemaPath: string | null = null;
         if (req.outputSchema) {
@@ -445,14 +509,57 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
         if (!done.stdinFlushed)
           return { ok: false, output: "", error: "prompt stdin'e tam yazılmadan süreç kapandı", durationMs, usage };
 
-        const output = await readFile(outPath, "utf8").catch(() => "");
+        // Okuma hatası ile BOŞ DOSYA ayrı raporlanır. Eskiden `.catch(() => "")`
+        // ikisini aynı değere indiriyordu ve çağıran, izinsiz/eksik bir dosya
+        // için "codex son mesajı boş bıraktı" teşhisini alıyordu — yanlış yerde
+        // arattıran bir hata mesajı. errno hata metnine taşınıyor.
+        let output: string;
+        try {
+          output = await readFile(outPath, "utf8");
+        } catch (err) {
+          return {
+            ok: false,
+            output: "",
+            error: `codex son mesaj dosyası okunamadı (${describeError(err)})`,
+            durationMs,
+            usage,
+          };
+        }
         if (!output.trim())
           return { ok: false, output: "", error: "codex son mesaj dosyasını boş bıraktı", durationMs, usage };
         return { ok: true, output, durationMs, usage };
-      } finally {
-        untrack("dir", tmp);
-        await rm(tmp, { recursive: true, force: true });
+      };
+
+      // TEMİZLİK HATASI SONUCU EZMEZ (lock.ts:458 ile aynı sözleşme). Eskiden
+      // silme `finally` içindeydi: `rm` fırlarsa BAŞARILI bir ExecutorResult
+      // yerinden ediliyor ve run() reject oluyordu — koşum yapılmış, para
+      // harcanmış, sonuç kaybolmuştu. Yeni hâlde sonuç döner, hata da yutulmaz:
+      // başarı yolunda `cleanupError` alanında, hata yolunda özgün hatanın
+      // `cleanupError` özelliğinde taşınır.
+      let result: ExecutorResult | undefined;
+      let failure: unknown;
+      let failed = false;
+      try {
+        result = await execute();
+      } catch (err) {
+        failure = err;
+        failed = true;
       }
+      untrack("dir", tmp);
+      let cleanupError: string | undefined;
+      try {
+        await rm(tmp, { recursive: true, force: true });
+      } catch (err) {
+        cleanupError = describeError(err);
+      }
+      if (failed) {
+        // İlkel bir değer fırlatılmışsa alan yazılamaz; kayıp bilinçli (lock.ts).
+        if (cleanupError !== undefined && failure !== null && typeof failure === "object")
+          (failure as { cleanupError?: string }).cleanupError = cleanupError;
+        throw failure;
+      }
+      if (cleanupError !== undefined) result!.cleanupError = cleanupError;
+      return result!;
     },
   };
 }

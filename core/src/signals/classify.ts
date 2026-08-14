@@ -494,7 +494,14 @@ export async function classifyCandidates(
   executor: ExecutorAdapter,
   candidates: Candidate[],
   notes: Map<number, NoteView>,
-  opts: { maxItems?: number; stamps?: CandidateStamps } = {},
+  /**
+   * `cwd`: alt sürecin çalışma kökü. Verilmezse ajan, CLI'nin başlatıldığı
+   * yerin cwd'sini miras alır — denetlenen proje ile ajanın durduğu dizin
+   * ayrışır. SINIR: bu bir okuma hapsi DEĞİL; codex 0.146.0'ın `exec --help`
+   * çıktısında depo dışını okumayı kesen bayrak yok (lane ölçtü, 14 Ağu),
+   * `-C` yalnız kökü seçer.
+   */
+  opts: { maxItems?: number; stamps?: CandidateStamps; cwd?: string } = {},
 ): Promise<ClassifyResult> {
   const max = opts.maxItems ?? MAX_CLASSIFY_ITEMS;
   const { taken, next: nextStamps, stamp: rotationStamp } = selectCandidates(candidates, max, opts.stamps);
@@ -519,7 +526,7 @@ export async function classifyCandidates(
 
   const runOnce = async (p: string) => {
     calls++;
-    return executor.run({ prompt: p, outputSchema: CLASSIFY_OUTPUT_SCHEMA });
+    return executor.run({ prompt: p, outputSchema: CLASSIFY_OUTPUT_SCHEMA, cwd: opts.cwd });
   };
 
   // Ölçüm HİÇ yapılamadı: adayların TAMAMI (bütçeye girmeyenler dahil) ölçülmemiş.

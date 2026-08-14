@@ -341,6 +341,10 @@ export async function auditProject(
       const res = await classifyCandidates(opts.executor, candidates, notesById, {
         maxItems: opts.maxClassifyItems ?? MAX_CLASSIFY_ITEMS,
         stamps: readClassifyStamps(store, project.id),
+        // Çalışma kökü DENETLENEN projedir (`projects.path`) — CLI'nin nereden
+        // çağrıldığı değil. Bkz. classifyCandidates'taki sınır notu: kök seçmek
+        // okumayı hapsetmez.
+        cwd: project.path,
       });
       rotation = { stamps: res.nextStamps, stamp: res.rotationStamp };
       sum.classifyCalls = res.calls;

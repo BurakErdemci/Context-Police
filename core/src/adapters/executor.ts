@@ -73,6 +73,21 @@ export interface ExecutorUsage {
   items?: number;
   /** Akışta görülen `turn.completed` sayısı. Yalnız RAPOR: bkz. items. */
   turns?: number;
+  /**
+   * `{` ile başlayıp JSON olarak ayrıştırılamayan satır sayısı. Yalnız ÖLÇÜM
+   * GÖRÜNÜRLÜĞÜ için: ayrıştırıcı bu satırları eskiden de atlıyordu, ama sessizce.
+   * "usage hiç gelmedi" (alan yok) ile "usage geldi, anlaşılmadı" (bu alan dolu)
+   * ayrımı olmadan, yükseltilen bir codex sürümü akış şemasını değiştirdiğinde
+   * maliyet ölçümü sıfıra düşer ve bu hiçbir yerde görünmez.
+   */
+  unparsedLines?: number;
+  /**
+   * Ayrıştırılan ama tanınmayan `type` değerine sahip olay sayısı (usage'sız
+   * `turn.completed` DEĞİL — o bilinen bir olay). Ölçüldü 14 Ağu: kurulu codex
+   * 0.146.0 tam da beklenen adları basıyor, yani bugün canlı zarar yok; alan
+   * gelecekteki bir ad değişikliğini sessiz kalmaktan çıkarmak için var.
+   */
+  unknownEvents?: number;
 }
 
 export interface ExecutorResult {
@@ -90,6 +105,13 @@ export interface ExecutorResult {
    * anchor-drift'in budgetExhausted ↔ measurementFailed ayrımına eşleyebilsin.
    */
   capExceeded?: ExecutorCapExceeded;
+  /**
+   * Koşum bittikten SONRA geçici kaynakların silinmesinde çıkan hata. AYRI bir
+   * alan, çünkü temizlik hatası koşumun sonucunu geçersiz kılmaz: `ok` ve
+   * `output` olduğu gibi kalır (lock.ts'teki `releaseError` ile aynı sözleşme —
+   * ikincil hata özgün sonucu EZMEZ ama yutulmaz da).
+   */
+  cleanupError?: string;
 }
 
 export interface ExecutorAdapter {
