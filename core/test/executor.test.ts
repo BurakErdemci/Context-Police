@@ -43,7 +43,7 @@ test("buildExecArgs sözleşmesi: stdin prompt, ephemeral, read-only, şema ve �
     "exec", "--ephemeral", "--skip-git-repo-check", "--color", "never",
     "-s", "read-only", "-C", "/proj", "-m", "gpt-5-codex",
     "-c", 'model_reasoning_effort="low"',
-    "--output-schema", "/tmp/sema.json", "-o", "/tmp/son.txt", "-",
+    "--output-schema", "/tmp/sema.json", "--json", "-o", "/tmp/son.txt", "-",
   ]);
 });
 
@@ -51,7 +51,7 @@ test("buildExecArgs: verilmeyen seçenekler bayrak üretmez", () => {
   const args = buildExecArgs({ prompt: "x" }, {}, null, "/tmp/son.txt");
   assert.deepEqual(args, [
     "exec", "--ephemeral", "--skip-git-repo-check", "--color", "never",
-    "-s", "read-only", "-o", "/tmp/son.txt", "-",
+    "-s", "read-only", "--json", "-o", "/tmp/son.txt", "-",
   ]);
 });
 
@@ -64,7 +64,15 @@ after(() => {
   for (const d of fakeBinDirs) rmSync(d, { recursive: true, force: true });
 });
 
-function fakeCodexBinary(behavior: "ok" | "fail" | "hang"): string {
+/** `--json` akışının varsayılan taklidi: bir tur + iki item + JSON olmayan gürültü. */
+const DEFAULT_STREAM_LINES = [
+  "codex-cli 9.9.9 basliyor",  // akışta JSON olmayan satır da olur; atlanmalı
+  '{"type":"item.completed"}',
+  '{"type":"item.completed"}',
+  '{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":90,"reasoning_output_tokens":40}}',
+];
+
+function fakeCodexBinary(behavior: "ok" | "fail" | "hang", streamLines: string[] = DEFAULT_STREAM_LINES): string {
   const dir = mkdtempSync(join(tmpdir(), "cp-fake-codex-"));
   fakeBinDirs.push(dir);
   const bin = join(dir, "codex");
@@ -75,6 +83,9 @@ if [ "$1" = "--version" ]; then echo "codex-cli 9.9.9"; exit 0; fi
 out=""; prev=""
 for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
 cat > /dev/null   # stdin'deki prompt'u tüket
+cat <<'CP_STREAM_EOF'
+${streamLines.join("\n")}
+CP_STREAM_EOF
 printf '{"findings":[]}' > "$out"
 exit 0`
       : behavior === "fail"
@@ -95,6 +106,42 @@ test("CodexExecutor: sahte binary ile başarılı koşum son mesajı döndürür
   const res = await exec.run({ prompt: "merhaba", outputSchema: { type: "object" } });
   assert.equal(res.ok, true);
   assert.equal(res.output, '{"findings":[]}');
+  assert.deepEqual(res.usage, {
+    inputTokens: 1200,
+    cachedInputTokens: 800,
+    outputTokens: 90,
+    reasoningOutputTokens: 40,
+    turns: 2,
+  });
+});
+
+// M4.1: tavan denetiminin girdisi maliyettir; "ölçemedim" ile "sıfır harcadım"
+// aynı şey değil — akış hiç gelmediyse usage UNDEFINED kalır, 0 uydurulmaz.
+test("CodexExecutor: --json akışı hiç gelmezse usage undefined kalır", async () => {
+  const exec = createCodexExecutor({ binary: fakeCodexBinary("ok", []) });
+  const res = await exec.run({ prompt: "x" });
+  assert.equal(res.ok, true);
+  assert.equal(res.usage, undefined);
+});
+
+// Prototip (tools/altin-set/adjudicate-cost.ts) son turun usage'ını alıyordu;
+// araçlı hakem çok turlu koşuyor ve tavan TOPLAM harcamaya bakacak.
+test("CodexExecutor: birden çok turn.completed geldiğinde usage toplanır", async () => {
+  const bin = fakeCodexBinary("ok", [
+    '{"type":"item.completed"}',
+    '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":5,"reasoning_output_tokens":1}}',
+    '{"type":"item.completed"}',
+    '{"type":"item.completed"}',
+    '{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":20,"output_tokens":7,"reasoning_output_tokens":2}}',
+  ]);
+  const res = await createCodexExecutor({ binary: bin }).run({ prompt: "x" });
+  assert.deepEqual(res.usage, {
+    inputTokens: 300,
+    cachedInputTokens: 30,
+    outputTokens: 12,
+    reasoningOutputTokens: 3,
+    turns: 3,
+  });
 });
 
 test("CodexExecutor: sıfır-dışı çıkış ok=false ve stderr kuyruğu taşır", async () => {

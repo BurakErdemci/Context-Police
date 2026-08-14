@@ -10,7 +10,7 @@ import { rmSync } from "node:fs";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExecutorAdapter, ExecutorDetection, ExecutorRequest, ExecutorResult } from "./executor.ts";
+import type { ExecutorAdapter, ExecutorDetection, ExecutorRequest, ExecutorResult, ExecutorUsage } from "./executor.ts";
 
 export interface CodexOptions {
   /** Verilmezse kullanıcının ~/.codex/config.toml varsayılanı geçerli (D-M2-6). */
@@ -150,6 +150,83 @@ function untrack(kind: "dir" | "group", value: string | number | undefined): voi
   if (liveTempDirs.size === 0 && liveGroups.size === 0) uninstallSignalHandlers();
 }
 
+/** codex `--json` akışındaki usage alanları; ExecutorUsage'ın camelCase karşılıkları. */
+const USAGE_FIELDS = [
+  ["input_tokens", "inputTokens"],
+  ["cached_input_tokens", "cachedInputTokens"],
+  ["output_tokens", "outputTokens"],
+  ["reasoning_output_tokens", "reasoningOutputTokens"],
+] as const;
+
+/**
+ * Yeni-satır beklemeden tamponun büyüyebileceği üst sınır. Akıştaki olaylar tek
+ * satır JSON; bu sınıra dayanan bir şey satır DEĞİLDİR (ikili çıktı, ilerleme
+ * çubuğu) ve atılır.
+ */
+const MAX_STREAM_LINE = 1_000_000;
+
+/**
+ * `--json` akışından maliyet toplar. Ham akış RAM'de BİRİKTİRİLMEZ: gerçek bir
+ * hakem koşumu ~1,9M token girdi raporluyor, akışın kendisi de o ölçekte —
+ * yalnız yarım kalan satır ve toplanan sayılar tutulur.
+ *
+ * Prototipten (tools/altin-set/adjudicate-cost.ts) ayrılan yer: orada son turun
+ * usage'ı alınıyordu, burada TÜM turların TOPLAMI — tavan denetiminin girdisi
+ * koşumun tamamının maliyeti.
+ */
+function createUsageCollector() {
+  let rest = "";
+  let items = 0;
+  let sawTurn = false;
+  const totals = new Map<string, number>();
+
+  const handleLine = (line: string): void => {
+    const s = line.trim();
+    if (!s.startsWith("{")) return; // akışta JSON olmayan satırlar da geliyor
+    let event: { type?: string; usage?: Record<string, unknown> };
+    try {
+      event = JSON.parse(s);
+    } catch {
+      return; // yarım/bozuk satır ölçümü düşürmez, yalnız atlanır
+    }
+    if (event?.type === "item.completed") items++;
+    if (event?.type === "turn.completed" && event.usage) {
+      sawTurn = true;
+      for (const [snake, camel] of USAGE_FIELDS) {
+        const v = event.usage[snake];
+        if (typeof v === "number") totals.set(camel, (totals.get(camel) ?? 0) + v);
+      }
+    }
+  };
+
+  return {
+    push(chunk: string): void {
+      rest += chunk;
+      let nl: number;
+      while ((nl = rest.indexOf("\n")) !== -1) {
+        handleLine(rest.slice(0, nl));
+        rest = rest.slice(nl + 1);
+      }
+      if (rest.length > MAX_STREAM_LINE) rest = "";
+    },
+    /** Akış kapandığında son (yeni-satırsız) satırı da işler. */
+    finish(): ExecutorUsage | undefined {
+      if (rest) {
+        handleLine(rest);
+        rest = "";
+      }
+      if (!sawTurn) return undefined; // ölçüm yoksa undefined; 0 uydurulmaz
+      const usage: ExecutorUsage = {};
+      for (const [, camel] of USAGE_FIELDS) {
+        const v = totals.get(camel);
+        if (v !== undefined) usage[camel] = v;
+      }
+      usage.turns = items;
+      return usage;
+    },
+  };
+}
+
 /** Saf: komut satırını üretir. Ayrı fonksiyon, çünkü sözleşme testle sabitleniyor. */
 export function buildExecArgs(
   req: ExecutorRequest,
@@ -162,7 +239,9 @@ export function buildExecArgs(
   if (opts.model) args.push("-m", opts.model);
   if (opts.reasoningEffort) args.push("-c", `model_reasoning_effort="${opts.reasoningEffort}"`);
   if (schemaPath) args.push("--output-schema", schemaPath);
-  args.push("-o", outPath, "-");
+  // --json: stdout'a olay akışı (usage buradan gelir). -o DURUYOR — son mesajın
+  // kaynağı hâlâ dosya, "boş dosya = arıza" sözleşmesi değişmedi.
+  args.push("--json", "-o", outPath, "-");
   return args;
 }
 
@@ -225,13 +304,21 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           spawnError?: string;
           stdinError: string | null;
           stdinFlushed: boolean;
+          usage?: ExecutorUsage;
         }>((resolve) => {
           // detached: çocuk kendi süreç grubunun lideri olur, böylece timeout'ta
           // torunlarıyla birlikte öldürülebilir (killProcessGroup). unref()
           // ÇAĞIRMIYORUZ — çıktı dosyasını beklediğimiz için süreci event
           // loop'ta tutmak zorundayız; unref edilirse Node çocuk bitmeden çıkabilir.
-          const child = spawn(binary, args, { stdio: ["pipe", "ignore", "pipe"], detached: true });
+          // stdout artık "ignore" değil: --json olay akışı oradan geliyor. Akış
+          // okunmazsa boru dolar ve codex yazarken bloke olur — yani pipe olmak
+          // seçenek değil, tüketmek zorunlu.
+          const child = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
           trackGroup(child.pid);
+          const usageCollector = createUsageCollector();
+          // setEncoding: çok baytlı karakter iki chunk'a bölünürse Node birleştirir.
+          child.stdout.setEncoding("utf8");
+          child.stdout.on("data", (d: string) => usageCollector.push(d));
           let stderr = "";
           let timedOut = false;
           // Prompt teslimi izleniyor. Bulgu (undetected-stdin-delivery-failure):
@@ -252,12 +339,12 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           child.on("error", (err) => {
             clearTimeout(timer);
             untrack("group", child.pid);
-            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed });
+            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage: usageCollector.finish() });
           });
           child.on("close", (code) => {
             clearTimeout(timer);
             untrack("group", child.pid);
-            resolve({ code, stderr, timedOut, stdinError, stdinFlushed });
+            resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage: usageCollector.finish() });
           });
           child.stdin.on("error", (err: NodeJS.ErrnoException) => {
             if (stdinError === null) stdinError = err.code ? `${err.code}: ${err.message}` : err.message;
@@ -273,22 +360,25 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
         });
 
         const durationMs = Date.now() - started;
-        if (done.spawnError) return { ok: false, output: "", error: `codex başlatılamadı: ${done.spawnError}`, durationMs };
-        if (done.timedOut) return { ok: false, output: "", error: `zaman aşımı (${timeoutMs} ms)`, durationMs };
+        const usage = done.usage;
+        // Başarısız koşum da token harcamıştır; usage her yolda taşınır ki
+        // maliyet tavanı yalnız başarılı koşumları saymasın.
+        if (done.spawnError) return { ok: false, output: "", error: `codex başlatılamadı: ${done.spawnError}`, durationMs, usage };
+        if (done.timedOut) return { ok: false, output: "", error: `zaman aşımı (${timeoutMs} ms)`, durationMs, usage };
         if (done.code !== 0)
-          return { ok: false, output: "", error: `çıkış ${done.code}: ${done.stderr.trim().slice(-STDERR_TAIL)}`, durationMs };
+          return { ok: false, output: "", error: `çıkış ${done.code}: ${done.stderr.trim().slice(-STDERR_TAIL)}`, durationMs, usage };
         // Sıfır çıkış + dolu çıktı dosyası YETMEZ: prompt tam gitmediyse cevap
         // eksik bir soruya verilmiştir. Sözleşme gereği ok=false iken output
         // MUTLAKA boş dize (executor.ts), hata mesajı sebebi taşır.
         if (done.stdinError !== null)
-          return { ok: false, output: "", error: `prompt stdin'e yazılamadı (${done.stdinError})`, durationMs };
+          return { ok: false, output: "", error: `prompt stdin'e yazılamadı (${done.stdinError})`, durationMs, usage };
         if (!done.stdinFlushed)
-          return { ok: false, output: "", error: "prompt stdin'e tam yazılmadan süreç kapandı", durationMs };
+          return { ok: false, output: "", error: "prompt stdin'e tam yazılmadan süreç kapandı", durationMs, usage };
 
         const output = await readFile(outPath, "utf8").catch(() => "");
         if (!output.trim())
-          return { ok: false, output: "", error: "codex son mesaj dosyasını boş bıraktı", durationMs };
-        return { ok: true, output, durationMs };
+          return { ok: false, output: "", error: "codex son mesaj dosyasını boş bıraktı", durationMs, usage };
+        return { ok: true, output, durationMs, usage };
       } finally {
         untrack("dir", tmp);
         await rm(tmp, { recursive: true, force: true });

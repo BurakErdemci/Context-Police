@@ -19,12 +19,29 @@ export interface ExecutorRequest {
   timeoutMs?: number;
 }
 
+/**
+ * Bir koşumun token maliyeti. Tüm alanlar isteğe bağlı: yürütücü ölçemediğini
+ * UYDURMAZ — "akış gelmedi" `undefined`'dır, `0` değil. Sıfır yazmak maliyet
+ * tavanını sessizce yanıltır (harcanmış ama görünmeyen bütçe).
+ */
+export interface ExecutorUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+  /** Akışta görülen tamamlanmış öğe sayısı (araç çağrısı + mesaj). */
+  turns?: number;
+}
+
 export interface ExecutorResult {
   ok: boolean;
   /** Modelin son mesajı; ok=false iken boş dize. */
   output: string;
   error?: string;
   durationMs: number;
+  /** Ölçülemediyse undefined (bkz. ExecutorUsage). Başarısız koşumda da dolabilir:
+   *  zaman aşımına uğrayan bir hakem de token harcamıştır, tavan onu da görmeli. */
+  usage?: ExecutorUsage;
 }
 
 export interface ExecutorAdapter {
