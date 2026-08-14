@@ -134,28 +134,55 @@ function isProcessAlive(pid: number): boolean {
 
 /** Sinyal işleyicisi senkron olmak zorunda: süreç kapanmadan önce bitmeli. */
 function cleanupNow(): void {
-  for (const pid of liveGroups) if (isProcessAlive(pid)) killProcessGroup(pid);
-  liveGroups.clear();
-  for (const dir of liveTempDirs) {
+  // Second surface of the same class as the temp-dir loop below: ownership was
+  // released for every pid regardless of whether the kill landed.
+  // killProcessGroup swallows its errors and cannot report success, so liveness
+  // after the attempt is the only honest signal. Erring towards RETAINING is
+  // deliberate — SIGKILL is asynchronous, so a still-alive reading may just be
+  // a race, and holding a pid we no longer own costs nothing while forgetting a
+  // live one orphans a process group.
+  for (const pid of [...liveGroups]) {
+    if (isProcessAlive(pid)) killProcessGroup(pid);
+    if (!isProcessAlive(pid)) liveGroups.delete(pid);
+  }
+  // Ownership is released per directory and only on success. The blanket
+  // `clear()` that stood here dropped the entry even when rmSync threw, so a
+  // transient EBUSY at shutdown orphaned the directory with nothing left
+  // holding its path (verification round 2, 15 Aug). Still no retry loop: the
+  // handler must stay synchronous, and delaying exit is not worth a temp dir.
+  for (const dir of [...liveTempDirs]) {
     try {
       rmSync(dir, { recursive: true, force: true });
+      liveTempDirs.delete(dir);
     } catch {
-      /* silinemiyorsa yapacak bir şey yok; kapanışı geciktirmenin anlamı yok */
+      /* keep the entry: a later signal, or the process-exit hook, can retry */
     }
   }
-  liveTempDirs.clear();
 }
 
 const FATAL_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 function onFatalSignal(sig: NodeJS.Signals): void {
   cleanupNow();
-  uninstallSignalHandlers();
+  // Stay installed while anything is still registered — cleanupNow only drops
+  // what it actually removed, so a leftover entry means a removal failed and is
+  // worth retrying. Uninstalling unconditionally made that retry impossible:
+  // ownership was kept but nothing could ever act on it (verification round 2).
+  // Same condition untrack() already uses; this is that idiom on the signal path.
+  const pending = liveTempDirs.size > 0 || liveGroups.size > 0;
+  if (!pending) uninstallSignalHandlers();
+
   // Bir dinleyici EKLEMEK Node'un varsayılan sonlandırmasını iptal ediyor.
   // cli.ts kendi işleyicisini eklerse kapanış kararı onundur (Node çoklu
   // dinleyiciye izin veriyor, çakışma yok); kimse kalmadıysa varsayılanı geri
   // getiriyoruz, yoksa Ctrl-C süreci asardı.
-  if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+  // Our own handler must not count towards "someone else will decide": if it
+  // did, keeping it installed above would be exactly the hang this guards.
+  const ours = signalHandlers.size > 0 ? 1 : 0;
+  if (process.listenerCount(sig) - ours === 0) {
+    uninstallSignalHandlers();
+    process.kill(process.pid, sig);
+  }
 }
 
 const signalHandlers = new Map<NodeJS.Signals, () => void>();
