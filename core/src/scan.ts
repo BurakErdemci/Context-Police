@@ -55,6 +55,15 @@ export interface ScanSummary {
   /** Okunamayan oturum sayısı — tarama devam eder, iz events'te kalır. */
   sessionErrors: number;
   /**
+   * Identity probe failed but the session was delivered anyway, via the other
+   * probe. Split out because the two answer different questions and the CLI
+   * renders `sessionErrors` as "unreadable session": counting a recovery there
+   * reported a delivered session as a read failure, which is a false alarm in
+   * the one tool whose whole thesis is what false signals cost. (Verification
+   * round 2, 15 Aug.) The trace stays in `cursor_identity_failed` either way.
+   */
+  identityRecovered: number;
+  /**
    * Maliyet bütçesi tarama ortasında doldu ve tarama ERKEN DURDU. Tarama bitti
    * DEĞİL yarım kaldı demek: kalan oturumlar hiç okunmadı, imleçleri
    * ilerlemedi. Çağıran bunu bir hata sayacıyla karıştırmasın diye ayrı alan.
@@ -170,7 +179,7 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
   const sum: ScanSummary = {
     projects: 0, sessionsTouched: 0, turns: 0, bytesRead: 0, filteredBytes: 0,
     skipped: 0, unknown: 0, malformed: 0, truncations: 0, unresolvedProjects: 0,
-    sessionErrors: 0, budgetHalted: false,
+    sessionErrors: 0, identityRecovered: 0, budgetHalted: false,
   };
 
   for (const proj of found) {
@@ -311,7 +320,8 @@ async function scanSession(
    */
   const logIdentityFailure = (resolved: boolean, recoveredBy: string | null): void => {
     if (tried.length === 0) return;
-    sum.sessionErrors++;
+    if (resolved) sum.identityRecovered++;
+    else sum.sessionErrors++;
     const first = tried[0]!;
     logEvent(store, {
       projectId,

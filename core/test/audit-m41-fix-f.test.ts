@@ -68,8 +68,12 @@ test("[persistent-identity-starvation] realpath arızasında kimlik inode'dan ku
 
   assert.equal(seen.length, 1, "okunabilir bir oturum realpath yüzünden aç kalmamalı");
   assert.equal(sum.turns, 1);
-  // Arıza YİNE de bir arıza: sayılıyor ve olaya yazılıyor.
-  assert.equal(sum.sessionErrors, 1);
+  // Still counted and still written to the event log — but as a RECOVERED
+  // failure. `sessionErrors` is rendered as "unreadable session" and this
+  // session was read, so counting it there reported a delivery as a read
+  // failure (verification round 2, 15 Aug).
+  assert.equal(sum.sessionErrors, 0);
+  assert.equal(sum.identityRecovered, 1);
 
   const ev = listEvents(store, { kind: "cursor_identity_failed", limit: 5 });
   assert.equal(ev.length, 1);

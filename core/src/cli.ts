@@ -224,6 +224,10 @@ async function cmdScan(): Promise<void> {
     );
     console.log(`atlanan satır: ${sum.skipped}  bilinmeyen tip: ${sum.unknown}  bozuk: ${sum.malformed}`);
     if (sum.sessionErrors > 0) console.log(`okunamayan oturum: ${sum.sessionErrors}  (ayrıntı: status)`);
+    // Reported separately and worded as recovery: these sessions WERE delivered.
+    if (sum.identityRecovered > 0) {
+      console.log(`kimlik ölçümü kurtarıldı: ${sum.identityRecovered}  (oturum teslim edildi, ayrıntı: status)`);
+    }
     if (sum.truncations > 0) console.log(`kısalma tespiti: ${sum.truncations}`);
     console.log(`süre: ${secs} sn`);
 
