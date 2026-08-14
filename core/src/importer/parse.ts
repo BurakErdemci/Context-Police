@@ -3,6 +3,7 @@
 // çünkü anchor-drift yalnız "geçmişte VAR OLUP kaybolmuş" durumu suçlar.
 
 import type { Anchor } from "../types.ts";
+import { DASH_LIKE_PREFIX_RE, anchorValueError, normalizeAnchorValue } from "../anchor-value.ts";
 
 export interface ParsedNote {
   /**
@@ -218,7 +219,13 @@ const SYMBOL_RE = /`([A-Za-z_$][A-Za-z0-9_$]{3,})(?:\(\))?`/g;
 export function extractAnchors(text: string): { anchors: Anchor[]; dropped: number } {
   const seen = new Set<string>();
   const all: Anchor[] = [];
-  const push = (kind: Anchor["kind"], value: string) => {
+  const push = (kind: Anchor["kind"], raw: string) => {
+    // Normalize ÖNCE, hüküm SONRA (anchor-value.ts sözleşmesi). Bu yüzeyde
+    // kırpma yapısı gereği NO-OP: değerler regex'ten geliyor ve desenlerin
+    // hiçbiri boşluk üretemiyor. Yine de ortak fonksiyondan geçiyor — iki
+    // yüzeyin aynı değeri üretmesi ancak tek bir giriş kapısıyla garanti.
+    const value = normalizeAnchorValue(raw);
+
     // Tire ile BAŞLAYAN çapa üretilmez (denetim: imported-flag-anchor).
     // `--output/tmp/audit.txt` yol şeklinde olduğu için çapa olarak saklanıyordu.
     // Bugün sömürülebilir DEĞİL — çapayı tüketen üç git çağrısının hepsi ya `--`
@@ -232,7 +239,10 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
     // çapa eksikliği: not en kötü ihtimalle `unanchored` sınıfına düşer (M0-D5,
     // nötr). Yasak yalnız BAŞ karakterde — `src/my-mod/a-b.ts` ve `/tmp/-x/a.txt`
     // argv'de bayrak konumuna düşemez, dokunulmaz.
-    if (value.startsWith("-")) return;
+    //
+    // Hüküm artık ortak (anchor-value.ts): ASCII tirenin yanında görsel tire
+    // varyantlarını da kapsıyor ve gözlemci yüzeyiyle AYNI kümeyi kullanıyor.
+    if (anchorValueError(value) !== null) return;
 
     // Mükerrer anahtarının ayracı NUL: hiçbir çapa değerinde geçemeyeceği için
     // iki ayrı (kind, value) çiftinin aynı anahtara düşmesi mümkün olmuyor.
@@ -246,6 +256,21 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
 
   for (const m of text.matchAll(PATH_RE)) {
     const v = m[0];
+    // Bayrak hükmü metindeki TOKEN'a bakar, eşleşmeye değil. Sebep: PATH_RE'nin
+    // karakter sınıfı (`[\w.-]`) ASCII tireyi İÇERİYOR ama unicode tire
+    // varyantlarını içermiyor — "-src/a.ts" tireyle başlayan bir eşleşme verip
+    // aşağıdaki hükümde düşerken, "—src/a.ts" `src/a.ts` olarak eşleşip hükmü
+    // ATLIYORDU. Yani ASCII vakasının yakalanması bir tasarım değil, karakter
+    // sınıfının rastlantısıydı. Öncesindeki tek karaktere bakmak o rastlantıyı
+    // hükme çeviriyor.
+    //
+    // Altın set etkisi ÖLÇÜLDÜ (14 Ağu 2026, ~/.claude/projects/*/memory
+    // altındaki 92 not, 129 yol eşleşmesi): bu sınıftan SIFIR eşleşme var —
+    // yani hüküm mevcut çıkarım zeminini değiştirmiyor, yalnız gözlemci
+    // yüzeyiyle hizalıyor. Metinde tireden sonra boşluk gelen yaygın biçim
+    // ("— src/a.ts") etkilenmiyor.
+    const prev = m.index > 0 ? text[m.index - 1]! : "";
+    if (DASH_LIKE_PREFIX_RE.test(prev)) continue;
     push(v.startsWith("~/") || v.startsWith("/") ? "external_path" : "file_path", v);
   }
   const pathText = text.replace(PATH_RE, " "); // yolun içindeki hex parçası sha sanılmasın

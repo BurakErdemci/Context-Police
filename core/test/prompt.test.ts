@@ -62,7 +62,6 @@ test("düşmanca çıktılar tek tek reddedilir, sebep söylenir", () => {
     '{"findings":[{"content":"","anchors":[]}]}',                        // boş content
     `{"findings":[{"content":"${"a".repeat(5000)}","anchors":[]}]}`,     // şişkin content
     '{"findings":[{"content":"x","anchors":[{"kind":"line_number","value":"12"}]}]}', // geçersiz çapa türü
-    '{"findings":[{"content":"x","anchors":[{"kind":"symbol","value":""}]}]}',        // boş çapa değeri
     '{"findings":[{"content":"x","anchors":[],"supersedes":-3}]}',       // negatif id
     '{"findings":[{"content":"x","anchors":[],"supersedes":1.5}]}',      // tam sayı değil
     '[]',                                                                // üst düzey dizi
@@ -72,6 +71,13 @@ test("düşmanca çıktılar tek tek reddedilir, sebep söylenir", () => {
     assert.equal(r.ok, false, `reddedilmedi: ${raw.slice(0, 60)}`);
     if (!r.ok) assert.ok(r.error.length > 0);
   }
+  // Boş çapa DEĞERİ bu listeden çıktı (denetim:
+  // inconsistent-anchor-prefix-normalization): hâlâ reddediliyor ama parti
+  // değil yalnız çapa düşüyor. Kapsam testi:
+  // test/anchor-prefix-normalization.test.ts.
+  const bosCapa = parseObserverOutput('{"findings":[{"content":"x","anchors":[{"kind":"symbol","value":""}]}]}');
+  assert.equal(bosCapa.ok, true);
+  if (bosCapa.ok) assert.deepEqual(bosCapa.items[0]!.anchors, []);
 });
 
 test("bilinmeyen madde anahtarları yutulur, bilinenler kalır (model gürültüsü toleransı)", () => {

@@ -6,6 +6,7 @@
 
 import type { Anchor, AnchorKind, Finding, Turn } from "../types.ts";
 import { DATA_FENCE_RULE, fenceUntrusted } from "../prompt-fence.ts";
+import { anchorValueError, normalizeAnchorValue } from "../anchor-value.ts";
 
 export interface StateTitle {
   id: number;
@@ -121,10 +122,12 @@ const HEX_SHA_RE = /^[0-9a-fA-F]{7,40}$/;
 const GLOB_META_RE = /[*?[\]]/;
 
 function anchorShapeError(kind: AnchorKind, value: string): string | null {
+  // Her türde ortak hüküm (anchor-value.ts): boş değer + bayrak şekilli önek.
+  // Tür denetiminden ÖNCE çalışır — "  " gibi bir değerin hex olmadığı için
+  // "commit_sha hex değil" diye raporlanması teşhisi yanıltırdı.
+  const shared = anchorValueError(value);
+  if (shared !== null) return shared;
   if (kind === "commit_sha") return HEX_SHA_RE.test(value) ? null : "commit_sha hex (7-40) değil";
-  // Baştaki tire her türde yasak — argv'de bayrak konumuna ancak o düşürür
-  // (importer/parse.ts'teki aynı hüküm).
-  if (value.startsWith("-")) return "tire ile başlıyor (bayrak şekilli)";
   // Sembol PATHSPEC OLARAK TÜKETİLMİYOR: `symbolExists` değeri `git grep -F -e
   // <değer>` ile (sabit dize, ayraçlı), `symbolEverExisted` `-S<değer>` ile
   // geçiriyor. Yol kısıtlarını sembole de dayatmak, kazancı olmayan bir aşırı
@@ -387,16 +390,36 @@ export function parseObserverOutput(
       const { kind, value } = a as Record<string, unknown>;
       if (typeof kind !== "string" || !ANCHOR_KINDS.includes(kind as AnchorKind))
         return { ok: false, error: `madde ${i} çapa ${j}: geçersiz tür ${JSON.stringify(kind)}` };
-      if (typeof value !== "string" || value.trim().length === 0 || value.length > ANCHOR_VALUE_MAX)
+      // Tür ve tavan ihlali PARTİYİ reddeder: ikisi de şema ihlali, yani
+      // çıktının bütününe güvenilemeyeceğinin işareti. BOŞ değer ise artık
+      // burada DEĞİL — aşağıda tek çapa olarak düşüyor (gerekçe orada).
+      if (typeof value !== "string" || value.length > ANCHOR_VALUE_MAX)
         return { ok: false, error: `madde ${i} çapa ${j}: geçersiz değer` };
+      // Karakter denetimi HAM değerde, normalize ÖNCESİ. Sıra bilinçli:
+      // `trim()` yalnız boşluğu değil satır sonlarını (U+000A/000D) ve
+      // U+2028/2029/FEFF'i de kırpar — normalize sonrası denetlemek, bugün
+      // partiyi reddeden kontrol karakterlerini sessizce meşrulaştırırdı.
+      // İstenen hizalama bu değil: gevşetme yok.
       const charError = anchorCharError(value);
       if (charError !== null)
         return { ok: false, error: `madde ${i} çapa ${j}: çapa değerinde ${charError}` };
-      if (anchorShapeError(kind as AnchorKind, value) !== null) {
+      // Normalize ÖNCE, hüküm SONRA (anchor-value.ts sözleşmesi). Depoya giren
+      // değer normalize edilmiş olan — importer'ın ürettiği değerle aynı olması
+      // ancak böyle sağlanıyor (" src/a.ts" ≠ "src/a.ts" iki ayrı çapaydı).
+      const normalized = normalizeAnchorValue(value);
+      // Boş/yalnız-boşluk değer artık partiyi DEĞİL yalnız çapayı düşürür.
+      // Bilinçli seçim, iki yönlü ölçüme dayanıyor: parti reddinin bedeli
+      // ölçülmüş ve TEK YÖNLÜ — turn'ler "işlenemedi" diye checkpoint'lenir ve
+      // o partideki bulgular KALICI kaybolur (probes/emoji-anchor-rejected.sh,
+      // M2). Çapa düşürmenin bedeli en kötü ihtimalle notun `unanchored`
+      // sınıfına düşmesi (M0-D5: nötr). Hizalama açısından da doğru olan bu:
+      // importer boş değer üretemediği için "çapa yok" veriyor; parti reddi iki
+      // yüzeyi farklı KAPSAMDA cezalandırıyordu (tek çapa ↔ tüm parti).
+      if (anchorShapeError(kind as AnchorKind, normalized) !== null) {
         droppedAnchors++;
         continue;
       }
-      validAnchors.push({ kind: kind as AnchorKind, value });
+      validAnchors.push({ kind: kind as AnchorKind, value: normalized });
     }
 
     // null, "geçersiz kılınan yok"un en doğal model ifadesi — şema alanı

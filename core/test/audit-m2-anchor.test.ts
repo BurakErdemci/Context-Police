@@ -140,6 +140,19 @@ test("[çapa-filtresi] görünmez-ama-zararsız kod noktaları VERİ sayılır",
 test("[çapa-filtresi] uzunluk ve boşluk denetimi daraltmadan ETKİLENMEDİ", () => {
   assert.equal(parseAnchor("a".repeat(512)).ok, true, "512 sınırdadır, kabul edilmeliydi");
   assert.equal(parseAnchor("a".repeat(513)).ok, false, "512 üstü çapa kabul edildi");
-  assert.equal(parseAnchor("").ok, false, "boş çapa kabul edildi");
-  assert.equal(parseAnchor("   ").ok, false, "yalnız boşluktan oluşan çapa kabul edildi");
+  // Boş/yalnız-boşluk çapa HÂLÂ reddediliyor — ama KAPSAM değişti (denetim:
+  // inconsistent-anchor-prefix-normalization, 14 Ağu 2026): eskiden partinin
+  // tamamı düşüyordu, artık yalnız o çapa. Gerekçe prompt.ts'te ve
+  // test/anchor-prefix-normalization.test.ts'te: parti reddinin bedeli ölçülmüş
+  // ve tek yönlü (turn'ler "işlenemedi" diye checkpoint'lenip bulgular kalıcı
+  // kaybolur), çapa düşürmenin bedeli ise en kötü ihtimalle `unanchored`
+  // (M0-D5: nötr). Uzunluk sınırı DEĞİŞMEDİ: o bir şema/kaynak ihlali.
+  for (const bos of ["", "   "]) {
+    const r = parseAnchor(bos);
+    assert.equal(r.ok, true, `boş çapa partiyi düşürdü: ${JSON.stringify(bos)}`);
+    if (r.ok) {
+      assert.deepEqual(r.items[0]!.anchors, [], `boş çapa kabul edildi: ${JSON.stringify(bos)}`);
+      assert.equal(r.droppedAnchors, 1, "düşen çapa sayılmadı");
+    }
+  }
 });
