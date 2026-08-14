@@ -33,6 +33,17 @@ const STATE_BUDGET_CHARS = 10_000; // ~2.5k token (spec §3.3: durum ~2-3k)
  */
 const ITEMS_MAX = 24;
 
+/** Madde şemasının TAMAMI. Bunun dışındaki her anahtar tanınmayan sayılır. */
+const KNOWN_ITEM_KEYS = new Set(["content", "anchors", "supersedes"]);
+
+/**
+ * Olaya yazılacak farklı tanınmayan anahtar ADI tavanı. Sayı tavansız, ad
+ * listesi tavanlı: `events` silinemez (spec §3.2) ve uydurma anahtar üreten bir
+ * model sınırsız ad yazdırabilirdi — scan.ts'teki MAX_UNKNOWN_TYPES_PER_SCAN
+ * ile aynı gerekçe.
+ */
+const UNKNOWN_KEY_NAMES_MAX = 10;
+
 /**
  * Ham yanıtın karakter üst sınırı. Sınır madde sayısından ÖNCE gerekiyor:
  * JSON.parse'a 50 MB'lık bir dize verilmesi tek başına bir maliyet.
@@ -318,7 +329,9 @@ ${transcript}`;
  */
 export function parseObserverOutput(
   raw: string,
-): { ok: true; items: ObserverItem[]; droppedAnchors: number } | { ok: false; error: string } {
+):
+  | { ok: true; items: ObserverItem[]; droppedAnchors: number; unknownItemKeys: number; unknownItemKeyNames: string[] }
+  | { ok: false; error: string } {
   // Sınır ayrıştırmadan ÖNCE: dev bir dizeyi JSON.parse'a vermek tek başına
   // bir maliyet. Aşan yanıt mevcut hata yolundan geçer (spec §3.7: bir düzeltme
   // turu + "işlenemedi" işareti), sessizce kırpılmaz.
@@ -373,6 +386,19 @@ export function parseObserverOutput(
    * `observer_batch_ok` olayının `detail.droppedAnchors` alanına yazıyor.
    */
   let droppedAnchors = 0;
+  /**
+   * Modelin ürettiği TANINMAYAN madde anahtarları. Yutulmaya devam ediyor
+   * (aşağıdaki gerekçe: süs alan partiyi reddettirmemeli) ama artık SAYILIYOR.
+   *
+   * Var olma sebebi: şema büyüdüğünde — ya da prompt'un öğrettiği alan adı
+   * modelinkiyle ayrıştığında — bunu gösterecek tek bir sayaç yoktu. Çapa
+   * düşürme (`droppedAnchors`) sayılıyordu, madde anahtarı sayılmıyordu; aynı
+   * sessiz-yutma sınıfının iki yüzü farklı davranıyordu. Kalıp bu depoda zaten
+   * var: adapters/claude-code.ts `safeShape` tanınmayan anahtarları sayıp
+   * raporluyor. Ad listesi TAVANLI: `events` silinemez, sınırsız ad şişme demek.
+   */
+  let unknownItemKeys = 0;
+  const unknownItemKeyNames = new Set<string>();
   for (const [i, f] of findings.entries()) {
     if (typeof f !== "object" || f === null) return { ok: false, error: `madde ${i}: nesne değil` };
     const { content, anchors, supersedes } = f as Record<string, unknown>;
@@ -434,8 +460,20 @@ export function parseObserverOutput(
     }
 
     // Bilinmeyen madde anahtarları bilinçli yutulur: modeller süs alan ekler,
-    // sözleşmeyi bilinen anahtarlar taşır.
+    // sözleşmeyi bilinen anahtarlar taşır. Yutulur ama SAYILIR (yukarı bkz.).
+    for (const key of Object.keys(f as Record<string, unknown>)) {
+      if (KNOWN_ITEM_KEYS.has(key)) continue;
+      unknownItemKeys++;
+      if (unknownItemKeyNames.size < UNKNOWN_KEY_NAMES_MAX) unknownItemKeyNames.add(key);
+    }
+
     items.push(sup === undefined ? { content, anchors: validAnchors } : { content, anchors: validAnchors, supersedes: sup });
   }
-  return { ok: true, items, droppedAnchors };
+  return {
+    ok: true,
+    items,
+    droppedAnchors,
+    unknownItemKeys,
+    unknownItemKeyNames: [...unknownItemKeyNames].sort(),
+  };
 }

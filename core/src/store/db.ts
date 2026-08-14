@@ -24,6 +24,33 @@ export interface Store {
   close(): void;
 }
 
+/**
+ * Depoyu kapat: kapatma hatası İŞİN SONUCUNU EZMESİN, ama sessizce de
+ * kaybolmasın.
+ *
+ * Neden var (varyant taraması, 14 Ağu 2026): cli.ts'te dört yerde
+ * `try { … return R } finally { store.close() }` kalıbı vardı. Kapanmış bir
+ * `DatabaseSync` üzerinde `close()` FIRLATIYOR (mekanizma kanıtlandı), ve
+ * `finally` içinden fırlayan hata `try` bloğunun sonucunu/hatasını yerinden
+ * ediyor — yani gerçek teşhis, ikincil bir kapanış hatasıyla değiştiriliyor.
+ * Bugün bu yolu tetikleyen bir akış BULUNAMADI (sinyal kancası süreçten hemen
+ * çıkıyor); bu yüzden düzeltme değil KORUMA olarak yazıldı: ucuz, deterministik,
+ * ve `lock.ts`teki `releaseError` ile `inTransaction`daki `rollbackError` ile
+ * aynı sözleşme — ikincil hata AYRI bir kanaldan görünür, birincil hata ezilmez.
+ *
+ * @param report ikincil hatayı bildiren kanal; testler için enjekte edilebilir.
+ * @returns temiz kapandıysa true.
+ */
+export function closeQuietly(store: Pick<Store, "close">, report: (msg: string) => void = console.error): boolean {
+  try {
+    store.close();
+    return true;
+  } catch (err) {
+    report(`uyarı: depo kapatılamadı: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
+    return false;
+  }
+}
+
 /** Varsayılan depo yolu — merkezi, proje yoluyla anahtarlı (spec K4). */
 export function defaultStorePath(): string {
   return join(homedir(), ".context-police", "store.db");

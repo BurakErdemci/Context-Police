@@ -2,7 +2,7 @@
 // Çekirdeğin UI'sız girişi. Tauri kabuğu bunu sidecar olarak başlatacak;
 // geliştirme ve ölçüm sırasında doğrudan kullanılır.
 
-import { openStore, defaultStorePath, type Store } from "./store/db.ts";
+import { openStore, closeQuietly, defaultStorePath, type Store } from "./store/db.ts";
 import { claudeCodeAdapter, readCwd } from "./adapters/claude-code.ts";
 import { register } from "./adapters/transcript.ts";
 import { scanOnce } from "./scan.ts";
@@ -210,7 +210,7 @@ async function cmdScan(): Promise<void> {
     const sum = await scanOnce(store, {
       adapter: claudeCodeAdapter,
       root: arg("dir"),
-      onLock: (lock) => onInterrupt(() => { lock.release(); store.close(); }),
+      onLock: (lock) => onInterrupt(() => { lock.release(); closeQuietly(store); }),
     });
     const secs = ((Date.now() - started) / 1000).toFixed(1);
 
@@ -239,7 +239,11 @@ async function cmdScan(): Promise<void> {
       }
     }
   } finally {
-    store.close();
+    // `close()` DEĞİL `closeQuietly()`: `finally` içinden fırlayan bir kapanış
+    // hatası `try` bloğunun sonucunu/hatasını EZER — kapanmış bir DatabaseSync
+    // üzerinde `close()` fırlıyor (mekanizma kanıtlandı). Gerekçe db.ts'te;
+    // aynı değişiklik bu dosyadaki dört `finally`nin hepsinde.
+    closeQuietly(store);
   }
 }
 
@@ -303,7 +307,7 @@ async function cmdObserve(): Promise<void> {
           // AYNI EKSİKLİK BURADAYDI: `observe --session` kancayı kuruyordu ama
           // `observe`un tam-tarama dalı kilidi scanOnce'ın içinde alıyor,
           // dolayısıyla o da sinyalde kilidi asılı bırakıyordu.
-          onLock: (lock) => onInterrupt(() => { lock.release(); store.close(); }),
+          onLock: (lock) => onInterrupt(() => { lock.release(); closeQuietly(store); }),
           only: arg("project") ? [arg("project")!] : undefined,
           onTurns: budgetGuardedOnTurns(
             () => observer.stats.budgetExhausted,
@@ -330,7 +334,7 @@ async function cmdObserve(): Promise<void> {
   } finally {
     // Kapanış finally'de, çıkış SONRA: process.exit() finally'yi çalıştırmıyor
     // ve depo tanıtıcısı açık kalıyordu.
-    store.close();
+    closeQuietly(store);
   }
   if (exitCode !== 0) process.exit(exitCode);
 }
@@ -356,7 +360,7 @@ async function observeSingleSession(
     // silmek, kapanan bir depoya yazmaya çalışan bir zamanlayıcı bırakırdı.
     const off = onInterrupt(() => {
       lock.release();
-      store.close();
+      closeQuietly(store);
     });
     try {
       return await observeBody(store, observer, sessionPath, projPath, sessionId, batchTokens, yes);
@@ -464,7 +468,7 @@ async function cmdAudit(): Promise<void> {
         // `lock.release()` zamanlayıcıyı da durduruyor — depo hemen kapanıyor ve
         // ayakta kalan bir atış kapalı bağlantıya yazmaya çalışırdı.
         lock.release();
-        store.close();
+        closeQuietly(store);
       });
       try {
         // İki mod: depodaki projeler (--project süzer) ya da elle kayıt
@@ -545,7 +549,7 @@ async function cmdAudit(): Promise<void> {
       }
     });
   } finally {
-    store.close();
+    closeQuietly(store);
   }
   if (exitCode !== 0) process.exit(exitCode);
 }
@@ -624,7 +628,7 @@ function cmdStatus(): void {
       `ölçüm arızası ${countEvents(store, "anchor_measurement_failed")}, ` +
       `fetch arızası ${countEvents(store, "git_fetch_failed")}`);
   } finally {
-    store.close();
+    closeQuietly(store);
   }
 }
 

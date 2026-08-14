@@ -276,6 +276,12 @@ export class Observer {
           // görünmüyordu — sessiz düşüş, çapasını kaybeden bulguyu denetim
           // yüzeyinden çıkarıyor ve bunun sebebi hiçbir kayıtta yoktu.
           droppedAnchors: outcome.droppedAnchors,
+          // Modelin ürettiği TANINMAYAN madde anahtarları. Yutuluyor (süs alan
+          // partiyi reddettirmemeli) ama şema büyüdüğünde ya da prompt ile
+          // model çıktısı ayrıştığında bunu gösterecek tek sinyal bu sayaç —
+          // droppedAnchors ile aynı gerekçe, aynı sınıfın ikinci yüzü.
+          unknownItemKeys: outcome.unknownItemKeys,
+          unknownItemKeyNames: outcome.unknownItemKeyNames,
         },
       });
     });
@@ -330,7 +336,7 @@ export class Observer {
     prompt: string,
     cwd: string | undefined,
   ): Promise<
-    | { ok: true; items: ObserverItem[]; droppedAnchors: number }
+    | { ok: true; items: ObserverItem[]; droppedAnchors: number; unknownItemKeys: number; unknownItemKeyNames: string[] }
     | { ok: false; error: string; budget?: true }
   > {
     const stop = { ok: false, error: "maliyet bütçesi (maxCalls) doldu", budget: true } as const;

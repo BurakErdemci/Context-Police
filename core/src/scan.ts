@@ -96,6 +96,36 @@ export interface ScanOptions {
    * kurulmuyor: sinyal makinesi CLI'ın işi, tarama yalnız tutamağı uzatıyor.
    */
   onLock?: (lock: ScanLockHandle) => () => void;
+  /**
+   * Dosya KİMLİĞİ ölçümü (gerçek yol + inode). Yalnız HATA YOLUNU sınamak için
+   * ayrılmış dikiş.
+   *
+   * Neden dikiş gerekti: "keşif başardı ama realpath arızalandı" durumu gerçek
+   * dosya sisteminde ancak bir YARIŞLA üretilebiliyor — deterministik olarak
+   * realpath'i bozan her kurulum (asılı sembolik bağ, ELOOP döngüsü, kapalı
+   * izinli dizin) `discover()` içindeki `stat`'ı da bozuyor, dolayısıyla oturum
+   * scanSession'a hiç ulaşmıyor. Dikişsiz bu dal test edilemez, ve test
+   * edilemeyen bir hata yolu bugün olduğu gibi sessizce yanlış davranır.
+   */
+  identityProbe?: IdentityProbe;
+}
+
+/** Oturum dosyasının kimliğini ölçen iki çağrı. Varsayılanı `node:fs/promises`. */
+export interface IdentityProbe {
+  realpath(path: string): Promise<string>;
+  stat(path: string): Promise<{ ino: number | bigint }>;
+}
+
+const defaultIdentityProbe: IdentityProbe = { realpath, stat };
+
+/** errno varsa sınıflandırılabilir sebep; yoksa undefined (ilkel değer fırlatılmış olabilir). */
+function errnoOf(err: unknown): string | undefined {
+  const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function describeErr(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
 export async function scanOnce(store: Store, opts: ScanOptions): Promise<ScanSummary> {
@@ -159,13 +189,28 @@ async function scanAll(store: Store, opts: ScanOptions): Promise<ScanSummary> {
       logEvent(store, { projectId, kind: "discovery_failed", detail: { transcriptDir: proj.transcriptDir, error: proj.error } });
     }
 
+    // Okuma ARIZASI yüzünden cwd bulunamadıysa bu, projenin yolu tahminle
+    // kaydedilmiş olabileceği anlamına gelir ve düzeltilebilir bir durumdur —
+    // "cwd yok"tan ayrı kayıt. Proje `unresolved` olmasa bile yazılır: tahmin
+    // TUTMUŞ olabilir ve o zaman hiçbir yerde iz kalmazdı.
+    const failedProbes = (proj.cwdProbes ?? []).filter((p) => p.outcome !== "no_cwd");
+    if (failedProbes.length > 0) {
+      logEvent(store, {
+        projectId,
+        kind: "cwd_probe_failed",
+        detail: { transcriptDir: proj.transcriptDir, probes: failedProbes },
+      });
+    }
+
     if (proj.unresolved) {
       sum.unresolvedProjects++;
       // Atlanmıyor, raporlanıyor: sessiz düşen proje hiç görünmeyen projedir.
+      // `probes` burada: "anahtar çözülemedi" satırı tek başına SEBEBİ
+      // söylemiyordu — dosyalar okunamadı mı, yoksa gerçekten cwd'siz mi.
       logEvent(store, {
         projectId,
         kind: "unresolved_project_key",
-        detail: { transcriptDir: proj.transcriptDir },
+        detail: { transcriptDir: proj.transcriptDir, probes: proj.cwdProbes ?? [] },
       });
     }
 
@@ -231,12 +276,63 @@ async function scanSession(
 ): Promise<void> {
   // Anahtar GERÇEK yol: aynı fiziksel dosyaya iki yoldan ulaşılabiliyordu
   // (sembolik bağ, sabit bağ) ve aynı akış iki kez teslim ediliyordu.
-  const cursorKey = await realpath(session.filePath).catch(() => session.filePath);
+  //
+  // KİMLİK ÖLÇÜLEMEZSE OTURUM BU TURDA ATLANIR — sessizce ham yola DÜŞÜLMEZ.
+  // Eski hâl `realpath(...).catch(() => session.filePath)` idi ve arızayı
+  // errno'ya bakmadan yutuyordu: anahtar "gerçek yol" olmaktan çıkıyor, aynı
+  // fiziksel akış bir sembolik bağ üzerinden İKİNCİ bir anahtarla kaydediliyor
+  // ve İKİ KEZ teslim ediliyordu — yani bir satır yukarıdaki gerekçenin tam
+  // tersi. `stat` dalında bedel daha da somut: inode araması düşünce imleç
+  // bulunamıyor, `from` 0 oluyor ve akışın TAMAMI yeniden teslim ediliyordu.
+  //
+  // Atlamanın imleç sözleşmesine etkisi: YOK, çünkü imleç yazılmıyor. M1'de
+  // kurulan "en az bir kez teslim" korunuyor (sonraki tarama aynı baytları
+  // baştan okur); zayıflayan taraf yok, yalnız bir teslimat ERTELENİYOR.
+  // Sözleşmenin diğer yüzü — "aynı akış tek anahtar altında" — ise ancak
+  // böyle korunuyor: ölçemediğimiz bir kimliği uydurmak onu kırıyordu.
+  //
+  // Ayrım detayda: `missing` (ENOENT) "dosya gerçekten yok" demek — keşifle
+  // okuma arasında silinmiş, atlanması zaten doğru; ENOENT dışı her errno bir
+  // ÖLÇÜM ARIZASI (izin, ELOOP, EIO) ve düzeltilebilir bir durumu işaret eder.
+  const probe = opts.identityProbe ?? defaultIdentityProbe;
+  const identityFailed = (which: "realpath" | "stat", err: unknown): void => {
+    sum.sessionErrors++;
+    const code = errnoOf(err);
+    logEvent(store, {
+      projectId,
+      kind: "cursor_identity_failed",
+      detail: {
+        sessionId: session.sessionId,
+        filePath: session.filePath,
+        probe: which,
+        code: code ?? null,
+        missing: code === "ENOENT",
+        error: describeErr(err),
+      },
+    });
+  };
+
+  let cursorKey: string;
+  try {
+    cursorKey = await probe.realpath(session.filePath);
+  } catch (err) {
+    identityFailed("realpath", err);
+    return;
+  }
+
   let cursor = getCursor(store, cursorKey);
   if (!cursor) {
     // Yol bilinmiyor: aynı akış başka bir adla (sabit bağ) kayıtlı olabilir.
-    const ino = await stat(session.filePath).then((st) => String(st.ino)).catch(() => null);
-    if (ino) cursor = getCursorByInode(store, ino);
+    // Bu sorunun cevabı ALINAMIYORSA "kayıtlı değil" varsayılamaz — o varsayım
+    // tam olarak mükerrer teslimat demek.
+    let ino: string;
+    try {
+      ino = String((await probe.stat(session.filePath)).ino);
+    } catch (err) {
+      identityFailed("stat", err);
+      return;
+    }
+    cursor = getCursorByInode(store, ino);
   }
   const from = cursor?.byteOffset ?? 0;
 

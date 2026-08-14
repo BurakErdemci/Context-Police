@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import type {
+  CwdProbe,
   DiscoveredProject,
   DiscoveredSession,
   ParseResult,
@@ -309,6 +310,34 @@ export async function readIncremental(
  * (MAX_LINE_BYTES) — tek bir eşik olsun; aşan satır atlanır, keşif durmaz.
  */
 export async function readCwd(filePath: string, maxLines = 50): Promise<string | null> {
+  return (await readCwdDetailed(filePath, maxLines)).cwd;
+}
+
+/**
+ * `readCwd`in SEBEP TAŞIYAN hâli. İki çağrı ayrı, çünkü `readCwd`in dar dönüşü
+ * (`string | null`) çağrı yerinde üç farklı durumu tek değere eziyordu:
+ * "cwd alanı yok", "satırlar bozuk JSON" ve "dosya hiç okunamadı" (izin, EIO).
+ * İlki normaldir (saf üst-veri transcript'i), diğer ikisi düzeltilebilir bir
+ * kurulum hatasıdır — ve proje `unresolved` işaretlenip TAHMİNİ yolla
+ * (`guessPathFromKey`) kaydedildiği için ayrım kullanıcı açısından pahalı.
+ *
+ * Okuma arızası burada YAKALANMAZ: fırlar, çağıran sınıflandırır. Sayımlı
+ * raporlama kalıbı `safeShape` ile aynı (tanınmayan anahtarlar da yutulmaz,
+ * sayılır).
+ */
+export interface CwdProbeResult {
+  /** Bulunan cwd; alan hiç yoksa null. */
+  cwd: string | null;
+  /** Bakılan satır sayısı (tavan `maxLines`). */
+  scannedLines: number;
+  /** JSON olarak ayrıştırılamayan satır sayısı — 0 değilse dosya bozuk. */
+  malformedLines: number;
+  /** MAX_LINE_BYTES tavanını aştığı için hiç bakılmayan satır sayısı. */
+  overlongLines: number;
+}
+
+export async function readCwdDetailed(filePath: string, maxLines = 50): Promise<CwdProbeResult> {
+  const res: CwdProbeResult = { cwd: null, scannedLines: 0, malformedLines: 0, overlongLines: 0 };
   const fh = await open(filePath, "r");
   try {
     let seen = 0;
@@ -326,7 +355,8 @@ export async function readCwd(filePath: string, maxLines = 50): Promise<string |
         const o = JSON.parse(text) as { cwd?: unknown };
         if (typeof o.cwd === "string" && o.cwd) return o.cwd;
       } catch {
-        /* bozuk satır keşfi durdurmaz */
+        /* bozuk satır keşfi durdurmaz — ama SAYILIR (bkz. CwdProbeResult) */
+        res.malformedLines++;
       }
       return null;
     };
@@ -353,12 +383,21 @@ export async function readCwd(filePath: string, maxLines = 50): Promise<string |
             lineBuf = Buffer.concat(parts, lineLen);
           }
           const cwd = takeLine(lineBuf);
-          if (cwd !== null) return cwd;
+          if (cwd !== null) {
+            res.cwd = cwd;
+            res.scannedLines = seen + 1;
+            return res;
+          }
+        } else {
+          res.overlongLines++;
         }
         parts = [];
         pendingLen = 0;
         overlong = false;
-        if (++seen >= maxLines) return null;
+        if (++seen >= maxLines) {
+          res.scannedLines = seen;
+          return res;
+        }
       }
 
       if (chunk.length > 0) {
@@ -378,14 +417,19 @@ export async function readCwd(filePath: string, maxLines = 50): Promise<string |
     // Dosya sonundaki newline'sız kuyruk da bir satır: eski hâl onu hiç
     // bakmadan atıyordu, yani tek satırlık (newline'sız) transcript'te cwd
     // bulunamıyordu.
-    if (!overlong && pendingLen > 0 && seen < maxLines) {
-      const cwd = takeLine(Buffer.concat(parts, pendingLen));
-      if (cwd !== null) return cwd;
+    if (pendingLen > 0 && seen < maxLines) {
+      if (overlong) res.overlongLines++;
+      else {
+        seen++;
+        const cwd = takeLine(Buffer.concat(parts, pendingLen));
+        if (cwd !== null) res.cwd = cwd;
+      }
     }
+    res.scannedLines = seen;
   } finally {
     await fh.close();
   }
-  return null;
+  return res;
 }
 
 /**
@@ -449,13 +493,41 @@ async function discoverOne(dir: string): Promise<DiscoveredProject> {
     sessions.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
 
     // Yol çözümü: önce transcript'in kendi cwd'si (kayıpsız), sonra anahtar tahmini.
+    //
+    // SEBEP SAĞ KALIR. Eski hâl `readCwd(...).catch(() => null)` idi: izin
+    // hatası, bozuk JSONL ve "cwd alanı yok" tek bir `null`'a düşüyordu, proje
+    // `unresolved` olarak TAHMİNİ yolla kaydediliyor ve errno hiçbir olayda
+    // görünmüyordu. Dıştaki `discover()` yakalayıcısı bu dalı hiç görmüyor
+    // (hata burada yutuluyordu), yani teşhis için tek bir iz bile kalmıyordu.
+    // Artık her deneme bir kayda dönüşüyor; sınıflandırmayı scan.ts yapıyor.
     let path: string | null = null;
+    const cwdProbes: CwdProbe[] = [];
     for (const sess of sessions.slice(0, 3)) {
       // Okunamayan tek bir oturum dosyası keşfi bozmamalı: o dosya okuma
       // aşamasında `session_read_failed` olarak raporlanır, keşif ise
       // sonraki oturumdan cwd bulmayı dener (doğrulama turu bulgusu).
-      path = await readCwd(sess.filePath).catch(() => null);
-      if (path) break;
+      try {
+        const r = await readCwdDetailed(sess.filePath);
+        if (r.cwd) {
+          path = r.cwd;
+          break;
+        }
+        cwdProbes.push({
+          sessionId: sess.sessionId,
+          // "cwd yok" ile "okuyamadım" ayrı görünsün: ilki bir arıza DEĞİL.
+          outcome: r.malformedLines > 0 ? "malformed" : "no_cwd",
+          malformedLines: r.malformedLines,
+          overlongLines: r.overlongLines,
+          scannedLines: r.scannedLines,
+        });
+      } catch (err) {
+        cwdProbes.push({
+          sessionId: sess.sessionId,
+          outcome: "read_failed",
+          code: typeof (err as NodeJS.ErrnoException).code === "string" ? (err as NodeJS.ErrnoException).code : null,
+          error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        });
+      }
     }
     const unresolved = path === null;
     if (!path) path = guessPathFromKey(basename(dir));
@@ -466,6 +538,7 @@ async function discoverOne(dir: string): Promise<DiscoveredProject> {
       memoryDir: existsSync(join(dir, "memory")) ? join(dir, "memory") : null,
       unresolved: unresolved && path === null,
       sessions,
+      cwdProbes,
     };
   }
 }

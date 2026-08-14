@@ -251,7 +251,20 @@ test("kaybolan tek oturum taramayı öldürmez ve iz bırakır", async () => {
   const sum = await scanOnce(store, { adapter, root });
   assert.equal(sum.sessionErrors, 1);
   assert.equal(sum.turns, 1, "sağlam projenin turn'ü işlenmeliydi");
-  assert.equal(countEvents(store, "session_read_failed"), 1);
+  // GÜNCELLENDİ (silent-fallback-breaks-delivery-contract, 14 Ağu 2026):
+  // eskiden bu vaka `session_read_failed` yazıyordu, çünkü `realpath` arızası
+  // sessizce HAM yola düşülerek yutuluyor ve arıza ancak açma aşamasında
+  // görünüyordu. O yutma kaldırıldı; kayıp dosya artık daha ERKEN, kimlik
+  // ölçümünde yakalanıyor. Sınıf aynı (izole oturum I/O arızası), izin türü
+  // değişti — ve iz GEVŞEMEDİ, güçlendi: `missing` alanı "dosya gerçekten yok"u
+  // ölçüm arızasından ayırıyor. Aşağıda o alan da doğrulanıyor.
+  assert.equal(countEvents(store, "session_read_failed"), 0);
+  assert.equal(countEvents(store, "cursor_identity_failed"), 1);
+  const ev = listEvents(store, { kind: "cursor_identity_failed", limit: 1 })[0]!;
+  const detail = JSON.parse(ev.detail ?? "{}") as { probe: string; code: string; missing: boolean };
+  assert.equal(detail.probe, "realpath");
+  assert.equal(detail.code, "ENOENT");
+  assert.equal(detail.missing, true, "silinmiş dosya ölçüm arızasından ayrılmalı");
   assert.equal(countEvents(store, "scan_completed"), 1, "tarama tamamlandı kaydı düşmeli");
   store.close();
 });

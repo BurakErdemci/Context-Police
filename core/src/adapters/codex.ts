@@ -354,7 +354,14 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           resolve(r);
         };
         const timer = setTimeout(() => {
-          killProcessGroup(child.pid);
+          // Canlılık sınaması `cleanupNow` ile AYNI sebeple (bkz. isProcessAlive):
+          // çocuk `close`tan ~1,1–1,4 ms önce ölüyor ve o aralıkta PID işletim
+          // sistemi tarafından GERİ DÖNÜŞTÜRÜLMÜŞ olabilir — sinyal yabancı bir
+          // gruba giderdi. "Çocuk close'a kadar zombi kalır" gerekçesi bu depoda
+          // ÖLÇÜMLE çürütüldü (probes/signal-cleanup-stale-group.sh, 14 Ağu):
+          // o aralıkta `kill(pid, 0)` zaten ESRCH veriyor. Aynı korumanın akış
+          // yolundaki karşılığı `closed` bayrağı; bu, timeout yolundaki karşılığı.
+          if (child.pid !== undefined && isProcessAlive(child.pid)) killProcessGroup(child.pid);
           finish({ found: false, error: `codex --version zaman aşımı (${detectTimeoutMs} ms)` });
         }, detectTimeoutMs);
         child.stdout.on("data", (d: Buffer) => (out += d.toString("utf8")));
@@ -423,8 +430,13 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
                   : undefined;
             if (!hit) return;
             capExceeded = hit;
+            // `closed` TEK BAŞINA yetmiyor: bayrak `close` olayında doluyor,
+            // oysa çocuk ondan ~1,1–1,4 ms önce çıkıyor ve PID o aralıkta geri
+            // dönüştürülebiliyor (ölçüm: probes/signal-cleanup-stale-group.sh).
+            // Canlılık sınaması `cleanupNow` ile aynı; artık üç öldürme yolu da
+            // (timeout, detect timeout, kap aşımı) aynı korumadan geçiyor.
             if (closed) return; // öldürecek süreç yok (yukarıdaki PID geri dönüşümü)
-            killProcessGroup(child.pid); // YENİ öldürme yolu yok: timeout'la aynı mekanizma
+            if (child.pid !== undefined && isProcessAlive(child.pid)) killProcessGroup(child.pid);
           });
           // setEncoding: çok baytlı karakter iki chunk'a bölünürse Node birleştirir.
           child.stdout.setEncoding("utf8");
@@ -441,7 +453,14 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           let stdinFlushed = false;
           const timer = setTimeout(() => {
             timedOut = true;
-            killProcessGroup(child.pid);
+            // `closed` bayrağı YETMİYOR: o yalnız `close` olayında doluyor, oysa
+            // çocuk ondan ~1,1–1,4 ms ÖNCE çıkıyor ve PID o aralıkta geri
+            // dönüştürülebiliyor (ölçüm: probes/signal-cleanup-stale-group.sh,
+            // 14 Ağu — aralıkta `kill(pid, 0)` zaten ESRCH). Timers fazı
+            // close-callbacks fazından önce koştuğu için aralık gerçek.
+            // Burada `cleanupNow` ve capExceeded yolu ile aynı korumayı kuruyoruz.
+            if (closed) return;
+            if (child.pid !== undefined && isProcessAlive(child.pid)) killProcessGroup(child.pid);
           }, timeoutMs);
           child.stderr.on("data", (d: Buffer) => {
             stderr = (stderr + d.toString("utf8")).slice(-4096);

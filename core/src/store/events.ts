@@ -28,6 +28,22 @@ export type EventKind =
   | "malformed_line"
   | "truncation_detected"
   | "unresolved_project_key"
+  /**
+   * Oturum dosyasının KİMLİĞİ (gerçek yol / inode) ölçülemedi; oturum bu turda
+   * atlandı, imleci ilerlemedi. `detail.probe` hangi çağrının düştüğünü,
+   * `detail.missing` ise "dosya gerçekten yok" (ENOENT) ile ölçüm arızasını
+   * ayırır. Var olma sebebi: eski hâl arızada sessizce HAM yola düşüyordu ve
+   * aynı akış ikinci bir anahtarla yeniden teslim edilebiliyordu (scan.ts).
+   */
+  | "cursor_identity_failed"
+  /**
+   * Proje yolunu transcript'in `cwd` alanından çözme denemesi arızalandı.
+   * "cwd yok" ile "dosyayı okuyamadım" AYRI: ilki normal (eski format, saf
+   * üst-veri), ikincisi düzeltilebilir bir kurulum hatası (izin, bozuk dosya).
+   * Eski hâlinde ikisi de tek bir `null`'a düşüyor, proje tahmini yolla
+   * kaydediliyor ve errno hiçbir yerde görünmüyordu (claude-code.ts).
+   */
+  | "cwd_probe_failed"
   | "scan_completed"
   | "observer_batch_ok"
   | "observer_batch_unprocessed"

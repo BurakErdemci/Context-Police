@@ -46,6 +46,29 @@ export interface DiscoveredProject {
   sessions: DiscoveredSession[];
   /** Bu silo okunamadı; diğerleri etkilenmez, sebep olaya yazılır. */
   error?: string;
+  /**
+   * cwd'den yol çözme denemelerinin SONUÇSUZ kalanları. Boş dizi = ilk
+   * denemede çözüldü. Var olma sebebi: eski hâlde üç ayrı durum ("cwd yok",
+   * "bozuk JSONL", "okuyamadım") tek bir `null`'a düşüyordu ve proje tahmini
+   * yolla kaydedilirken errno hiçbir yerde görünmüyordu.
+   */
+  cwdProbes?: CwdProbe[];
+}
+
+/** Tek bir oturum dosyasından cwd okuma denemesinin sonucu. */
+export interface CwdProbe {
+  sessionId: string;
+  /**
+   * `no_cwd` — dosya okundu, cwd alanı yok (ARIZA DEĞİL: saf üst-veri
+   * transcript'i böyle görünür). `malformed` — bakılan satırların bir kısmı
+   * JSON değil. `read_failed` — dosya hiç açılamadı/okunamadı; `code` errno.
+   */
+  outcome: "no_cwd" | "malformed" | "read_failed";
+  code?: string | null;
+  error?: string;
+  scannedLines?: number;
+  malformedLines?: number;
+  overlongLines?: number;
 }
 
 export interface TranscriptAdapter {
