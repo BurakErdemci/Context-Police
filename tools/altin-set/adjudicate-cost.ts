@@ -16,7 +16,12 @@
 // kapatılması gereken bir boşluk.
 //
 // EKSİK ÇIKTI SÖZLEŞMESİ (skor hattı bunu bilmek zorunda):
-// Bir koşum tavanla kesilirse (süre/item) şemalı iddia kümesi yarım kalır.
+// Bir notun şemalı iddia kümesi okunamadıysa çıktı EKSİKTİR. İki sebebi var
+// ve satırdaki alanlarla ayırt edilir:
+//   - TAVAN KESMESİ  → `cap != null` (süre/item; küme yarım kaldı)
+//   - BİÇİM ARIZASI  → `parse_failed: true` (koşum kesilmedi, cap yok, rc=0;
+//                      cevap kurtarma katmanına rağmen okunamadı)
+// Her iki hâlde de `olculemez: true` — hüküm yok, çünkü okunamadı.
 // O notun KISMİ iddiaları skorlayıcıya giden claims dosyasına GİRMEZ.
 // Sebep: `score.ts` yalnız "kapsanan" notları puanlıyor ve kapsamayı hakem
 // çıktısında notun görünmesinden çıkarıyor. Kısmi iddialar girerse not
@@ -26,6 +31,12 @@
 // "denetlenmeyen" listesinde raporlanır; bu doğru semantik.
 // Mekanizma: eksik koşumun ham akışı `<cikti>.<not>.raw.incomplete.jsonl`
 // adına yazılır — iddia çıkarımı `*.raw.jsonl` tarar, eksikleri görmez.
+// UYARI: bu koruma tarayan tarafın GLOB'una bağlı ve o adım elle koşuluyor.
+// `*.raw*` gibi gevşek bir kalıp `.raw.incomplete.jsonl`'i de yakalar ve
+// sözleşmeyi sessizce bozar — kısmi iddialar claims dosyasına sızar, yakalama
+// oranı düşer. Tarayan glob DAİMA `*.raw.jsonl` olmalı.
+// Biçim pürüzü tek başına notu düşürmez: kod çiti (```json) ve birden çok
+// item'a bölünmüş küme için kurtarma katmanı var (bkz. extractClaims).
 // Ölçüt tavanın TÜRÜ değil çıktının TAMLIĞI: token tavanı post-hoc
 // ateşlendiği için çoğu zaman TAM bir çıktının üstüne biner, o koşum
 // `olculemez` sayılmaz (satırda yalnız `cap` raporlanır).
@@ -164,6 +175,34 @@ type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number 
 // cömert bir üst sınır. Bu süre dolduysa kill GERÇEKTEN tutmamıştır.
 const KILL_GRACE_MS = 5_000;
 
+/**
+ * Şemalı iddia kümesini metinden çıkarır; çıkaramazsa null.
+ *
+ * Neden kurtarma katmanı var: katı `JSON.parse` tek başına ölçüt olunca,
+ * TAVANLA HİÇ İLGİSİ OLMAYAN biçim pürüzleri notu "eksik çıktı" sayıyordu
+ * (ölçüldü, fix turu 1 review'ı: rc=0 + cap=null olan iki koşum düştü —
+ * (a) cevap ```json çitiyle sarılmıştı, (b) iddia kümesi iki item.completed'a
+ * bölünmüştü). Bu, kesilme deflasyonunu kapatırken açılan bir tam-not düşürme
+ * yoluydu. Kurtarma: çiti soy → doğrudan parse → metindeki en dış {…} bloğunu
+ * parse et. Hepsi tutmazsa gerçekten okunamıyor demektir.
+ */
+function extractClaims(text: string): number | null {
+  const stripped = text.replace(/```(?:json)?/gi, "").trim();
+  const tries = [stripped];
+  // En dış {…}: cevabın önünde/arkasında düz metin varsa onu atar. İç içe
+  // süslü parantezler ilk/son eşleşmenin arasında kaldığı için bu yeterli.
+  const a = stripped.indexOf("{");
+  const b = stripped.lastIndexOf("}");
+  if (a !== -1 && b > a) tries.push(stripped.slice(a, b + 1));
+  for (const t of tries) {
+    try {
+      const parsed = JSON.parse(t);
+      if (Array.isArray(parsed?.claims)) return parsed.claims.length;
+    } catch { /* sıradaki deneme */ }
+  }
+  return null;
+}
+
 function totalTokens(u: Usage): number {
   return (u.input_tokens ?? 0) + (u.cached_input_tokens ?? 0) +
     (u.output_tokens ?? 0) + (u.reasoning_output_tokens ?? 0);
@@ -227,6 +266,10 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     // Yalnız katı JSON.parse başarısı sayılır — regex'le "verdict" saymak
     // yarım kesilmiş bir metinde de sayı üretir, yani tamlık kanıtı değildir.
     let claimsComplete = false;
+    // İddia taşıyan item metinleri sırayla saklanıyor: küme birden çok
+    // item.completed'a bölünmüşse tek tek parse edilemez, birleştirilmiş
+    // hâli üzerinden kurtarma denenir (finish içinde).
+    const verdictTexts: string[] = [];
     let cap: Cap | null = null;
     // Süreç kapandıktan SONRA kill YASAK: PID'yi işletim sistemi geri
     // dönüştürmüş olabilir ve kill(-pid) alakasız bir grubu vurur. Gerçek yol:
@@ -278,13 +321,14 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
           // kaçırıyordu (kaçış karakterleri) — metni ayrıca ayrıştır.
           const txt = o.item?.text ?? o.item?.content ?? "";
           if (typeof txt === "string" && txt.includes("verdict")) {
-            try {
-              const parsed = JSON.parse(txt);
-              if (Array.isArray(parsed?.claims)) {
-                claims = Math.max(claims, parsed.claims.length);
-                claimsComplete = true;
-              }
-            } catch {
+            verdictTexts.push(txt);
+            const n = extractClaims(txt);
+            if (n !== null) {
+              claims = Math.max(claims, n);
+              claimsComplete = true;
+            } else {
+              // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
+              // "kaç iddia görünüyor" bilgisi için.
               const m = txt.match(/"verdict"/g);
               if (m) claims = Math.max(claims, m.length);
             }
@@ -319,6 +363,15 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
       if (pending) handleLine(pending);
+      // Son çare: küme item'lara bölünmüşse parçalar tek başına parse
+      // edilemez. Sıralı birleşim üzerinden aynı kurtarma denenir.
+      if (!claimsComplete && verdictTexts.length > 1) {
+        const n = extractClaims(verdictTexts.join("\n"));
+        if (n !== null) {
+          claims = Math.max(claims, n);
+          claimsComplete = true;
+        }
+      }
       if (opts?.killFailed) {
         // Süreç hâlâ yaşıyor ve borularımıza yazmaya devam edebilir; Node'un
         // çıkışını engellememesi için event loop'tan çıkar.
@@ -364,6 +417,7 @@ async function one(note: string): Promise<void> {
   // (bkz. dosya başındaki "EKSİK ÇIKTI SÖZLEŞMESİ"). Kanıt atılmıyor,
   // yalnız skor hattının erişemeyeceği bir ada konuyor.
   writeFileSync(`${outPath}.${note}.raw${r.claimsComplete ? "" : ".incomplete"}.jsonl`, r.raw);
+  const parseFailed = !r.claimsComplete && r.cap === null && r.rc === 0;
   const u = r.usage ?? {};
   appendFileSync(outPath, JSON.stringify({
     note, lines, rc: r.rc, ms: r.ms, evidence_fed: WITH_EVIDENCE,
@@ -374,6 +428,11 @@ async function one(note: string): Promise<void> {
     cap: r.cap,
     olculemez: !r.claimsComplete,
     claims_complete: r.claimsComplete,
+    // Eksik çıktının İKİ sebebi var ve ayırt edilmeleri şart: tavan kesmesi
+    // (`cap != null`) ile BİÇİM ARIZASI. İkincisi koşum hiç kesilmediği hâlde
+    // (cap yok, rc=0) çıktının okunamamasıdır — tavan kalibrasyonuyla değil
+    // kurtarma katmanıyla ilgilenir, o yüzden ayrı alan.
+    parse_failed: parseFailed,
     // `--max-items` tahminini kalibre edecek veri: usage'dan BAĞIMSIZ
     // sayaçlar, çünkü zaman kesmesinde `turn.completed` hiç gelmiyor ve
     // usage null kalıyor.
@@ -393,7 +452,7 @@ async function one(note: string): Promise<void> {
     String(u.output_tokens ?? "-").padStart(7) + String(u.reasoning_output_tokens ?? "-").padStart(7) +
     String(r.claims).padStart(7) + (r.rc === 0 ? "" : `  rc=${r.rc}`) +
     (r.cap ? `  CAP ${r.cap.kind} ${r.cap.observed}/${r.cap.limit}` : "") +
-    (r.claimsComplete ? "" : "  EKSİK ÇIKTI → olculemez") +
+    (r.claimsComplete ? "" : `  ${parseFailed ? "PARSE ARIZASI" : "EKSİK ÇIKTI"} → olculemez`) +
     (r.killFailed ? `  KILL BAŞARISIZ (sızan pid ${r.leakedPid})` : ""),
   );
 }
