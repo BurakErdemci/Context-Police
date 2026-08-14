@@ -91,8 +91,14 @@ exit 0`
       : behavior === "fail"
         ? `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 9.9.9"; exit 0; fi
+cat <<'CP_STREAM_EOF'
+${streamLines.join("\n")}
+CP_STREAM_EOF
 echo "kota doldu" >&2; exit 1`
         : `#!/bin/sh
+cat <<'CP_STREAM_EOF'
+${streamLines.join("\n")}
+CP_STREAM_EOF
 sleep 60`;
   writeFileSync(bin, body);
   chmodSync(bin, 0o755);
@@ -141,6 +147,41 @@ test("CodexExecutor: birden çok turn.completed geldiğinde usage toplanır", as
     outputTokens: 12,
     reasoningOutputTokens: 3,
     turns: 3,
+  });
+});
+
+// Eksik alt-alan 0 DEĞİL undefined: "ölçmedim" ile "sıfır harcadım" ayrımı
+// tavanın (Task 2) tam girdisi — sıfır yazmak bütçeyi sessizce yanıltır.
+test("CodexExecutor: usage'ın eksik alt-alanları undefined kalır, 0 uydurulmaz", async () => {
+  const bin = fakeCodexBinary("ok", [
+    '{"type":"item.completed"}',
+    '{"type":"turn.completed","usage":{"input_tokens":7}}',
+  ]);
+  const res = await createCodexExecutor({ binary: bin }).run({ prompt: "x" });
+  assert.deepEqual(res.usage, { inputTokens: 7, turns: 1 });
+});
+
+// Başarısız koşum da token harcar. Bu iki test o yolları SABİTLİYOR: davranış
+// zaten doğruydu ama testsizdi — bir refactor usage'ı düşürse suite yeşil kalırdı.
+test("CodexExecutor: sıfır-dışı çıkışta harcanan usage kaybolmaz", async () => {
+  const res = await createCodexExecutor({ binary: fakeCodexBinary("fail") }).run({ prompt: "x" });
+  assert.equal(res.ok, false);
+  assert.equal(res.output, "");
+  assert.deepEqual(res.usage, {
+    inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, turns: 2,
+  });
+});
+
+test("CodexExecutor: zaman aşımında harcanan usage kaybolmaz", async () => {
+  // 300 ms değil 2000 ms: ölçüldü — dolu suite altında sahte binary akışı
+  // basmadan timeout ateşliyor ve test yanıltıcı biçimde kırmızıya dönüyordu
+  // (tek başına koşarken yeşil). Süre, çocuğun yazmasına marj bırakmak için.
+  const exec = createCodexExecutor({ binary: fakeCodexBinary("hang"), timeoutMs: 2000 });
+  const res = await exec.run({ prompt: "x" });
+  assert.equal(res.ok, false);
+  assert.match(res.error!, /zaman aşımı/);
+  assert.deepEqual(res.usage, {
+    inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, turns: 2,
   });
 });
 
