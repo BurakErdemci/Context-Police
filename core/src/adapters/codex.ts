@@ -181,10 +181,10 @@ const MAX_STREAM_LINE = 1_000_000;
  * usage'ı alınıyordu, burada TÜM turların TOPLAMI — tavan denetiminin girdisi
  * koşumun tamamının maliyeti.
  */
-function createUsageCollector(onProgress?: (p: { totalTokens: number; turns: number }) => void) {
+function createUsageCollector(onProgress?: (p: { totalTokens: number; items: number }) => void) {
   let rest = "";
   let items = 0;
-  let sawTurn = false;
+  let turns = 0;
   // Tavan denetimi için AYRICA tutuluyor: totals'ı her olayda toplamak akış
   // uzadıkça boşuna iş; burada artımlı büyüyor.
   let totalTokens = 0;
@@ -201,7 +201,7 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; turns: num
     }
     if (event?.type === "item.completed") items++;
     else if (event?.type === "turn.completed" && event.usage) {
-      sawTurn = true;
+      turns++;
       for (const [snake, camel] of USAGE_FIELDS) {
         const v = event.usage[snake];
         if (typeof v === "number") {
@@ -212,7 +212,7 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; turns: num
     } else return; // ölçümü değiştirmeyen satır tavanı da değiştiremez
     // Tavan, akış SÜRERKEN denetlenir: sonuca bakmak "harcandıktan sonra"
     // öğrenmek olurdu, kesmenin bütün amacı ise harcamayı durdurmak.
-    onProgress?.({ totalTokens, turns: items });
+    onProgress?.({ totalTokens, items });
   };
 
   return {
@@ -231,13 +231,17 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; turns: num
         handleLine(rest);
         rest = "";
       }
-      if (!sawTurn) return undefined; // ölçüm yoksa undefined; 0 uydurulmaz
+      // Hiçbir olay görülmediyse ölçüm YOK: undefined döner, 0 uydurulmaz.
+      // Yalnız item görüldüyse ölçüm VAR (item sayısı) ama token bilinmiyor —
+      // o durumda token alanları yokluğuyla, items değeriyle raporlanır.
+      if (turns === 0 && items === 0) return undefined;
       const usage: ExecutorUsage = {};
       for (const [, camel] of USAGE_FIELDS) {
         const v = totals.get(camel);
         if (v !== undefined) usage[camel] = v;
       }
-      usage.turns = items;
+      usage.items = items;
+      if (turns > 0) usage.turns = turns;
       return usage;
     },
   };
@@ -337,16 +341,23 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           // ikisi karışırsa çağıran taraf "süre bitti" ile "bütçe bitti"yi
           // ayırt edemez, oysa ikisi farklı kararlar doğuruyor.
           let capExceeded: ExecutorCapExceeded | undefined;
+          // Süreç kapandıktan SONRA öldürme yasak: PID'yi işletim sistemi geri
+          // dönüştürmüş olabilir ve `kill(-pid)` ALAKASIZ bir süreç grubunu
+          // vurur. Bu gerçek bir yol: usageCollector.finish() kuyrukta kalan
+          // son (yeni-satırsız) satırı close handler'ının İÇİNDE işliyor ve o
+          // satır tavanı aşabiliyor. Aşım yine raporlanır, yalnız kill atlanır.
+          let closed = false;
           const usageCollector = createUsageCollector((p) => {
             if (capExceeded || !caps) return; // ilk aşım kazanır; ikinci kez öldürmeye gerek yok
             const hit =
               caps.maxTotalTokens != null && p.totalTokens > caps.maxTotalTokens
                 ? { kind: "tokens" as const, limit: caps.maxTotalTokens, observed: p.totalTokens }
-                : caps.maxTurns != null && p.turns > caps.maxTurns
-                  ? { kind: "turns" as const, limit: caps.maxTurns, observed: p.turns }
+                : caps.maxItems != null && p.items > caps.maxItems
+                  ? { kind: "items" as const, limit: caps.maxItems, observed: p.items }
                   : undefined;
             if (!hit) return;
             capExceeded = hit;
+            if (closed) return; // öldürecek süreç yok (yukarıdaki PID geri dönüşümü)
             killProcessGroup(child.pid); // YENİ öldürme yolu yok: timeout'la aynı mekanizma
           });
           // setEncoding: çok baytlı karakter iki chunk'a bölünürse Node birleştirir.
@@ -370,13 +381,19 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             stderr = (stderr + d.toString("utf8")).slice(-4096);
           });
           child.on("error", (err) => {
+            closed = true;
             clearTimeout(timer);
             untrack("group", child.pid);
+            // SIRA BAĞIMLILIĞI: `usage` alanı `capExceeded`ten ÖNCE yazılmalı —
+            // finish() kuyruktaki son satırı işlerken capExceeded'i doldurabilir
+            // ve nesne değeri o anda okunur (JS alanları soldan sağa değerlendirir).
             resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage: usageCollector.finish(), capExceeded });
           });
           child.on("close", (code) => {
+            closed = true;
             clearTimeout(timer);
             untrack("group", child.pid);
+            // `usage` alanı `capExceeded`ten ÖNCE (bkz. error handler'daki not).
             resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage: usageCollector.finish(), capExceeded });
           });
           child.stdin.on("error", (err: NodeJS.ErrnoException) => {
@@ -401,7 +418,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
         // olabilir, ama koşumu bitiren karar tavandır ve sebep o olmalı.
         if (done.capExceeded) {
           const { kind, limit, observed } = done.capExceeded;
-          const birim = kind === "tokens" ? "token" : "tur";
+          const birim = kind === "tokens" ? "token" : "item";
           return {
             ok: false,
             output: "",

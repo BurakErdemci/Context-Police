@@ -16,9 +16,15 @@ export interface ExecutorDetection {
  * koştu). Verilmeyen alan sınırsızdır.
  */
 export interface ExecutorCaps {
-  /** input+cached+output+reasoning TOPLAMI üstünden. */
+  /**
+   * input+cached+output+reasoning TOPLAMI üstünden. YAPISAL KISIT: usage yalnız
+   * `turn.completed` olayında geliyor ve gerçek koşumda o olay bir kez, en sonda
+   * geliyor — yani token yaptırımı çoğu koşumda POST-HOC'tur (aşımı bildirir ama
+   * harcamayı durdurmaz). Akışı gerçekten kesebilen eksenler maxItems ve süre.
+   */
   maxTotalTokens?: number;
-  maxTurns?: number;
+  /** `item.completed` sayısı üstünden — akış ortasında ateşleyebilen tek maliyet ekseni. */
+  maxItems?: number;
 }
 
 export interface ExecutorRequest {
@@ -38,7 +44,7 @@ export interface ExecutorRequest {
  * kesilir.
  */
 export interface ExecutorCapExceeded {
-  kind: "tokens" | "turns";
+  kind: "tokens" | "items";
   limit: number;
   observed: number;
 }
@@ -53,7 +59,13 @@ export interface ExecutorUsage {
   cachedInputTokens?: number;
   outputTokens?: number;
   reasoningOutputTokens?: number;
-  /** Akışta görülen tamamlanmış öğe sayısı (araç çağrısı + mesaj). */
+  /**
+   * Akışta görülen `item.completed` sayısı (araç çağrısı + mesaj). KESİLEBİLİR
+   * eksen budur: gerçek binary ölçüldü — koca bir `codex exec` koşumunda item
+   * akış boyunca damlarken `turn.completed` BİR kez, en sonda geliyor.
+   */
+  items?: number;
+  /** Akışta görülen `turn.completed` sayısı. Yalnız RAPOR: bkz. items. */
   turns?: number;
 }
 

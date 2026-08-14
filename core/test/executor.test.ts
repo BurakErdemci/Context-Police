@@ -85,7 +85,10 @@ const DRIP_TURN_LINES = (turns: number, tokensPerTurn: number): string[] =>
     `{"type":"turn.completed","usage":{"input_tokens":${tokensPerTurn}}}`,
   ]).flat();
 
-function fakeCodexBinary(behavior: "ok" | "fail" | "hang" | "drip", streamLines: string[] = DEFAULT_STREAM_LINES): string {
+function fakeCodexBinary(
+  behavior: "ok" | "fail" | "hang" | "drip" | "noeol",
+  streamLines: string[] = DEFAULT_STREAM_LINES,
+): string {
   const dir = mkdtempSync(join(tmpdir(), "cp-fake-codex-"));
   fakeBinDirs.push(dir);
   const bin = join(dir, "codex");
@@ -108,7 +111,20 @@ cat <<'CP_STREAM_EOF'
 ${streamLines.join("\n")}
 CP_STREAM_EOF
 echo "kota doldu" >&2; exit 1`
-        : behavior === "drip"
+        : behavior === "noeol"
+          ? // Son satır YENİ SATIRSIZ biter: onu ancak akış kapanırken koşan
+            // finish() işler. Kesme yolunun "süreç zaten ölmüş" hâlini ölçmenin
+            // tek yolu bu — heredoc her satırın sonuna \n koyduğu için "ok"
+            // varyantı bu durumu üretemiyor.
+            `#!/bin/sh
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+cat > /dev/null
+${streamLines.slice(0, -1).map((l) => `echo '${l}'`).join("\n")}
+printf '%s' '${streamLines[streamLines.length - 1] ?? ""}'
+printf '{"findings":[]}' > "$out"
+exit 0`
+          : behavior === "drip"
           ? // Satır tek tırnakla sarılıyor: akış olayları JSON, içlerinde tek
             // tırnak yok — varsa burada sessizce bozulurdu.
             `#!/bin/sh
@@ -137,7 +153,8 @@ test("CodexExecutor: sahte binary ile başarılı koşum son mesajı döndürür
     cachedInputTokens: 800,
     outputTokens: 90,
     reasoningOutputTokens: 40,
-    turns: 2,
+    items: 2,
+    turns: 1,
   });
 });
 
@@ -166,7 +183,8 @@ test("CodexExecutor: birden çok turn.completed geldiğinde usage toplanır", as
     cachedInputTokens: 30,
     outputTokens: 12,
     reasoningOutputTokens: 3,
-    turns: 3,
+    items: 3,
+    turns: 2,
   });
 });
 
@@ -178,7 +196,7 @@ test("CodexExecutor: usage'ın eksik alt-alanları undefined kalır, 0 uydurulma
     '{"type":"turn.completed","usage":{"input_tokens":7}}',
   ]);
   const res = await createCodexExecutor({ binary: bin }).run({ prompt: "x" });
-  assert.deepEqual(res.usage, { inputTokens: 7, turns: 1 });
+  assert.deepEqual(res.usage, { inputTokens: 7, items: 1, turns: 1 });
 });
 
 // Başarısız koşum da token harcar. Bu iki test o yolları SABİTLİYOR: davranış
@@ -188,7 +206,7 @@ test("CodexExecutor: sıfır-dışı çıkışta harcanan usage kaybolmaz", asyn
   assert.equal(res.ok, false);
   assert.equal(res.output, "");
   assert.deepEqual(res.usage, {
-    inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, turns: 2,
+    inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, items: 2, turns: 1,
   });
 });
 
@@ -202,7 +220,7 @@ test("CodexExecutor: zaman aşımında harcanan usage kaybolmaz", async () => {
   assert.match(res.error!, /zaman aşımı/);
   assert.equal(res.capExceeded, undefined, "süre aşımı tavan aşımı değildir (M4.1)");
   assert.deepEqual(res.usage, {
-    inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, turns: 2,
+    inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90, reasoningOutputTokens: 40, items: 2, turns: 1,
   });
 });
 
@@ -213,20 +231,46 @@ test("CodexExecutor: zaman aşımında harcanan usage kaybolmaz", async () => {
 // timeoutMs bu testlerde bilerek bol (10 sn): kesmenin sebebi SÜRE olursa test
 // tavanı değil zaman aşımını ölçmüş olur. Ölçülmüş ders (önceki tur): suite
 // yükü altında sahte binary'nin ilk stdout chunk'ı ~419 ms gecikebiliyor.
-test("CodexExecutor: tur tavanı aşılınca süreç kesilir ve capExceeded döner", async () => {
+test("CodexExecutor: item tavanı aşılınca süreç kesilir ve capExceeded döner", async () => {
   const bin = fakeCodexBinary("drip", DRIP_TURN_LINES(10, 1));
   const exec = createCodexExecutor({ binary: bin, timeoutMs: 10_000 });
-  const res = await exec.run({ prompt: "x", caps: { maxTurns: 3 } });
+  const res = await exec.run({ prompt: "x", caps: { maxItems: 3 } });
   assert.equal(res.ok, false);
   assert.equal(res.output, "", "ok=false iken output boş dize");
-  assert.equal(res.capExceeded?.kind, "turns");
+  assert.equal(res.capExceeded?.kind, "items");
   assert.equal(res.capExceeded?.limit, 3);
   assert.ok(res.capExceeded!.observed >= 3, `observed=${res.capExceeded!.observed}`);
   assert.doesNotMatch(res.error!, /zaman aşımı/, "kesme sebebi süre değil tavan olmalı");
   // Kesilen koşum da harcadığını raporlar: tavanın girdisi o ana kadarki toplam.
-  assert.ok(res.usage!.turns! >= 3, `usage.turns=${res.usage?.turns}`);
+  assert.ok(res.usage!.items! >= 3, `usage.items=${res.usage?.items}`);
   // Süreç 10 turu bitirmeden öldü — yoksa akış 20 satır basardı.
-  assert.ok(res.usage!.turns! < 10, `10 turun tamamı akmış: ${res.usage?.turns}`);
+  assert.ok(res.usage!.items! < 10, `10 turun tamamı akmış: ${res.usage?.items}`);
+});
+
+// Reviewer probe'u: maxItems ADI GEREĞİ item saymalı. Eski kod `turns`ü
+// item.completed sayacına bağlamıştı — hiç turn.completed içermeyen bir akışta
+// "4 tur > 3" diye YANLIŞ eksen raporluyordu. Burada oran 6 item : 1 turn.
+test("CodexExecutor: item ≠ turn — tavan item'ı sayar, usage ikisini ayrı raporlar", async () => {
+  const bin = fakeCodexBinary("ok", [
+    ...Array.from({ length: 6 }, () => '{"type":"item.completed"}'),
+    '{"type":"turn.completed","usage":{"input_tokens":50}}',
+  ]);
+  const gevsek = await createCodexExecutor({ binary: bin }).run({ prompt: "x", caps: { maxItems: 10 } });
+  assert.equal(gevsek.ok, true, "6 item 10'luk tavanın altında");
+  assert.deepEqual(gevsek.usage, { inputTokens: 50, items: 6, turns: 1 });
+
+  const siki = await createCodexExecutor({ binary: bin }).run({ prompt: "x", caps: { maxItems: 4 } });
+  assert.equal(siki.capExceeded?.kind, "items");
+  assert.equal(siki.capExceeded?.observed, 5, "5. item tavanı aşan ilk olay");
+  assert.match(siki.error!, /item/);
+});
+
+// Yalnız item görülüp turn.completed hiç gelmeyen akış: token ÖLÇÜLMEDİ
+// (alanlar yok), item ölçüldü. "Ölçmedim" 0 ile doldurulmaz.
+test("CodexExecutor: turn.completed'sız akışta usage yalnız items taşır", async () => {
+  const bin = fakeCodexBinary("ok", Array.from({ length: 3 }, () => '{"type":"item.completed"}'));
+  const res = await createCodexExecutor({ binary: bin }).run({ prompt: "x" });
+  assert.deepEqual(res.usage, { items: 3 });
 });
 
 test("CodexExecutor: token tavanı aşılınca kesilir, capExceeded.kind tokens", async () => {
@@ -248,7 +292,7 @@ test("CodexExecutor: caps verilmezse kesme yok, davranış eskisiyle aynı", asy
   assert.equal(res.ok, true);
   assert.equal(res.output, '{"findings":[]}');
   assert.equal(res.capExceeded, undefined);
-  assert.deepEqual(res.usage, { inputTokens: 6000, turns: 10 });
+  assert.deepEqual(res.usage, { inputTokens: 6000, items: 10, turns: 10 });
 });
 
 // Tavanın ALTINDA kalan koşum başarısız sayılmamalı: aşım STRICT (>) ölçülür,
@@ -257,10 +301,44 @@ test("CodexExecutor: tavana eşit maliyet aşım değildir", async () => {
   const bin = fakeCodexBinary("ok", DRIP_TURN_LINES(2, 500));
   const res = await createCodexExecutor({ binary: bin }).run({
     prompt: "x",
-    caps: { maxTotalTokens: 1000, maxTurns: 2 },
+    caps: { maxTotalTokens: 1000, maxItems: 2 },
   });
   assert.equal(res.ok, true);
   assert.equal(res.capExceeded, undefined);
+});
+
+// Yıkıcı sınıf: kuyrukta kalan son satır tavanı aşarsa onProgress, close
+// handler'ının İÇİNDE — untrack'ten sonra — koşuyordu ve kill(-pid) çağırıyordu.
+// PID o an işletim sistemince geri dönüştürülmüş olabilir: ALAKASIZ bir süreç
+// grubu ölür. Aşım raporlanmalı, kill çağrılmamalı.
+test("CodexExecutor: süreç kapandıktan sonra kesme çağrılmaz (PID geri dönüşümü)", async (t) => {
+  const bin = fakeCodexBinary("noeol", [
+    '{"type":"item.completed"}',
+    '{"type":"turn.completed","usage":{"input_tokens":5000}}', // yeni satırsız: finish()'te işlenir
+  ]);
+  const kills: unknown[][] = [];
+  const gercekKill = process.kill;
+  // Kayıt tutar ama İLETMEZ: geri dönüştürülmüş bir PID'ye gerçekten sinyal
+  // göndermek testin kendisini tehlikeli yapardı.
+  process.kill = ((...a: unknown[]) => {
+    kills.push(a);
+    return true;
+  }) as typeof process.kill;
+  t.after(() => {
+    process.kill = gercekKill;
+  });
+
+  const res = await createCodexExecutor({ binary: bin, timeoutMs: 10_000 }).run({
+    prompt: "x",
+    caps: { maxTotalTokens: 1000 },
+  });
+  process.kill = gercekKill;
+
+  assert.equal(res.ok, false);
+  assert.equal(res.output, "");
+  assert.equal(res.capExceeded?.kind, "tokens");
+  assert.equal(res.capExceeded?.observed, 5000, "aşım kuyruktaki son satırdan görülmeli");
+  assert.deepEqual(kills, [], `kapanmış sürece sinyal gönderildi: ${JSON.stringify(kills)}`);
 });
 
 // Üç eksen ayrık: süre aşımı capExceeded TAŞIMAZ ki çağıran taraf
@@ -268,7 +346,7 @@ test("CodexExecutor: tavana eşit maliyet aşım değildir", async () => {
 test("CodexExecutor: süre aşımı capExceeded taşımaz", async () => {
   const bin = fakeCodexBinary("drip", DRIP_TURN_LINES(10, 1));
   const exec = createCodexExecutor({ binary: bin, timeoutMs: 300 });
-  const res = await exec.run({ prompt: "x", caps: { maxTurns: 100 } });
+  const res = await exec.run({ prompt: "x", caps: { maxItems: 100 } });
   assert.equal(res.ok, false);
   assert.match(res.error!, /zaman aşımı/);
   assert.equal(res.capExceeded, undefined);
