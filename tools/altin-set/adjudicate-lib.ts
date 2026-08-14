@@ -269,8 +269,11 @@ export function validateNoteName(raw: string | undefined): NameCheck {
   // değil, PROMPT'taki veri çitinin ETİKETİ. Yeni satır + `VERI>>>` taşıyan bir
   // ad çiti GÖVDEDEN ÖNCE kapatıyor, yani gövde talimat alanına düşüyordu.
   // Kontrol karakterleri ayrıca dosya adı olarak da meşru değil.
-  if (/[\p{Cc}\p{Cf}]/u.test(raw)) {
-    return { ok: false, reason: "not adı kontrol karakteri (yeni satır dahil) içeremez" };
+  // Zl/Zp are here for the same reason as Cc/Cf: U+2028 and U+2029 break a line
+  // wherever the label is rendered, yet they are Separators rather than Control
+  // characters, so the earlier class did not reach them (verification round 2).
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(raw)) {
+    return { ok: false, reason: "not adı kontrol/satır-ayracı karakteri (yeni satır dahil) içeremez" };
   }
   if (raw.includes(DATA_FENCE_OPEN) || raw.includes(DATA_FENCE_CLOSE)) {
     return { ok: false, reason: `not adı veri çiti dizgesi içeremez: ${raw}` };

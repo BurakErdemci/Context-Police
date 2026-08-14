@@ -51,7 +51,11 @@ export function neutralizeFence(text: string): string {
  * koyan bir sonraki çağıran o kapıdan geçmeyebilir.
  */
 export function sanitizeFenceLabel(label: string): string {
-  return neutralizeFence(label.replace(/[\p{Cc}\p{Cf}]/gu, " ")).trim();
+  // Zl/Zp alongside Cc/Cf: U+2028 and U+2029 are line terminators to JS and to
+  // most renderers, but their Unicode category is Separator, not Control — so a
+  // Cc/Cf-only filter let them through and the label grew a second line.
+  // (Verification round 2, 15 Aug; same escape the ASCII newline fix closed.)
+  return neutralizeFence(label.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")).trim();
 }
 
 /** Güvenilmeyen metni etiketli bir veri bloğuna alır. */
