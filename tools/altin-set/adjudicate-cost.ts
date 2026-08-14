@@ -15,6 +15,21 @@
 // (`ExecutorResult` token taşımıyor). Bu, kapı yeniden tasarlanırken
 // kapatılması gereken bir boşluk.
 //
+// EKSİK ÇIKTI SÖZLEŞMESİ (skor hattı bunu bilmek zorunda):
+// Bir koşum tavanla kesilirse (süre/item) şemalı iddia kümesi yarım kalır.
+// O notun KISMİ iddiaları skorlayıcıya giden claims dosyasına GİRMEZ.
+// Sebep: `score.ts` yalnız "kapsanan" notları puanlıyor ve kapsamayı hakem
+// çıktısında notun görünmesinden çıkarıyor. Kısmi iddialar girerse not
+// "denetlendi" sayılır, kesildiği için göremediği hedef iddialar da kaçırılmış
+// sayılır — yakalama oranı SESSİZCE düşer ve düşüşün sebebi hakemin
+// kalitesiymiş gibi görünür. Kısmi çıktı dışarıda kalırsa not
+// "denetlenmeyen" listesinde raporlanır; bu doğru semantik.
+// Mekanizma: eksik koşumun ham akışı `<cikti>.<not>.raw.incomplete.jsonl`
+// adına yazılır — iddia çıkarımı `*.raw.jsonl` tarar, eksikleri görmez.
+// Ölçüt tavanın TÜRÜ değil çıktının TAMLIĞI: token tavanı post-hoc
+// ateşlendiği için çoğu zaman TAM bir çıktının üstüne biner, o koşum
+// `olculemez` sayılmaz (satırda yalnız `cap` raporlanır).
+//
 // Kullanım:
 //   node --experimental-strip-types tools/altin-set/adjudicate-cost.ts \
 //     [--evidence] [--parallel N] [--timeout-sec 600] [--max-items 100] \
@@ -145,6 +160,10 @@ type Usage = {
 
 type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number };
 
+// SIGKILL'den sonra çekirdeğin süreci toplaması milisaniyeler sürer; 5 sn
+// cömert bir üst sınır. Bu süre dolduysa kill GERÇEKTEN tutmamıştır.
+const KILL_GRACE_MS = 5_000;
+
 function totalTokens(u: Usage): number {
   return (u.input_tokens ?? 0) + (u.cached_input_tokens ?? 0) +
     (u.output_tokens ?? 0) + (u.reasoning_output_tokens ?? 0);
@@ -179,6 +198,11 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
   claims: number;
   raw: string;
   cap: Cap | null;
+  items: number;
+  turns: number;
+  claimsComplete: boolean;
+  killFailed: boolean;
+  leakedPid: number | null;
 }> {
   return new Promise((resolve) => {
     const args = [
@@ -197,12 +221,36 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     let usage: Usage | null = null;
     let claims = 0;
     let items = 0;
+    let turns = 0;
+    // Şemalı iddia kümesi EKSİKSİZ ayrıştırıldı mı. Bu bayrak `olculemez`
+    // hükmünün tek ölçütü: tavan türü değil ÇIKTININ TAMLIĞI belirler.
+    // Yalnız katı JSON.parse başarısı sayılır — regex'le "verdict" saymak
+    // yarım kesilmiş bir metinde de sayı üretir, yani tamlık kanıtı değildir.
+    let claimsComplete = false;
     let cap: Cap | null = null;
     // Süreç kapandıktan SONRA kill YASAK: PID'yi işletim sistemi geri
     // dönüştürmüş olabilir ve kill(-pid) alakasız bir grubu vurur. Gerçek yol:
     // close handler'ının içinde tampondaki son (yeni-satırsız) satır işleniyor
     // ve o satır tavanı aşabiliyor. Aşım yine raporlanır, yalnız kill atlanır.
     let closed = false;
+    let killedAt: number | null = null;
+    let graceTimer: NodeJS.Timeout | null = null;
+    let settled = false;
+
+    // Öldürme + EMNİYET ZAMANLAYICISI. İki kill denemesi de tutmazsa (izin
+    // sorunu, D durumunda takılı süreç) `close` HİÇ gelmez; paralel modda tek
+    // asılı işçi Promise.all'u kilitler ve 28 notluk koşum sonsuza kadar
+    // bekler. O yüzden kill'den sonra kısa bir süre beklenir, gelmezse sonuç
+    // satırı `kill_failed` + sızan PID ile yazılıp promise çözülür — koşum
+    // devam eder, temizlik el ile yapılabilsin diye PID kayda geçer.
+    function kill(): void {
+      if (closed || killedAt !== null) return; // kapandıysa PID geri dönüşümü riski (aşağıdaki not)
+      killedAt = Date.now();
+      killProcessGroup(child.pid);
+      const grace = setTimeout(() => finish(-1, { killFailed: true }), KILL_GRACE_MS);
+      grace.unref(); // süreç kapanışını bu zamanlayıcı geciktirmesin
+      graceTimer = grace;
+    }
 
     function checkCaps(): void {
       if (cap) return; // ilk aşım kazanır
@@ -211,7 +259,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       } else if (items > MAX_ITEMS) {
         cap = { kind: "items", limit: MAX_ITEMS, observed: items };
       } else return;
-      if (!closed) killProcessGroup(child.pid);
+      kill();
     }
 
     function handleLine(line: string): void {
@@ -219,7 +267,10 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       if (!s.startsWith("{")) return;
       try {
         const o = JSON.parse(s);
-        if (o.type === "turn.completed" && o.usage) usage = o.usage;
+        if (o.type === "turn.completed") {
+          turns++;
+          if (o.usage) usage = o.usage;
+        }
         if (o.type === "item.completed") {
           items++;
           // Son mesaj metin olarak geliyor; şemalı çıktı o metnin İÇİNDE
@@ -229,7 +280,10 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
           if (typeof txt === "string" && txt.includes("verdict")) {
             try {
               const parsed = JSON.parse(txt);
-              if (Array.isArray(parsed?.claims)) claims = Math.max(claims, parsed.claims.length);
+              if (Array.isArray(parsed?.claims)) {
+                claims = Math.max(claims, parsed.claims.length);
+                claimsComplete = true;
+              }
             } catch {
               const m = txt.match(/"verdict"/g);
               if (m) claims = Math.max(claims, m.length);
@@ -242,7 +296,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
 
     const timer = setTimeout(() => {
       if (!cap) cap = { kind: "time", limit: TIMEOUT_SEC, observed: Math.round((Date.now() - t0) / 1000) };
-      if (!closed) killProcessGroup(child.pid);
+      kill();
     }, TIMEOUT_SEC * 1000);
 
     child.stdout.setEncoding("utf8"); // çok baytlı karakter chunk sınırında bölünmesin
@@ -258,12 +312,26 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     // aracının o notu kaybetmesine değil, cap'li satır yazmasına ihtiyaç var.
     child.stdin.on("error", () => {});
     child.stdin.end(prompt);
-    function finish(rc: number): void {
+    function finish(rc: number, opts?: { killFailed?: boolean }): void {
+      if (settled) return; // emniyet zamanlayıcısı ile geç gelen close yarışabilir
+      settled = true;
       closed = true;
       clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
       if (pending) handleLine(pending);
-      (usage as Usage & { _items?: number } | null) && ((usage as any)._items = items);
-      resolve({ rc, usage, ms: Date.now() - t0, claims, raw: out, cap });
+      if (opts?.killFailed) {
+        // Süreç hâlâ yaşıyor ve borularımıza yazmaya devam edebilir; Node'un
+        // çıkışını engellememesi için event loop'tan çıkar.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+      }
+      resolve({
+        rc, usage, ms: Date.now() - t0, claims, raw: out, cap, items, turns,
+        claimsComplete,
+        killFailed: opts?.killFailed === true,
+        leakedPid: opts?.killFailed ? child.pid ?? null : null,
+      });
     }
     child.on("error", () => finish(-1));
     child.on("close", (rc) => finish(rc ?? -1));
@@ -291,14 +359,28 @@ async function one(note: string): Promise<void> {
     evidence = evidenceFor(verdicts);
   }
   const r = await runCodex(buildPrompt(note, body, evidence), schemaPath);
-  writeFileSync(`${outPath}.${note}.raw.jsonl`, r.raw);
+  // Ham akışın ADI hükme göre değişiyor: iddia çıkarımı yalnız `*.raw.jsonl`
+  // dosyalarını tarar, eksik çıktı `*.raw.incomplete.jsonl` olarak durur
+  // (bkz. dosya başındaki "EKSİK ÇIKTI SÖZLEŞMESİ"). Kanıt atılmıyor,
+  // yalnız skor hattının erişemeyeceği bir ada konuyor.
+  writeFileSync(`${outPath}.${note}.raw${r.claimsComplete ? "" : ".incomplete"}.jsonl`, r.raw);
   const u = r.usage ?? {};
   appendFileSync(outPath, JSON.stringify({
     note, lines, rc: r.rc, ms: r.ms, evidence_fed: WITH_EVIDENCE,
-    // Tavanla kesilen notun ölçümü YARIM: iddia listesi eksik olabilir, o
-    // yüzden not doğruluk hesabında `olculemez` sayılır (yanlış sayılmaz).
+    // ÖLÇÜT TAVAN TÜRÜ DEĞİL, ÇIKTININ TAMLIĞI. Token tavanı post-hoc
+    // ateşleniyor: şemalı iddia kümesi çoktan eksiksiz gelmiş olabilir. Öyle
+    // bir koşumu `olculemez` saymak TAM ölçülmüş bir notu çöpe atardı —
+    // maliyet aşımı raporlanır (`cap` yazılır) ama veri korunur.
     cap: r.cap,
-    olculemez: r.cap !== null,
+    olculemez: !r.claimsComplete,
+    claims_complete: r.claimsComplete,
+    // `--max-items` tahminini kalibre edecek veri: usage'dan BAĞIMSIZ
+    // sayaçlar, çünkü zaman kesmesinde `turn.completed` hiç gelmiyor ve
+    // usage null kalıyor.
+    items: r.items,
+    turns: r.turns,
+    kill_failed: r.killFailed,
+    leaked_pid: r.leakedPid,
     input_tokens: u.input_tokens ?? null,
     cached_input_tokens: u.cached_input_tokens ?? null,
     output_tokens: u.output_tokens ?? null,
@@ -310,7 +392,9 @@ async function one(note: string): Promise<void> {
     String(u.input_tokens ?? "-").padStart(8) + String(u.cached_input_tokens ?? "-").padStart(10) +
     String(u.output_tokens ?? "-").padStart(7) + String(u.reasoning_output_tokens ?? "-").padStart(7) +
     String(r.claims).padStart(7) + (r.rc === 0 ? "" : `  rc=${r.rc}`) +
-    (r.cap ? `  CAP ${r.cap.kind} ${r.cap.observed}/${r.cap.limit} → olculemez` : ""),
+    (r.cap ? `  CAP ${r.cap.kind} ${r.cap.observed}/${r.cap.limit}` : "") +
+    (r.claimsComplete ? "" : "  EKSİK ÇIKTI → olculemez") +
+    (r.killFailed ? `  KILL BAŞARISIZ (sızan pid ${r.leakedPid})` : ""),
   );
 }
 
