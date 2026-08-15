@@ -97,6 +97,11 @@ export function firstBalancedBlock(s: string): string | null {
  * ilk dengeli {…} bloğunu parse et.
  */
 export function parseClaimsCount(text: string): number | null {
+  return parseClaimsArray(text)?.length ?? null;
+}
+
+/** `parseClaimsCount`'un ham hâli: aynı kurtarma sırası, sayı yerine dizinin kendisi. */
+export function parseClaimsArray(text: string): unknown[] | null {
   const stripped = text.replace(/```(?:json)?/gi, "").trim();
   const tries = [stripped];
   const block = firstBalancedBlock(stripped);
@@ -104,7 +109,7 @@ export function parseClaimsCount(text: string): number | null {
   for (const t of tries) {
     try {
       const parsed = JSON.parse(t);
-      if (Array.isArray(parsed?.claims)) return parsed.claims.length;
+      if (Array.isArray(parsed?.claims)) return parsed.claims;
     } catch { /* sıradaki deneme */ }
   }
   return null;
@@ -375,6 +380,182 @@ export function validateOutPath(raw: string | undefined): OutPathCheck {
   return { ok: true, path: join(realDir, name) };
 }
 
+/*
+ * --- `dogustan-yanlis` sözleşmesi (M4.2) ---------------------------------
+ *
+ * ÖLÇÜM (14 Ağu, full28 koşumu + golden-v1): 39 yanlış alarmın 27'si
+ * `dogustan-yanlis`, ve hakemin verdiği 65 `dogustan-yanlis` hükmünün %41,5'i
+ * altın setin `gecerli` dediği bir iddianın üstüne düşüyor. Sebep şemanın değil
+ * istemin: "yazıldığı an da yanlıştı" iddiası notun NE ZAMAN yazıldığını
+ * gerektiriyor, istem ise bu bilgiyi hiç vermiyordu. Kanıt yükümlülüğü olmayan
+ * bir hüküm, belirsiz kalan her şeyin düştüğü kova oluyor.
+ *
+ * İKİ YOL VARDI, ÖLÇÜM SEÇTİ. (a) Hükmü tamamen KAPATMAK: 27 yanlış alarmın
+ * hepsi `curuk`a dönerdi — etiket dürüstleşir ama yanlış alarm SAYISI düşmez
+ * (ikisi de "yanlış" kümesinde, bkz. score.ts WRONG). (b) Yazılma zamanını
+ * BESLEMEK: altın setin 28 notunun 26'sı gövdesinde tarih taşıyor ve 27
+ * `dogustan-yanlis` yanlış alarmının 26'sı o notlarda. Yani (b) vakaların
+ * %96'sına dokunuyor, (a) yalnız 1'ine.
+ *
+ * Seçim ikisi birden: tarih ÇIKARILABİLİYORSA besle (hüküm kazanılabilir hâle
+ * gelsin), çıkarılamıyorsa hükmü KAPAT — hem istemde hem şemada hem
+ * ayrıştırıcıda. Ölçülemeyen bir hüküm, ulaşılamaz olmalı.
+ */
+
+export type AuthorshipBound = { iso: string; source: string };
+
+const TR_MONTHS: Record<string, number> = {
+  oca: 1, şub: 2, sub: 2, mar: 3, nis: 4, may: 5, haz: 6,
+  tem: 7, ağu: 8, agu: 8, eyl: 9, eki: 10, kas: 11, ara: 12,
+};
+
+const ISO_DATE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
+const TR_DATE = /(?<!\d)(\d{1,2})\s+(Oca|Şub|Sub|Mar|Nis|May|Haz|Tem|Ağu|Agu|Eyl|Eki|Kas|Ara)[a-zçğıöşü]*\s+(\d{4})/giu;
+
+const iso = (y: number, m: number, d: number): string =>
+  `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+/**
+ * Notun YAZILMA ZAMANI için bir ALT SINIR çıkarır: gövdede geçen EN YENİ tarih.
+ *
+ * Mantık: bir not, içinde andığı en yeni tarihten ÖNCE yazılmış olamaz. Yani
+ * gerçek yazım anı [bound, bugün] aralığında. Bu, tam tarihten zayıf ama
+ * `dogustan-yanlis` için YETERLİ bir kanıt zemini: iddia `bound`'da da yanlışsa
+ * ve o tarihten bu yana onu doğru kılan bir commit yoksa, gerçek yazım anı
+ * aralığın neresinde olursa olsun iddia yazıldığında yanlıştı.
+ *
+ * Hafıza notları git'te değil (`~/.context-police/golden/...`), yani `git log`
+ * yazarlık geçmişi vermiyor; dosya mtime ise kopyalamayla bozulur. Gövdedeki
+ * tarih tek ucuz kaynak. Ölçüldü: 28 notun 26'sında var.
+ *
+ * ÇIKTI KISITLI: yalnız normalize edilmiş `YYYY-MM-DD`. Gövde GÜVENİLMEYEN
+ * metin ve bu değer istemin TALİMAT alanına giriyor — regex'in ürettiğinden
+ * başka hiçbir şey oraya geçemesin diye ham eşleşme değil, yeniden kurulmuş
+ * tarih dizgesi yazılıyor.
+ */
+export function extractAuthorshipBound(body: string): AuthorshipBound | null {
+  let best: string | null = null;
+  const take = (s: string): void => { if (best === null || s > best) best = s; };
+  for (const m of body.matchAll(ISO_DATE)) {
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    if (y < 2000 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) continue;
+    take(iso(y, mo, d));
+  }
+  for (const m of body.matchAll(TR_DATE)) {
+    const d = Number(m[1]), y = Number(m[3]);
+    const mo = TR_MONTHS[m[2]!.toLowerCase()];
+    if (mo === undefined || y < 2000 || y > 2100 || d < 1 || d > 31) continue;
+    take(iso(y, mo, d));
+  }
+  return best === null ? null : { iso: best, source: "notun gövdesindeki en yeni tarih" };
+}
+
+export const BORN_WRONG = "dogustan-yanlis";
+export const VERDICTS_WITH_HISTORY = ["gecerli", "curuk", BORN_WRONG, "olculemez"] as const;
+export const VERDICTS_WITHOUT_HISTORY = ["gecerli", "curuk", "olculemez"] as const;
+
+/**
+ * Hakemin çıktı şeması. `dogustan-yanlis` yalnız yazılma zamanı BESLENDİYSE
+ * enum'da: şema kapısı istemle aynı şeyi söylemeli, yoksa model istemi
+ * yorumlar, şemayı yorumlamaz.
+ */
+export function adjudicatorSchema(opts: { bornWrongAvailable: boolean }): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["claims"],
+    properties: {
+      claims: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "line_start", "line_end", "verdict", "evidence"],
+          properties: {
+            text: { type: "string" },
+            line_start: { type: "integer" },
+            line_end: { type: "integer" },
+            verdict: {
+              enum: [...(opts.bornWrongAvailable ? VERDICTS_WITH_HISTORY : VERDICTS_WITHOUT_HISTORY)],
+            },
+            evidence: { type: "string" },
+          },
+        },
+      },
+    },
+  };
+}
+
+export const GATE_MARK = "[kapı: dogustan-yanlis -> curuk, notun yazılma zamanı ölçülemedi]";
+
+/**
+ * Şema kapısının AYRIŞTIRICI tarafı.
+ *
+ * Neden şema yetmiyor: `--output-schema` bir SÖZLEŞME, garanti değil — kurtarma
+ * katmanı (çit soyma, dengeli blok) şemadan geçmemiş metni de ayrıştırabiliyor
+ * ve akış kesildiğinde kısmi çıktı geliyor. Beslenmemiş bir yazılma zamanıyla
+ * verilmiş `dogustan-yanlis` KAZANILAMAZ bir hüküm olduğu için burada `curuk`a
+ * düşürülüyor — silinmiyor: iddia korunuyor, yalnız kanıtlanabilir olana
+ * indirgeniyor ve düşürüldüğü kanıta İZ olarak yazılıyor (§3.2, hiçbir şey
+ * silinmez; bir kararın geri alınabilmesi için görünür olması gerekir).
+ */
+export function gateClaims(claims: unknown[], bornWrongAvailable: boolean): unknown[] {
+  if (bornWrongAvailable) return claims;
+  return claims.map((c) => {
+    if (typeof c !== "object" || c === null) return c;
+    const rec = c as Record<string, unknown>;
+    if (rec.verdict !== BORN_WRONG) return c;
+    const ev = typeof rec.evidence === "string" ? rec.evidence : "";
+    return { ...rec, verdict: "curuk", evidence: ev ? `${ev} ${GATE_MARK}` : GATE_MARK };
+  });
+}
+
+/** Ayrıştırma + kapı tek adımda; çağıran ikisini ayrı ayrı hatırlamak zorunda kalmasın. */
+export function extractGatedClaims(text: string, bornWrongAvailable: boolean): unknown[] | null {
+  const claims = parseClaimsArray(text);
+  return claims === null ? null : gateClaims(claims, bornWrongAvailable);
+}
+
+/**
+ * İstemin `dogustan-yanlis` bölümü: sınır beslendiyse KAZANMA ölçütü, yoksa
+ * KAPATMA. Aynı iki hâl şemada da var (adjudicatorSchema) ve ayrıştırıcıda da
+ * (gateClaims) — üçü ıraksarsa model istemi değil şemayı, ayrıştırıcı ikisini
+ * birden yorumlar.
+ */
+function bornWrongSection(bound: AuthorshipBound | null): { listSuffix: string; rule: string } {
+  if (!bound) {
+    return {
+      listSuffix: "  — BU NOT İÇİN KAPALI, aşağıya bak",
+      rule: `
+Bu notun yazılma zamanı ölçülemedi (gövdesinde tarih yok). O yüzden "o zaman"
+ne olduğu KANITLANAMAZ ve \`dogustan-yanlis\` bu koşumda KULLANILAMAZ — çıktı
+şeması da onu kabul etmiyor. Bugün yanlış olan bir iddia için en fazla
+\`curuk\` diyebilirsin. Bu bir kısıtlama değil, kanıt yükümlülüğü: kanıtı
+olmayan hüküm verilmez.`,
+    };
+  }
+  return {
+    listSuffix: "",
+    rule: `
+Bu not \`${bound.iso}\` tarihinden ÖNCE yazılmış olamaz (${bound.source}).
+Gerçek yazım anını bilmiyorsun; bildiğin şu: \`${bound.iso}\` ile bugün arasında.
+\`dogustan-yanlis\` demek için gereken kanıt bu yüzden ŞUDUR ve başkası değil:
+
+  1. İddianın \`${bound.iso}\` tarihindeki kodda da YANLIŞ olduğunu göster
+     (\`git log --until=${bound.iso}\` ile o tarihteki commit'i bul, ardından
+     \`git show <sha>:<yol>\` / \`git log -S\` ile o hâli oku), VE
+  2. \`${bound.iso}\` ile bu commit arasında iddiayı doğru kılıp sonra bozan
+     bir değişiklik OLMADIĞINI göster.
+
+İkisi birlikte sağlanınca gerçek yazım anı aralığın neresinde olursa olsun
+iddia yazıldığında yanlıştı — hüküm kazanılmıştır. Kanıt \`evidence\` alanına
+sha ve komutla yazılır.
+İddia \`${bound.iso}\` tarihinde DOĞRUYSA hüküm \`curuk\`tır.
+O tarihteki hâli ölçemiyorsan hüküm \`dogustan-yanlis\` DEĞİLDİR; bugün yanlışsa
+\`curuk\`, hiç ölçemiyorsan \`olculemez\`.`,
+  };
+}
+
 /**
  * Hakem istemini kurar.
  *
@@ -395,6 +576,7 @@ export function buildPrompt(note: string, body: string, evidence: string | null)
   const ev = evidence
     ? `\n${fenceUntrusted("ÖNCEDEN ÖLÇÜLMÜŞ KANIT (mekanik katman, aynı commit)", evidence)}\n\nBu kanıt zaten ölçüldü; yeniden ölçme. Yalnız kanıtın YETMEDİĞİ yerlerde depoya bak.\n`
     : "";
+  const bornWrong = bornWrongSection(extractAuthorshipBound(body));
   return `Bir yazılım deposunun kök dizinindesin. Depo \`b4065f1\` commit'ine sabitlenmiş.
 
 Aşağıda o depoya ait bir hafıza notu var. Görevin bu notu OKUMAK değil, ÖLÇMEK:
@@ -409,17 +591,41 @@ olduğunu söylüyorsa bak; olmadığını söylüyorsa yine bak.
 
 Her iddia için hüküm:
 - gecerli          : bu commit'te doğru
-- curuk            : yazıldığında doğruydu, bu commit'te yanlış
-- dogustan-yanlis  : yazıldığı an da yanlıştı (kod hiç öyle olmamış)
+- curuk            : O ZAMAN doğruydu, ŞİMDİ yanlış
+- dogustan-yanlis  : O ZAMAN da yanlıştı${bornWrong.listSuffix}
 - olculemez        : depoya karşı doğrulanamaz (dış servis, ağ, kullanıcı
                      beyanı, tarihsel anlatı). Bu ONURLU bir cevap —
                      ölçemediğin şeye hüküm verme.
 
+\`curuk\` ile \`dogustan-yanlis\` arasındaki fark TEK BİR ŞEY: "o zaman"ın ne
+olduğu. İkisi de bugün yanlış; ayrım notun yazıldığı ANDAKİ kodda.
+${bornWrong.rule}
+
 SAYIM İDDİALARINI ATLAMA. Not bir sayı veriyorsa ("X.py 1682 satır",
 "45 kayıtlı araç var", "3 test geçiyor", "8 sağlayıcı yolu") o sayıyı KOŞTUR
-ve karşılaştır: \`wc -l\`, \`git grep -c\`, \`git ls-files | wc -l\`. Ölçülen
-kaçtı, notta kaç yazıyor, ikisini de evidence'a yaz. (Ölçüldü: hakemin
-kaçırdığı iddiaların hepsi bu sınıftandı.)
+ve karşılaştır: \`wc -l\`, \`git grep -c\`, \`git ls-files | wc -l\`.
+Sayım iddiasının kanıtı ZORUNLU olarak şu üçünü taşır — komut, ölçülen sayı,
+nottaki sayı — ve şu biçimde yazılır:
+  \`komut: <koştuğun komut> | olculen: <sayı> | notta: <sayı>\`
+Depoda koşturulabilen bir sayım iddiası \`olculemez\` DEĞİLDİR; koştur.
+(Ölçüldü: ilk doğruluk ölçümünde hakemin kaçırdığı hedef iddiaların HEPSİ bu
+sınıftandı — sayı hiç ölçülmemiş, iddia gözden geçirilip geçilmişti.)
+
+SIR SINIRI. Bir sırrın VARLIĞI ölçülür, DEĞERİ asla.
+Erişme, okuma, yazdırma, kopyalama ya da üstünde akıl yürütme: işletim sistemi
+anahtar zinciri (\`security find-generic-password\` ve \`security\` ailesinin
+tümü, Keychain, \`secret-tool\`, \`wincred\` ve muadilleri), \`.env\` ve
+\`.env.*\` dosyalarının İÇERİĞİ, \`~/.ssh\` altındaki anahtarlar, jeton ve
+kimlik bilgisi dosyaları (\`*.pem\`, \`*.key\`, \`id_*\`, \`credentials\`,
+\`.netrc\`, \`.npmrc\`, \`*token*\`). Onay diyaloğu açtıracak bir sır erişimi
+isteme; bu görevin parçası değil.
+Ölçebileceğin: sırrın VAR olduğu ve NEREDE durduğu — dosya var mı (\`ls\`),
+anahtar adı ya da yol kodda geçiyor mu (\`git grep\`), kod hangi kaynaktan
+okuyor. Varlık ve konum kanıt olarak yeter.
+Ancak bir sırrın DEĞERİ okunarak karara bağlanabilecek bir iddia
+\`olculemez\`'dir. Öyle yaz ve geç — bu, dürüstçe durabilmen için var.
+(Gerçek vaka, 13 Ağu: kimlik bilgisi saklamayla ilgili bir notu ölçen hakem
+anahtar zinciri erişimi istedi ve operatör "her zaman izin ver" dedi.)
 
 Notun HER doğrulanabilir ifadesini kapsa — yalnız dikkat çekenleri değil.
 

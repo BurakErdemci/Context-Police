@@ -59,7 +59,7 @@ import { evidenceFor } from "./evidence-block.ts";
 import {
   type Usage, addUsage, totalTokens,
   decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
-  buildPrompt,
+  buildPrompt, adjudicatorSchema, extractAuthorshipBound,
 } from "./adjudicate-lib.ts";
 
 // --evidence: mekanik katmanın ZATEN ölçtüğü çapa kanıtını isteme koyar.
@@ -124,30 +124,10 @@ if (!outCheck.ok) {
 const notesDir: string = notesDirArg;
 const outPath: string = outCheck.path;
 
-// Çıktı şeması: hakem iddia düzeyinde hüküm verir. Altın setin şemasıyla
-// aynı hüküm kümesi — yoksa doğruluk ölçülemez.
-const SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["claims"],
-  properties: {
-    claims: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["text", "line_start", "line_end", "verdict", "evidence"],
-        properties: {
-          text: { type: "string" },
-          line_start: { type: "integer" },
-          line_end: { type: "integer" },
-          verdict: { enum: ["gecerli", "curuk", "dogustan-yanlis", "olculemez"] },
-          evidence: { type: "string" },
-        },
-      },
-    },
-  },
-};
+// Çıktı şeması hakemin iddia düzeyindeki hükmünü kısıtlar; `adjudicate-lib`de,
+// çünkü `dogustan-yanlis`in ne zaman kullanılabilir olduğu bir SÖZLEŞME kararı
+// (bkz. M4.2 bloğu) ve test edilebilir bir yerde durmalı. Not başına iki
+// biçimden biri seçiliyor: notun yazılma zamanı ölçülebiliyorsa hüküm açık.
 
 type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number };
 
@@ -550,8 +530,13 @@ const tmp = mkdtempSync(join(tmpdir(), "adj-"));
 // cleanupNow bu dizini siler, normal kapanışta aşağıdaki `finally` siler.
 liveTempDirs.add(tmp);
 installSignalHandlers();
-const schemaPath = join(tmp, "schema.json");
-writeFileSync(schemaPath, JSON.stringify(SCHEMA));
+// İki şema dosyası önden yazılıyor; not başına biri seçiliyor (bkz. one()).
+const schemaPaths = {
+  open: join(tmp, "schema-born-wrong-open.json"),
+  gated: join(tmp, "schema-born-wrong-gated.json"),
+};
+writeFileSync(schemaPaths.open, JSON.stringify(adjudicatorSchema({ bornWrongAvailable: true })));
+writeFileSync(schemaPaths.gated, JSON.stringify(adjudicatorSchema({ bornWrongAvailable: false })));
 
 writeFileSync(outPath, "");
 // Eksik hamların yeri: çıktı dosyasının dizini altında `incomplete/`.
@@ -574,7 +559,14 @@ async function one(note: string): Promise<void> {
     const verdicts = await checkAnchors(gitCtx!, anchors, new Date(0).toISOString());
     evidence = evidenceFor(verdicts);
   }
-  const r = await runCodex(buildPrompt(note, body, evidence), schemaPath);
+  // Şema ile istem AYNI kaynaktan karar alıyor: notun yazılma zamanı gövdeden
+  // çıkarılabiliyorsa `dogustan-yanlis` her ikisinde de açık, çıkarılamıyorsa
+  // her ikisinde de kapalı.
+  const bornWrongAvailable = extractAuthorshipBound(body) !== null;
+  const r = await runCodex(
+    buildPrompt(note, body, evidence),
+    bornWrongAvailable ? schemaPaths.open : schemaPaths.gated,
+  );
   // Ham akışın YERİ hükme göre değişiyor: tam çıktılar çıktı dosyasının
   // yanında, eksikler AYRI BİR ALT DİZİNDE (`incomplete/`). Ad eki yerine
   // dizin, çünkü ayrım YAPISAL olmalı: `*.raw*` gibi gevşek bir glob bile
