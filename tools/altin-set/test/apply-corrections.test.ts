@@ -88,7 +88,7 @@ test("anchor-duzelt satır aralığını değiştirir, hükme dokunmaz", () => {
     [{
       islem: "anchor-duzelt", claim_id: "a#1", note: "a",
       old_line_start: 40, old_line_end: 41, new_line_start: 38, new_line_end: 39,
-      verdict: "gecerli", reason: "gerekçe", evidence: "yeni kanit", method: "yeni yontem",
+      text: "iddia 1", verdict: "gecerli", reason: "gerekçe", evidence: "yeni kanit", method: "yeni yontem",
     }],
   );
   assert.equal(r.rc, 0);
@@ -104,7 +104,7 @@ test("anchor-duzelt: mevcut satırlar old_* ile uyuşmazsa ölümcül ve dosya y
     [{
       islem: "anchor-duzelt", claim_id: "a#1", note: "a",
       old_line_start: 40, old_line_end: 41, new_line_start: 38, new_line_end: 39,
-      verdict: "gecerli",
+      text: "iddia 1", verdict: "gecerli",
     }],
   );
   assert.equal(r.rc, 1);
@@ -118,7 +118,7 @@ test("anchor-duzelt: mevcut hüküm önerinin verdict'i ile uyuşmazsa ölümcü
     [{
       islem: "anchor-duzelt", claim_id: "a#1", note: "a",
       old_line_start: 40, old_line_end: 41, new_line_start: 38, new_line_end: 39,
-      verdict: "gecerli",
+      text: "iddia 1", verdict: "gecerli",
     }],
   );
   assert.equal(r.rc, 1);
@@ -239,7 +239,7 @@ test("anchor-duzelt: öneri note'u kaydınkiyle uyuşmazsa ölümcül", () => {
     [{
       islem: "anchor-duzelt", claim_id: "a#1", note: "b",
       old_line_start: 40, old_line_end: 41, new_line_start: 38, new_line_end: 39,
-      verdict: "gecerli",
+      text: "iddia 1", verdict: "gecerli",
     }],
   );
   assert.equal(r.rc, 1);
@@ -383,6 +383,154 @@ test("tüm sorunlar tek koşumda raporlanır", () => {
   assert.match(r.stderr, /altın sette yok/);
   assert.match(r.stderr, /bilinmeyen islem/);
   assert.match(r.stderr, /zaten etiketli/);
+});
+
+// KUSUR I-a (15 Ağu 2026 probe'u). `anchor-duzelt` dalı `text`'i hiç sınamıyordu;
+// kardeş dal `etiket-degistir` sınıyordu. Kaymış bir `claim_id`, komşusuyla aynı
+// not + aynı satır aralığı + aynı hükme denk geldiğinde ayırt edici TEK alan
+// `text` kalıyor — o sınanmayınca düzeltme yanlış kayda hata basmadan uygulandı.
+
+test("anchor-duzelt: komşuya kaymış claim_id reddedilir — ayırt eden tek alan text", () => {
+  // İki iddia; not, satırlar ve hüküm birebir aynı, yalnız metinleri farklı.
+  const golden = [
+    claim("a", 1, { line_start: 10, line_end: 12, text: "AAA", verdict: "curuk" }),
+    claim("a", 2, { line_start: 10, line_end: 12, text: "BBB", verdict: "curuk" }),
+  ];
+  // Öneri AAA'yı (a#1) anlatıyor ama claim_id'si a#2'ye kaymış.
+  const r = runAndClean(golden, [{
+    islem: "anchor-duzelt", claim_id: "a#2", note: "a",
+    old_line_start: 10, old_line_end: 12, new_line_start: 20, new_line_end: 22,
+    text: "AAA", verdict: "curuk",
+  }]);
+  assert.equal(r.rc, 1);
+  assert.equal(r.out, null);
+  assert.match(r.stderr, /'text' uyuşmuyor — altın sette "BBB", öneri "AAA" bekliyor/);
+});
+
+test("anchor-duzelt: aynı öneri doğru claim_id ile uygulanır — negatif kontrol", () => {
+  // Yukarıdaki testin ikizi. Bu geçmezse yukarıdaki red, çalışan bir kontrolü
+  // değil kırık bir düzeneği ölçüyor olurdu.
+  const golden = [
+    claim("a", 1, { line_start: 10, line_end: 12, text: "AAA", verdict: "curuk" }),
+    claim("a", 2, { line_start: 10, line_end: 12, text: "BBB", verdict: "curuk" }),
+  ];
+  const r = runAndClean(golden, [{
+    islem: "anchor-duzelt", claim_id: "a#1", note: "a",
+    old_line_start: 10, old_line_end: 12, new_line_start: 20, new_line_end: 22,
+    text: "AAA", verdict: "curuk",
+  }]);
+  assert.equal(r.rc, 0);
+  assert.deepEqual([row(r, 0).line_start, row(r, 0).line_end], [20, 22], "a#1 taşınmalı");
+  assert.deepEqual([row(r, 1).line_start, row(r, 1).line_end], [10, 12], "a#2 yerinde kalmalı");
+});
+
+test("anchor-duzelt: text alanı hiç yoksa ölümcül — boş karşılaştırma kabul edilmez", () => {
+  // `text` yokken sessizce geçilirse karşılaştırma `undefined === undefined`
+  // olur ve hiçbir şey ölçmez; alanın VARLIĞI ayrıca sınanıyor.
+  const r = runAndClean(
+    [claim("a", 1, { line_start: 40, line_end: 41 })],
+    [{
+      islem: "anchor-duzelt", claim_id: "a#1", note: "a",
+      old_line_start: 40, old_line_end: 41, new_line_start: 38, new_line_end: 39,
+      verdict: "gecerli",
+    }],
+  );
+  assert.equal(r.rc, 1);
+  assert.equal(r.out, null);
+  assert.match(r.stderr, /'text' zorunlu/);
+});
+
+// KUSUR I-b. `new_verdict` hiç doğrulanmıyordu: alan yoksa `undefined` atanıyor,
+// `JSON.stringify` anahtarı DÜŞÜRÜYOR ve `score.ts` iddiayı hiç saymıyor
+// (`WRONG.has(undefined)` false). Hedef altın setten buharlaşıyor, sonraki her
+// ölçümün paydası sessizce değişiyor. Bu yüzden testler yalnız rc'ye değil
+// ANAHTARIN VARLIĞINA da bakıyor.
+
+test("etiket-degistir: new_verdict yoksa ölümcül — verdict anahtarı düşmez", () => {
+  const r = runAndClean(
+    [claim("a", 1)],
+    [{
+      islem: "etiket-degistir", claim_id: "a#1", note: "a", line_start: 1, line_end: 1,
+      text: "iddia 1", old_verdict: "gecerli",
+    }],
+  );
+  assert.equal(r.rc, 1);
+  assert.equal(r.out, null);
+  assert.match(r.stderr, /'new_verdict' boş olmayan string olmalı, undefined geldi/);
+});
+
+test("etiket-degistir: new_verdict boş string ya da string değilse ölümcül", () => {
+  for (const bad of ["", null, 3]) {
+    const r = runAndClean(
+      [claim("a", 1)],
+      [{
+        islem: "etiket-degistir", claim_id: "a#1", note: "a", line_start: 1, line_end: 1,
+        text: "iddia 1", old_verdict: "gecerli", new_verdict: bad,
+      }],
+    );
+    assert.equal(r.rc, 1, `new_verdict=${JSON.stringify(bad)} reddedilmeli`);
+    assert.equal(r.out, null);
+    assert.match(r.stderr, /'new_verdict' boş olmayan string olmalı/);
+  }
+});
+
+test("ekle: new_verdict yoksa ölümcül — sentezlenen kayıt verdict'siz doğmaz", () => {
+  const r = runAndClean(
+    [claim("a", 1)],
+    [{ islem: "ekle", note: "a", line_start: 9, line_end: 9, text: "yeni", old_verdict: null }],
+  );
+  assert.equal(r.rc, 1);
+  assert.equal(r.out, null);
+  assert.match(r.stderr, /'new_verdict' boş olmayan string olmalı/);
+});
+
+test("ekle: line_start/line_end number değilse ölümcül", () => {
+  const r = runAndClean(
+    [claim("a", 1)],
+    [{ islem: "ekle", note: "a", line_start: "9", line_end: 9, text: "yeni", old_verdict: null, new_verdict: "curuk" }],
+  );
+  assert.equal(r.rc, 1);
+  assert.equal(r.out, null);
+  assert.match(r.stderr, /'line_start'\/'line_end' number olmalı/);
+});
+
+test("ekle: text yoksa ya da boşsa ölümcül", () => {
+  for (const bad of [undefined, ""]) {
+    const r = runAndClean(
+      [claim("a", 1)],
+      [{ islem: "ekle", note: "a", line_start: 9, line_end: 9, text: bad, old_verdict: null, new_verdict: "curuk" }],
+    );
+    assert.equal(r.rc, 1, `text=${JSON.stringify(bad)} reddedilmeli`);
+    assert.equal(r.out, null);
+    assert.match(r.stderr, /'text' boş olmayan string olmalı/);
+  }
+});
+
+// KUSUR J. Kaynak dosyada `identity()` içinde üç HAM NUL baytı vardı; git dosyayı
+// İKİLİ sayıyor, `git show` gövdesi "Binary files differ" diyor ve altın seti
+// yeniden yazan aracın satır düzeyi diff'i HİÇ olmuyordu. Ayıraç `\0` KAÇIŞ
+// dizisiyle yazılınca davranış aynı kalıyor, dosya metin oluyor.
+test("kaynak dosyada ham NUL baytı yok — git'te ikili görünmemeli", () => {
+  const bytes = readFileSync(TOOL);
+  const nul = bytes.filter((b) => b === 0).length;
+  assert.equal(nul, 0, `${nul} ham NUL baytı var; \\0 kaçışı kullanılmalı`);
+});
+
+test("kimlik ayıracı hâlâ NUL: farklı alan bölünmeleri çakışmaz", () => {
+  // `identity()` alanları NUL ile birleştiriyor. J düzeltmesi ham baytı `\0`
+  // KAÇIŞIYLA değiştirdi; ayıraç sıradan bir karaktere (örn. boşluk) çevrilerek
+  // "düzeltilirse" alan sınırı kaybolur. Aşağıdaki iki kayıt boşluk ayıraçla
+  // AYNI kimliği verirdi ("a 1 2 3 b"), NUL ile vermiyor — ikisi de kabul
+  // edilmeli, yoksa ikincisi "zaten etiketli" diye yanlış reddedilir.
+  const r = runAndClean(
+    [claim("a", 1)],
+    [
+      { islem: "ekle", note: "a 1", line_start: 2, line_end: 3, text: "b", old_verdict: null, new_verdict: "curuk" },
+      { islem: "ekle", note: "a", line_start: 1, line_end: 2, text: "3 b", old_verdict: null, new_verdict: "curuk" },
+    ],
+  );
+  assert.equal(r.rc, 0, r.stderr);
+  assert.equal(r.out!.length, 3);
 });
 
 test("v1 kayıtları özgün sırasında ve dokunulmadan geçer", () => {
