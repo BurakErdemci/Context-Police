@@ -157,24 +157,18 @@ export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): 
  * Tavan gerçek maksimumun ~2,4 katı — meşru hiçbir not bugün kırpılmıyor, ama
  * maliyet sınırlı kalıyor.
  *
- * Bu bir REGEX çaresi DEĞİL ve KALINTI BİR MALİYET BIRAKIYOR — sayı burada
- * dursun ki M4 kararı ölçüyle verilsin. `PATH_RE`'nin maliyeti dosya boyutuyla
- * değil tek kesintisiz `[\w.-]` koşusunun uzunluğuyla KARESEL. Ölçüldü
- * (12 Ağu 2026, node 24.10 / macOS): 4 KiB tek koşu 15,7 ms · 8 KiB 59,3 ms ·
- * 16 KiB 242 ms · 32 KiB 1.016 ms — her katlamada tam 4x. Ekstrapolasyon
- * 256 KiB için ~65 sn, ve bu doğrulandı (kırpma testinin patolojik ilk
- * sürümü 64,3 sn sürdü).
+ * WHY THE BOUND STAYS, now that the regex no longer needs it (M4.6, 15 Aug 2026).
+ * It used to be doing two jobs; the second one is gone. `PATH_RE` was quadratic in
+ * the length of a single unbroken `[\w.-]` run, so this bound was also the only
+ * thing keeping that cost finite (~33 s CPU at the bound, measured). The
+ * lookbehind on `PATH_RE` linearised it — 256 KiB run: 32.722 ms -> 0,89 ms, and
+ * it now stays linear far past the bound (64 MiB run: 216 ms). So the ceiling is
+ * NOT a regex remedy any more.
  *
- * Yani tavanın yaptığı şey SINIRSIZ maliyeti SINIRLI ama hâlâ büyük bir
- * maliyete çevirmek: tek bir patolojik not en kötü ihtimalle ~65 sn CPU yakar
- * (öncesinde 100 MB'lık bir dosya için üst sınır yoktu). Gerçek korpus buradan
- * çok uzak: 131 dosyanın TOPLAMI 7,1 ms, en uzun koşu 109 karakter.
- *
- * Tavanı DAHA DA düşürmek çare değil (128 KiB hâlâ ~16 sn) ve gerçek maksimuma
- * (109 KB) yaklaşarak meşru notu kırpma riskini doğurur. Asıl çare
- * doğrusallaştıran lookbehind (`(?<![\w.\-/~])`, ölçüldü: 18.180 ms → 0,63 ms),
- * ama o çapa ÇIKTISINI değiştiriyor (99 gerçek dosyanın 1'inde fark) ve altın
- * sette yeniden ölçüm istiyor → M4'e ERTELENDİ.
+ * The first job remains and is the reason it is not removed: the audit that
+ * created it was about STORAGE, not CPU — an unbounded .md is written to the
+ * store verbatim, and nothing in this store is ever deleted (spec §3.2), so one
+ * pathological file is permanent. That argument is independent of any regex.
  */
 export const MAX_NOTE_CHARS = 256 * 1024;
 
