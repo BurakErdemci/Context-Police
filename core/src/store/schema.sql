@@ -147,12 +147,25 @@ CREATE INDEX IF NOT EXISTS idx_findings_project_status ON findings(project_id, s
 -- proje başına en çok 3, ve tablo düşürmek geri dönüşü olmayan bir göç.
 -- Sıfır kazanç için gerçek bir risk — aynı gerekçe `findings.last_classified_at`
 -- sütunu için de yazılı (db.ts).
+-- `first_seen_seq` (M4.5): adayın sıraya GİRDİĞİ koşum. Damga 0 ("hiç
+-- seçilmemiş") eskiden MUTLAK öncelik taşıyordu ve bir yüzeye her koşum
+-- rezervinden çok taze aday girdiğinde o yüzeyin ölçülmüş adayları süresiz
+-- bekliyordu — açlık sınıfının altıncı biçimi. Taze adayın da bir yaşı olunca
+-- öncelik "hiç ölçülmemiş mi"den "ne zamandır bekliyor"a geçiyor.
+-- Bu yüzden satır artık SEÇİLEN için değil GÖRÜLEN her aday için yazılıyor
+-- (selected_seq = 0: görüldü, hiç ölçülmedi).
+--
+-- Var olan depoda sütun ALTER ile ekleniyor (db.ts: migrateClassifyStamps);
+-- `CREATE TABLE IF NOT EXISTS` var olan tabloya sütun EKLEMEZ (CLAUDE.md §7).
+-- Eski satırlarda 0 kalır: seçim damgası zaten dolu olduğu için öncelik ondan
+-- okunur, uydurulmuş bir ilk-görülme hiç olmayandan kötü olurdu.
 CREATE TABLE IF NOT EXISTS classify_stamps (
-  project_id   INTEGER NOT NULL REFERENCES projects(id),
-  kind         TEXT NOT NULL,
-  a_id         INTEGER NOT NULL,
-  b_id         INTEGER NOT NULL,
-  selected_seq INTEGER NOT NULL,
+  project_id     INTEGER NOT NULL REFERENCES projects(id),
+  kind           TEXT NOT NULL,
+  a_id           INTEGER NOT NULL,
+  b_id           INTEGER NOT NULL,
+  selected_seq   INTEGER NOT NULL,
+  first_seen_seq INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, kind, a_id, b_id)
 );
 

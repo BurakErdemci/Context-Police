@@ -22,15 +22,27 @@ export const MAX_CLASSIFY_ITEMS = 20; // koşum başına; taşan sayı raporlan�
  * saha örneği verdiği iki yüzey (not-içi çelişki, description ↔ gövde) sınıflamaya
  * hiç girmedi ve onaylanan çelişki 0 çıktı. Sayılar: cross en çok aday üreten
  * yüzey olduğu için en büyük payı alıyor, ama diğer ikisi artık garantili.
+ *
+ * `coverage` (kapsama rotasyonu, signals/coverage.ts) TAVANI 4: bütçenin en çok
+ * beşte biri. Toplam artık 24 > 20, yani bütçeye SIĞMIYOR — bilerek. Üç çelişki
+ * yüzeyinin ölçülmüş payları (8/6/6) olduğu gibi duruyor; rotasyon onların
+ * tabanını KÜÇÜLTMÜYOR, yalnız kendi tavanına kadar yaşlılık sırasında
+ * yarışıyor. "Hareket önceliği korur" bunun karşılığı: üç çelişki yüzeyi de
+ * doluyken rotasyon REZERVASYON turunda 4'ten fazlasını alamaz, yani bütçenin
+ * 16'sı her koşum çelişki tarafında kalır. Rotasyonun 4'ü aşabildiği tek yol
+ * ARTIK turu — çelişki adaylarının istemediği, aksi hâlde boşa gidecek slotlar.
+ * Ölçüldü: üç yüzey de doymuşken kapsama kapsaması TAM ⌈N/4⌉ koşum
+ * (test/m4-5-coverage-rotation.test.ts, 1–100 aday).
  */
-export const CLASSIFY_SURFACE_QUOTA: Record<Candidate["kind"], number> = { cross: 8, intra: 6, frontmatter: 6 };
+export const CLASSIFY_SURFACE_QUOTA: Record<Candidate["kind"], number> =
+  { cross: 8, intra: 6, frontmatter: 6, coverage: 4 };
 
 /**
  * Kotası TANIMLI yüzeylerin kümesi. Sıra bir öncelik DEĞİL (öncelik damga +
  * kimlik); yalnız rezervasyon turunun yüzeyleri deterministik bir düzende
  * gezmesini ve `parseCandidateIdentity`nin geçerli yüzeyi tanımasını sağlıyor.
  */
-const SURFACE_ORDER: readonly Candidate["kind"][] = ["cross", "intra", "frontmatter"];
+const SURFACE_ORDER: readonly Candidate["kind"][] = ["cross", "intra", "frontmatter", "coverage"];
 
 /**
  * `bId` olmayan (intra/frontmatter) adayın kimlik kodlamasındaki ikinci tarafı.
@@ -69,7 +81,10 @@ export function parseCandidateIdentity(
 
 /**
  * Aday kimliği → o adayın EN SON SEÇİLDİĞİ koşumun sıra numarası. Anahtarı
- * olmayan aday hiç seçilmemiştir (= en eski, mutlak öncelik).
+ * olmayan aday hiç seçilmemiştir; önceliğini artık İLK GÖRÜLDÜĞÜ koşum belirler
+ * (mutlak öncelik M4.5'te kaldırıldı — `CandidateSelection.nextSeen`).
+ * Aynı tip ilk-görülme haritası için de kullanılıyor: iki harita da
+ * "kimlik → koşum numarası".
  *
  * Neden saat değil sayaç: damga koşum başına bir artan tamsayı, yani sıralama
  * deterministik. Saatle aynı milisaniyede biten iki koşum ayırt edilemezdi ve
@@ -77,13 +92,33 @@ export function parseCandidateIdentity(
  */
 export type CandidateStamps = Readonly<Record<string, number>>;
 
-/** Seçim + bir sonraki koşumun damga haritası. */
+/** Seçim + bir sonraki koşumun damga haritaları. */
 export interface CandidateSelection {
   taken: Candidate[];
   /** Girdi haritasının, bu koşumda seçilenlerin damgası `stamp` yapılmış hâli. */
   next: Record<string, number>;
+  /**
+   * "Bu adayı İLK KEZ hangi koşumda gördük" haritası. Bu koşumda ilk kez görülen
+   * her aday `stamp` alır; var olan giriş asla değişmez.
+   *
+   * Neden ayrı bir harita (yüzey İÇİ sel, altıncı açlık biçimi): damga 0 "hiç
+   * seçilmemiş" demekti ve MUTLAK öncelik taşıyordu, yani bir yüzeye her koşum
+   * rezervinden çok TAZE aday girdiğinde o yüzeyin daha önce ölçülmüş adayları
+   * süresiz bekliyordu. İlk-görülme, taze adaya da bir YAŞ verir: sıraya
+   * girdiği anın numarası. Böylece öncelik "hiç ölçülmemiş mi" sorusundan
+   * "ne zamandır bekliyor" sorusuna geçiyor ve iki yön de sınırlı kalıyor —
+   * yalnız damgayı yaşlandırmak (taze adaya sabit bir yaş vermek) ters yönde
+   * açlık üretiyordu: aday sayısı bütçenin katlarına çıktığında ölçülmüş
+   * adayların yaşı o sabiti kalıcı olarak geçiyor ve taze aday hiç ölçülmüyordu.
+   */
+  nextSeen: Record<string, number>;
   /** Bu koşumda seçilenlere yazılan damga (girdideki en büyük damga + 1). */
   stamp: number;
+  /**
+   * Damgalar güvenli tamsayı tavanına dayandığı için YENİDEN NUMARALANDI:
+   * `next`/`nextSeen`in TAMAMI yazılmalı, yalnız `stamp` değerli satırlar değil.
+   */
+  renumbered: boolean;
 }
 
 /**
@@ -126,6 +161,31 @@ function normalizeStamp(raw: number | undefined): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
   const n = Math.trunc(raw);
   return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Damga sayacı güvenli tamsayı tavanına dayandığında haritayı SIRAYI KORUYARAK
+ * 1..k aralığına sıkıştırır.
+ *
+ * Kusur (M4.5 borcu): sayaç `en büyük + 1` idi. En büyük değer tam olarak
+ * `MAX_SAFE_INTEGER` olduğunda yeni damga güvenli olmayan bir tamsayıya çıkıyor,
+ * depo yazımı onu reddediyor (classify-stamps.ts giriş kapısı) ve HİÇBİR damga
+ * ilerlemiyor — aynı adaylar sonsuza kadar seçiliyor. Kırpmak (tavanda sabitlemek)
+ * çözüm değil: eşitlenen damgalar sıralamayı çökertirdi. Sıkıştırma sıralamayı
+ * birebir koruduğu için seçim bu koşumda da aynı kalır, yalnız sayılar küçülür.
+ */
+function compressStamps(
+  maps: Record<string, number>[],
+): { maps: Record<string, number>[]; stamp: number } {
+  const values = [...new Set(maps.flatMap((m) => Object.values(m)).map(normalizeStamp).filter((v) => v > 0))]
+    .sort((a, b) => a - b);
+  const rank = new Map(values.map((v, i) => [v, i + 1]));
+  return {
+    maps: maps.map((m) => Object.fromEntries(
+      Object.entries(m).map(([k, v]) => [k, rank.get(normalizeStamp(v)) ?? 0]),
+    )),
+    stamp: values.length + 1,
+  };
 }
 
 /**
@@ -225,31 +285,87 @@ function normalizeStamp(raw: number | undefined): number {
  * Bu projede yanlış yazılmış bir iddia yazılmamış olmasından kötüdür: yukarıda
  * ölçülmeyen tek şey (3) ve orada "ölçülmedi" yazıyor.
  *
- * ### Bilinen ve KAPANMAMIŞ biçim: yüzey İÇİ sel
- * Rezervasyon yüzeyler ARASI tekeli kapatıyor, yüzey İÇİNDEKİNİ değil. Bir
- * yüzeye her koşum rezervinden fazla TAZE aday giriyorsa (damga 0 mutlak
- * öncelikli), o yüzeyin daha önce ölçülmüş adayları süresiz bekler. Bu, düzeltilen
- * kusurun bir yüzey içine daralmış hâli ve bugünkü tasarımda açık: çözümü
- * damganın mutlak önceliğini yaşlandırmakta, rezervasyonda değil.
+ * ### Yüzey İÇİ sel — KAPANDI (M4.5)
+ * Rezervasyon yüzeyler ARASI tekeli kapatıyordu, yüzey İÇİNDEKİNİ değil: bir
+ * yüzeye her koşum rezervinden fazla TAZE aday girdiğinde, damga 0'ın mutlak
+ * önceliği yüzünden o yüzeyin ölçülmüş adayları süresiz bekliyordu (altıncı
+ * biçim). Kapanış, mutlak önceliği İLK-GÖRÜLME damgasıyla değiştirmek:
+ * "hiç ölçülmemiş" artık sonsuz yaş değil, sıraya girdiği koşumun yaşı. Öncelik
+ * anahtarı bu yüzden `seçildiyse seçim damgası, seçilmediyse ilk-görülme
+ * damgası`; eşitlikte hiç seçilmemiş olan önde (ölçüm borcu daha büyük).
+ *
+ * Sabit bir "taze yaşı" ile yaşlandırmak REDDEDİLDİ, çünkü açlığı yalnız yön
+ * değiştiriyordu: aday sayısı bütçenin (yaş+1) katını aştığında ölçülmüş
+ * adayların yaşı o sabiti kalıcı olarak geçiyor ve bu kez hiç ölçülmemiş aday
+ * sonsuza kadar bekliyordu. İlk-görülmede iki yön de sınırlı — anahtar yalnız
+ * seçimle büyüyor, ve yeni giren aday daima BEKLEYENİN ARKASINA yazılıyor.
+ *
+ * Bedeli: satır artık yalnız SEÇİLEN için değil GÖRÜLEN her aday için yazılıyor.
+ * Sınır aynı budamayla korunuyor (store/classify-stamps.ts) ve büyüklük
+ * mertebesi zaten her koşum bellekte kurulan aday listesinin kendisi.
  */
 export function selectCandidates(
   candidates: Candidate[],
   max: number,
   stamps: CandidateStamps = {},
+  /**
+   * Aday kimliği → ilk görüldüğü koşumun damgası. VERİLMEZSE ilk-görülme hiç
+   * izlenmiyor demektir ve girişi olmayan aday eski davranışa düşer: yaş 0,
+   * yani mutlak öncelik. Verilirse (boş nesne dahil) girişi olmayan aday BU
+   * koşumda sıraya girmiş sayılır, yani kuyruğun SONUNA yazılır — kapatılan
+   * açlığın taşıyıcısı tam olarak bu ayrım.
+   */
+  seen?: CandidateStamps,
 ): CandidateSelection {
+  const tracking = seen !== undefined;
   // Kota MAX_CLASSIFY_ITEMS ölçeğinde tanımlı; farklı bir tavanla çağrılırsa
   // (audit --max-classify-items) oranı korunur. En az 1: küçük bir tavanda bile
   // hiçbir yüzey tümden kapanmasın (G dalgasının kapattığı küçük-bütçe tekeli).
   const quota = (k: Candidate["kind"]) =>
     Math.max(1, Math.floor((max * CLASSIFY_SURFACE_QUOTA[k]) / MAX_CLASSIFY_ITEMS));
 
-  const stampOf = new Map<number, number>();
-  for (const [i, c] of candidates.entries()) stampOf.set(i, normalizeStamp(stamps[candidateIdentity(c)]));
+  // Sayaç taşma eşiğindeyse haritalar sırayı koruyarak sıkıştırılır; seçim
+  // etkilenmez (sıralama birebir aynı), yalnız sayılar küçülür.
+  let highest = 0;
+  for (const m of [stamps, seen ?? {}]) for (const v of Object.values(m)) {
+    const n = normalizeStamp(v);
+    if (n > highest) highest = n;
+  }
+  const renumbered = !Number.isSafeInteger(highest + 1);
+  let base: Record<string, number> = { ...stamps };
+  let seenBase: Record<string, number> = { ...seen };
+  /** İlk kez görülen adayın yaşı: izleniyorsa "şimdi", izlenmiyorsa "en eski". */
+  let stamp = highest + 1;
+  if (renumbered) {
+    const c = compressStamps([base, seenBase]);
+    [base, seenBase] = c.maps as [Record<string, number>, Record<string, number>];
+    stamp = c.stamp;
+  }
 
-  /** KÜRESEL öncelik: önce damga (eski → yeni), sonra kimlik. */
+  const stampOf = new Map<number, number>();
+  const seenOf = new Map<number, number>();
+  for (const [i, c] of candidates.entries()) {
+    const key = candidateIdentity(c);
+    stampOf.set(i, normalizeStamp(base[key]));
+    seenOf.set(i, normalizeStamp(seenBase[key]));
+  }
+  /** Bekleme yaşı: seçilmişse seçim damgası, seçilmemişse sıraya giriş damgası. */
+  const ageKey = (i: number) => {
+    const s = stampOf.get(i)!;
+    if (s > 0) return s;
+    const seenAt = seenOf.get(i)!;
+    return seenAt > 0 ? seenAt : (tracking ? stamp : 0);
+  };
+
+  /** KÜRESEL öncelik: önce yaş (eski → yeni), sonra ölçüm borcu, sonra kimlik. */
   const byPriority = (x: number, y: number) => {
-    const d = stampOf.get(x)! - stampOf.get(y)!;
-    return d !== 0 ? d : byIdentity(candidates[x]!, candidates[y]!);
+    const d = ageKey(x) - ageKey(y);
+    if (d !== 0) return d;
+    // Aynı koşumdan gelen iki aday: hiç seçilmemiş olan önce. Aksi hâlde aynı
+    // koşumda ilk kez görülen bir aday, o koşumda ÖLÇÜLMÜŞ bir adayla eşit
+    // sayılırdı ve kimlik sırası ölçüm borcunun önüne geçerdi.
+    const n = (stampOf.get(x)! > 0 ? 1 : 0) - (stampOf.get(y)! > 0 ? 1 : 0);
+    return n !== 0 ? n : byIdentity(candidates[x]!, candidates[y]!);
   };
 
   // Her yüzeyin KENDİ öncelik kuyruğu: rezerv başka hiçbir yüzeyin adayından
@@ -302,21 +418,21 @@ export function selectCandidates(
     }
   }
 
-  // Yeni damga: girdideki en büyük + 1. Depoda hiç damga yoksa 1'den başlar
-  // (0 "hiç seçilmemiş" anlamına ayrılmış).
-  let highest = 0;
-  for (const v of Object.values(stamps)) {
-    const n = normalizeStamp(v);
-    if (n > highest) highest = n;
-  }
-  const stamp = highest + 1;
   // Bu koşumun adaylarında OLMAYAN kimliklerin damgası korunuyor: aday kümesi
   // churn ile daralıp genişliyor ve geri dönen bir aday sırasını kaybetmemeli.
   // Sınırsız büyümenin cevabı budama; store/classify-stamps.ts'te, gerekçesiyle.
-  const next: Record<string, number> = { ...stamps };
+  const next: Record<string, number> = base;
   for (const p of chosen) next[candidateIdentity(candidates[p]!)] = stamp;
+  // İlk-görülme YALNIZ yoksa yazılır: var olan giriş adayın sıradaki yerini
+  // taşıyor ve tazelenmesi onu kuyruğun sonuna atardı — kapatılan açlığın
+  // kendisi.
+  const nextSeen: Record<string, number> = seenBase;
+  for (const c of candidates) {
+    const key = candidateIdentity(c);
+    if (normalizeStamp(nextSeen[key]) === 0) nextSeen[key] = stamp;
+  }
 
-  return { taken: candidates.filter((_, i2) => chosen.has(i2)), next, stamp };
+  return { taken: candidates.filter((_, i2) => chosen.has(i2)), next, nextSeen, stamp, renumbered };
 }
 const EXCERPT_CHARS = 1500;
 /**
@@ -372,6 +488,10 @@ export interface ClassifyResult {
    * kalıp geri kalan adayların sırasını kilitlerdi.
    */
   nextStamps: Record<string, number>;
+  /** Aday kimliği → ilk görüldüğü koşum (bkz. CandidateSelection.nextSeen). */
+  nextSeen: Record<string, number>;
+  /** Damgalar sıkıştırıldı: depoya `stamp` değerli satırlar değil TAMAMI gider. */
+  renumbered: boolean;
   /** Bu koşumda seçilenlere yazılan damga; depoya yalnız bu değerli satırlar gider. */
   rotationStamp: number;
   calls: number;
@@ -421,8 +541,24 @@ export function buildClassifyPrompt(items: ClassifyItem[]): string {
     if (it.kind === "frontmatter")
       return `#${it.index} [özet-satırı ↔ gövde]\n` +
         `${fenceUntrusted(`#${it.index} özet`, clip(it.bText ?? ""))}\n${fenceUntrusted(`#${it.index} gövde`, clip(it.aText))}`;
+    if (it.kind === "coverage")
+      return `#${it.index} [kapsama ölçümü — not ↔ bugünkü depo, ${reason}]\n` +
+        `${fenceUntrusted(`#${it.index} not`, clip(it.aText))}`;
     return `#${it.index} [not-içi]\n${fenceUntrusted(`#${it.index} metin`, clip(it.aText))}`;
   }).join("\n\n");
+
+  // Kapsama kuralı YALNIZ o yüzey varken ekleniyor: çelişki-only bir koşumun
+  // prompt'u böylece bayt bayt eskisiyle aynı kalıyor, yani rotasyon ölçümün
+  // kendisini değiştirmiyor.
+  const coverageRule = items.some((it) => it.kind === "coverage")
+    ? `
+"kapsama ölçümü" blokları tek not içerir ve karşı taraf DEPONUN KENDİSİDİR:
+notu bugünkü dosyalarla ve \`git log\` ile karşılaştır, kendi belleğinle değil.
+- "celiski": notun somut bir iddiası bugünkü depoda TUTMUYOR.
+- "uyumlu": iddialar bugün de doğru.
+- "kararsiz": iddia ölçülebilir değil ya da ölçmek için gereken şey yok.
+`
+    : "";
 
   return `Aşağıda numaralı adaylar var. Her aday için görev bir ÖLÇÜM: verilen iki metin
 (ya da tek metnin parçaları) aynı konu hakkında birbiriyle ÇELİŞİYOR MU?
@@ -430,7 +566,7 @@ export function buildClassifyPrompt(items: ClassifyItem[]): string {
 - "celiski": iki ifade aynı anda doğru olamaz.
 - "uyumlu": çelişki yok ya da farklı şeylerden bahsediyorlar.
 - "kararsiz": metinden karar verilemiyor.
-
+${coverageRule}
 evidence: kararın dayanağı TEK cümle. Yalnız istenen şemada JSON döndür.
 
 ${DATA_FENCE_RULE}
@@ -501,10 +637,12 @@ export async function classifyCandidates(
    * çıktısında depo dışını okumayı kesen bayrak yok (lane ölçtü, 14 Ağu),
    * `-C` yalnız kökü seçer.
    */
-  opts: { maxItems?: number; stamps?: CandidateStamps; cwd?: string } = {},
+  opts: { maxItems?: number; stamps?: CandidateStamps; seen?: CandidateStamps; cwd?: string } = {},
 ): Promise<ClassifyResult> {
   const max = opts.maxItems ?? MAX_CLASSIFY_ITEMS;
-  const { taken, next: nextStamps, stamp: rotationStamp } = selectCandidates(candidates, max, opts.stamps);
+  const {
+    taken, next: nextStamps, nextSeen, stamp: rotationStamp, renumbered,
+  } = selectCandidates(candidates, max, opts.stamps, opts.seen);
   const dropped = candidates.length - taken.length;
   const takenSet = new Set(taken);
   /** Bütçeye hiç girmemiş aday da ölçülmemiş bir adaydır. */
@@ -512,7 +650,7 @@ export async function classifyCandidates(
   if (taken.length === 0)
     return {
       ok: true, confirmed: [], kararsiz: 0, unclassified: 0,
-      unmeasured: droppedCandidates, measured: [], nextStamps, rotationStamp, calls: 0, dropped,
+      unmeasured: droppedCandidates, measured: [], nextStamps, nextSeen, renumbered, rotationStamp, calls: 0, dropped,
     };
 
   // item.index = adayın taken içindeki konumu (renderItems entries() index'i
@@ -532,7 +670,7 @@ export async function classifyCandidates(
   // Ölçüm HİÇ yapılamadı: adayların TAMAMI (bütçeye girmeyenler dahil) ölçülmemiş.
   const failed = (error: string): ClassifyResult => ({
     ok: false, confirmed: [], kararsiz: 0, unclassified: taken.length,
-    unmeasured: candidates, measured: [], nextStamps, rotationStamp, calls, dropped, error,
+    unmeasured: candidates, measured: [], nextStamps, nextSeen, renumbered, rotationStamp, calls, dropped, error,
   });
 
   let res = await runOnce(prompt);
@@ -566,6 +704,6 @@ export async function classifyCandidates(
     unclassified: undecided.length,
     unmeasured: [...droppedCandidates, ...undecided],
     measured: taken.filter((_, i) => decided.has(i)),
-    nextStamps, rotationStamp, calls, dropped,
+    nextStamps, nextSeen, renumbered, rotationStamp, calls, dropped,
   };
 }

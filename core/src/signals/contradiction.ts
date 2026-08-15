@@ -13,7 +13,13 @@ export interface NoteView {
   hasStatus: boolean;
 }
 
-export type CandidateKind = "cross" | "intra" | "frontmatter";
+/**
+ * `coverage` bu dosyada ÜRETİLMİYOR (bkz. signals/coverage.ts): çelişki yüzeyi
+ * değil, hiçbir sinyalin dokunmadığı notu sıraya sokan rotasyon yüzeyi. Kind
+ * birliğinde durmasının sebebi aynı bütçeyi ve aynı damga mekanizmasını
+ * paylaşması — ikinci bir seçim mekanizması kurmamak için.
+ */
+export type CandidateKind = "cross" | "intra" | "frontmatter" | "coverage";
 
 export interface Candidate {
   kind: CandidateKind;

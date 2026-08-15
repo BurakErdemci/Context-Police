@@ -103,6 +103,27 @@ function migrate(db: DatabaseSync): void {
   migrateCursors(db);
   migrateWatermarks(db);
   migrateScanLock(db);
+  migrateClassifyStamps(db);
+}
+
+/**
+ * Rotasyon durumuna ilk-görülme damgası eklendi (M4.5, schema.sql'de gerekçe).
+ * `CREATE TABLE IF NOT EXISTS` var olan tabloya sütun eklemediği için ALTER
+ * şart: sütunsuz bir depoda hem `SELECT ... first_seen_seq` hem
+ * `INSERT (… first_seen_seq)` "no such column" ile patlar — yani rotasyon
+ * TÜMDEN durur ve her koşum aynı adayları seçer. Kuşak damgası (SCHEMA_GENERATION)
+ * bilerek ARTIRILMADI: sütun `NOT NULL DEFAULT 0` ve onu hiç anmayan eski kod
+ * bu depoya yazmaya devam edebiliyor, dolayısıyla ileri yönlü bir kırılma yok —
+ * kuşağı artırmak eski sürüme depoyu gereksiz yere reddettirirdi.
+ *
+ * Tek ifade, sarmalayıcı gerekmiyor: ALTER ya olur ya olmaz.
+ */
+function migrateClassifyStamps(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(classify_stamps)").all() as { name: string }[];
+  if (cols.length === 0) return; // tablo yok: schema.sql onu güncel hâliyle yarattı
+  if (!cols.some((c) => c.name === "first_seen_seq")) {
+    db.exec("ALTER TABLE classify_stamps ADD COLUMN first_seen_seq INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 /**

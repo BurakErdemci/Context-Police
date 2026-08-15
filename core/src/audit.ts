@@ -20,9 +20,10 @@ import {
 } from "./signals/anchor-drift.ts";
 import { hasStatusPattern } from "./signals/status-pattern.ts";
 import { findCandidates, type NoteView } from "./signals/contradiction.ts";
+import { findCoverageCandidates } from "./signals/coverage.ts";
 import { classifyCandidates, MAX_CLASSIFY_ITEMS } from "./signals/classify.ts";
 import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect } from "./store/findings.ts";
-import { readClassifyStamps, writeClassifyStamps } from "./store/classify-stamps.ts";
+import { readRotationState, writeClassifyStamps } from "./store/classify-stamps.ts";
 import { parseNote } from "./importer/parse.ts";
 import { logEvent, type EventKind } from "./store/events.ts";
 
@@ -97,6 +98,13 @@ export interface AuditSummary {
   suspects: number;
   cleared: number;
   candidates: number;
+  /**
+   * `candidates` içindeki KAPSAMA ROTASYONU adayları: hiçbir tetikleyicisi
+   * olmadığı için sıraya konmuş notlar. Ayrı sayılıyor, çünkü "kaç çelişki
+   * adayı vardı" ile "kaç nota sırası geldiği için bakıldı" farklı sorular ve
+   * ikincisi kapsama sınırının tek görünür ölçüsü.
+   */
+  coverageCandidates: number;
   classified: boolean;
   contradictions: number;
   classifyDropped: number;
@@ -163,7 +171,8 @@ export async function auditProject(
   const runId = opts.runId ?? newRunId();
   const sum: AuditSummary = {
     runId, import: null, gitAvailable: false, checked: 0, suspects: 0, cleared: 0,
-    candidates: 0, classified: false, contradictions: 0, classifyDropped: 0, classifyCalls: 0,
+    candidates: 0, coverageCandidates: 0, classified: false, contradictions: 0,
+    classifyDropped: 0, classifyCalls: 0,
     classifyUnclassified: 0, heldUnmeasured: 0, budgetExhaustedAnchors: 0,
     anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
   };
@@ -314,7 +323,14 @@ export async function auditProject(
       description: f.source === "imported" ? (parseNote(f.content).frontmatter["description"] ?? null) : null,
       hasStatus: hasStatusPattern(f.content),
     }));
-    const { candidates, skippedAnchors } = findCandidates(views);
+    const { candidates: contradictions, skippedAnchors } = findCandidates(views);
+    // Kapsama rotasyonu: hiçbir çelişki adayına girmemiş not da sıraya girer.
+    // Ölçüldü (altın set, 28 not): 14'ünün hiç dosya çapası yok, 2'si yolunu
+    // kaybediyor — 28'in yalnız 12'si bir HAREKET sinyali üretebiliyor. Tetikleyici
+    // beklemek, kalan 16'yı bir daha hiç bakılmayan nota çeviriyordu.
+    const coverage = findCoverageCandidates(views, contradictions);
+    const candidates = [...contradictions, ...coverage];
+    sum.coverageCandidates = coverage.length;
     sum.candidates = candidates.length;
     if (skippedAnchors > 0)
       ev("classify_overflow", { skippedAnchors, note: "ayırt edici olmayan ortak çapalar çift üretmedi" });
@@ -334,24 +350,38 @@ export async function auditProject(
      * Bir sonraki koşumun aday rotasyon damgaları (+ bu koşumun damga değeri);
      * null = bu koşumda sınıflama hiç çalışmadı, damgalara dokunulmaz.
      */
-    let rotation: { stamps: Record<string, number>; stamp: number } | null = null;
+    let rotation:
+      | { stamps: Record<string, number>; seen: Record<string, number>; stamp: number; renumbered: boolean }
+      | null = null;
 
     if (candidates.length > 0 && opts.executor !== null) {
       const notesById = new Map(views.map((v) => [v.findingId, v]));
+      const state = readRotationState(store, project.id);
       const res = await classifyCandidates(opts.executor, candidates, notesById, {
         maxItems: opts.maxClassifyItems ?? MAX_CLASSIFY_ITEMS,
-        stamps: readClassifyStamps(store, project.id),
+        stamps: state.selected,
+        seen: state.seen,
         // Çalışma kökü DENETLENEN projedir (`projects.path`) — CLI'nin nereden
         // çağrıldığı değil. Bkz. classifyCandidates'taki sınır notu: kök seçmek
         // okumayı hapsetmez.
         cwd: project.path,
       });
-      rotation = { stamps: res.nextStamps, stamp: res.rotationStamp };
+      rotation = {
+        stamps: res.nextStamps, seen: res.nextSeen, stamp: res.rotationStamp, renumbered: res.renumbered,
+      };
       sum.classifyCalls = res.calls;
       sum.classifyDropped = res.dropped;
       sum.classifyUnclassified = res.unclassified;
-      for (const c of res.unmeasured)
+      for (const c of res.unmeasured) {
+        // KAPSAMA adayının ölçülmemesi bir hüküm koruma sebebi DEĞİL: rotasyon
+        // bir sinyal değil bir SIRA, ve sırası gelmemiş olmak notların NORMAL
+        // hâli. Aksi hâlde her not her koşum aday olduğu için tek bir sınıflama
+        // arızası projedeki TÜM suspect kayıtlarını dondururdu — `unmeasuredFindings`
+        // yorumunda yazılı "aşırı-koruma da bir yanlış karardır" kuralının
+        // tam ihlali (ölçüldü: audit-decision-integrity §1 varyant B).
+        if (c.kind === "coverage") continue;
         for (const id of [c.aId, c.bId]) if (id !== null) unmeasuredFindings.add(id);
+      }
       // Rotasyon imleci kırpma olayının İÇİNDE: "20 aday atıldı" tek başına
       // okunduğunda hep aynı 20'sinin atıldığı sanılabilir — pencerenin
       // ilerlediği ancak burada görünür. (Kırpma görünürlüğü, D dalgası.)
@@ -386,7 +416,12 @@ export async function auditProject(
             const cur = scores.get(id) ?? { score: 0, reasons: [], states: {} };
             scores.set(id, {
               score: Math.max(cur.score, 0.7),
-              reasons: [...cur.reasons, `çelişki onaylandı (${c.kind}: ${c.reason})`],
+              reasons: [...cur.reasons, c.kind === "coverage"
+                // Kapsama hükmü bir ÇELİŞKİ değil: karşı taraf başka bir not
+                // değil deponun kendisi. Aynı metni kullanmak, gerekçeyi okuyan
+                // kişiye var olmayan bir ikinci notu aratırdı.
+                ? `kapsama ölçümü: not bugünkü depoyla uyuşmuyor (${c.reason})`
+                : `çelişki onaylandı (${c.kind}: ${c.reason})`],
               states: cur.states,
             });
           }
@@ -408,7 +443,9 @@ export async function auditProject(
       for (const c of pendingContradictionEvents) ev("contradiction_confirmed", c);
       // Rotasyon imleci skorlarla AYNI tx'te: imleç ilerleyip skor yazılmazsa
       // (arada ölüm) pencere, sonucu hiç yazılmamış bir ölçümün üstünden atlardı.
-      if (rotation !== null) writeClassifyStamps(store, project.id, rotation.stamps, rotation.stamp);
+      if (rotation !== null)
+        writeClassifyStamps(store, project.id, rotation.stamps, rotation.stamp,
+          { seen: rotation.seen, rewriteAll: rotation.renumbered });
       for (const f of all) {
         // Skor kaydı olmayan tek küme: hiç çelişkiye girmemiş `unanchored` not.
         // Yukarıdaki skor döngüsü onu atladı (M0-D5: çapa sinyali çapasız nota
@@ -465,7 +502,8 @@ export async function auditProject(
     // ayırt etmez olurdu.
     ev("audit_completed", {
       checked: sum.checked, suspects: sum.suspects, cleared: sum.cleared,
-      candidates: sum.candidates, contradictions: sum.contradictions,
+      candidates: sum.candidates, coverageCandidates: sum.coverageCandidates,
+      contradictions: sum.contradictions,
       classifyCalls: sum.classifyCalls, measurementFailures: sum.measurementFailures,
       classifyUnclassified: sum.classifyUnclassified, heldUnmeasured: sum.heldUnmeasured,
       budgetExhaustedAnchors: sum.budgetExhaustedAnchors,

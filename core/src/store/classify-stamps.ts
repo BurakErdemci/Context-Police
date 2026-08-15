@@ -10,18 +10,39 @@ import { type CandidateStamps, parseCandidateIdentity, NO_SECOND_SIDE } from "..
 
 export type { CandidateStamps };
 
-export function readClassifyStamps(store: Store, projectId: number): CandidateStamps {
-  const rows = store.all<{ kind: string; a_id: number; b_id: number; selected_seq: number }>(
-    "SELECT kind, a_id, b_id, selected_seq FROM classify_stamps WHERE project_id = ?",
+/**
+ * Rotasyonun kalıcı durumu: iki harita. `selected` = en son seçim damgası,
+ * `seen` = adayın İLK GÖRÜLDÜĞÜ koşum. İkincisi olmadan "hiç seçilmemiş" mutlak
+ * öncelik taşıyordu ve yüzey içi sel, ölçülmüş adayları süresiz bekletiyordu
+ * (gerekçe: signals/classify.ts `CandidateSelection.nextSeen`).
+ */
+export interface RotationState { selected: Record<string, number>; seen: Record<string, number> }
+
+export function readRotationState(store: Store, projectId: number): RotationState {
+  const rows = store.all<{ kind: string; a_id: number; b_id: number; selected_seq: number; first_seen_seq: number | null }>(
+    "SELECT kind, a_id, b_id, selected_seq, first_seen_seq FROM classify_stamps WHERE project_id = ?",
     projectId,
   );
-  const out: Record<string, number> = {};
+  const selected: Record<string, number> = {};
+  const seen: Record<string, number> = {};
   // Tanınmayan bir `kind` sessizce atlanmıyor, çünkü atlanamaz: anahtar
   // doğrudan üç sütundan kuruluyor. Yüzey adı ileride değişirse eski satır bir
   // çöp anahtar olarak durur ve hiçbir adayla eşleşmez — seçimi bozmaz, budama
   // da onu bir sonraki koşumda temizler (tarafları er ya da geç ölür).
-  for (const r of rows) out[`${r.kind}:${r.a_id}:${r.b_id}`] = r.selected_seq;
-  return out;
+  for (const r of rows) {
+    const key = `${r.kind}:${r.a_id}:${r.b_id}`;
+    selected[key] = r.selected_seq;
+    // Göçten gelen satırda 0/NULL: ilk-görülme bilinmiyor. Seçim damgası zaten
+    // dolu olduğu için öncelik ondan okunur; uydurulmuş bir ilk-görülme, hiç
+    // olmayandan kötü olurdu.
+    if (r.first_seen_seq !== null && r.first_seen_seq > 0) seen[key] = r.first_seen_seq;
+  }
+  return { selected, seen };
+}
+
+/** Yalnız seçim damgaları (eski çağrı biçimi; rotasyonun tamamı için readRotationState). */
+export function readClassifyStamps(store: Store, projectId: number): CandidateStamps {
+  return readRotationState(store, projectId).selected;
 }
 
 /** Budamanın "canlı bulgu" ölçütü — `listActive` ile aynı küme (audit.ts girdisi). */
@@ -39,17 +60,42 @@ const LIVE_STATUSES = "('active','suspect','unanchored')";
  */
 export function writeClassifyStamps(
   store: Store, projectId: number, stamps: CandidateStamps, stamp: number,
+  /**
+   * `seen`: ilk-görülme haritası; yalnız DEĞERİ `stamp` olanlar (bu koşumda ilk
+   * kez görülenler) yazılır. `rewriteAll`: damgalar sıkıştırıldı, tüm satırlar
+   * yeniden yazılır (signals/classify.ts `compressStamps`).
+   */
+  opts: { seen?: CandidateStamps; rewriteAll?: boolean } = {},
 ): void {
   if (!Number.isSafeInteger(stamp) || stamp <= 0) return;
-  for (const [key, value] of Object.entries(stamps)) {
-    if (value !== stamp) continue;
+  const seen = opts.seen ?? {};
+  const write = (key: string, selectedSeq: number, seenSeq: number, overwriteSeen: boolean) => {
     const id = parseCandidateIdentity(key);
-    if (id === null) continue; // elle düzenlenmiş depo / gelecekteki bir yüzey
+    if (id === null) return; // elle düzenlenmiş depo / gelecekteki bir yüzey
     store.run(
-      "INSERT INTO classify_stamps (project_id, kind, a_id, b_id, selected_seq) VALUES (?,?,?,?,?) " +
-        "ON CONFLICT (project_id, kind, a_id, b_id) DO UPDATE SET selected_seq = excluded.selected_seq",
-      projectId, id.kind, id.aId, id.bId, stamp,
+      "INSERT INTO classify_stamps (project_id, kind, a_id, b_id, selected_seq, first_seen_seq) VALUES (?,?,?,?,?,?) " +
+        "ON CONFLICT (project_id, kind, a_id, b_id) DO UPDATE SET selected_seq = excluded.selected_seq" +
+        // İlk-görülme normalde DOKUNULMAZ: tazelenmesi adayı kuyruğun sonuna
+        // atardı, yani kapatılan açlığı geri açardı. Tek istisna sıkıştırma.
+        (overwriteSeen ? ", first_seen_seq = excluded.first_seen_seq" : ""),
+      projectId, id.kind, id.aId, id.bId, selectedSeq, seenSeq,
     );
+  };
+
+  if (opts.rewriteAll) {
+    for (const key of new Set([...Object.keys(stamps), ...Object.keys(seen)]))
+      write(key, stamps[key] ?? 0, seen[key] ?? 0, true);
+  } else {
+    for (const [key, value] of Object.entries(stamps)) {
+      if (value !== stamp) continue;
+      write(key, stamp, seen[key] ?? stamp, false);
+    }
+    // Seçilmeyen ama İLK KEZ görülen adaylar: sıraya girdikleri koşum kaydedilir,
+    // seçim damgası 0 kalır ("hiç ölçülmedi").
+    for (const [key, value] of Object.entries(seen)) {
+      if (value !== stamp || stamps[key] === stamp) continue;
+      write(key, stamps[key] ?? 0, stamp, false);
+    }
   }
   pruneClassifyStamps(store, projectId);
 }
@@ -60,7 +106,11 @@ export function writeClassifyStamps(
  *
  * Gerekçe: aday üretimi (`findCandidates`) girdisini `listActive`ten alır, yani
  * canlı olmayan bir bulgu bir daha ASLA aday üretmez — o kimliğin damgası ölü
- * durumdur. Budama olmadan tablo, projenin ömrü boyunca seçilmiş her çiftin
+ * durumdur. M4.5'ten beri satır yalnız SEÇİLEN için değil GÖRÜLEN her aday için
+ * yazılıyor (ilk-görülme damgası), yani budama daha da gerekli: tablo artık
+ * "canlı bulgular arasında en az bir kez GÖRÜLMÜŞ çiftler" ile sınırlı — bu,
+ * her koşum zaten bellekte kurulan aday listesiyle aynı mertebe.
+ * Budama olmadan tablo, projenin ömrü boyunca seçilmiş her çiftin
  * kaydını tutardı ve çift sayısı not sayısında kareli; sınırsız büyüme kabul
  * edilemez. Budamayla tablo, "şu an canlı bulgular arasında en az bir kez
  * seçilmiş çiftler" ile sınırlı.
