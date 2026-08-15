@@ -139,6 +139,51 @@ test("noteTimestamp: frontmatter modified > created > geri düşüş, geçerli t
   assert.equal(noteTimestamp({ modified: "2099-01-01T00:00:00Z" }, "F").iso, "2099-01-01T00:00:00.000Z");
 });
 
+// Denetim: divergent-authorship-mechanism. `noteTimestamp` HER ZAMAN bir `iso`
+// döndürüyordu ve dönen değerin hiçbir yerinde "bu, notun kendi tarihi değil"
+// yazmıyordu; yani "not tarih vermiyor" cevabı API'de temsil EDİLEMEZDİ. İki
+// bedeli ölçüldü: 28 notun 28'i sessizce içe aktarma anına düştü ve görünmedi,
+// ve o cevaba ihtiyaç duyan araç kendi tarih çıkarıcısını yazdı.
+test("noteTimestamp: damganın KAYNAĞI bildirilir, 'not tarih vermiyor' temsil edilebilir", () => {
+  const now = "2026-08-15T00:00:00.000Z";
+  assert.equal(noteTimestamp({ modified: "2026-08-01T10:00:00Z" }, now).source, "modified");
+  assert.equal(noteTimestamp({ created: "2026-08-01T10:00:00Z" }, now).source, "created");
+  assert.equal(noteTimestamp({ date: "2026-08-01" }, now).source, "date");
+  // Alan var ama okunamıyor: yine "not tarih vermiyor", sebebi unparsable'da.
+  const bozuk = noteTimestamp({ modified: "bozuk-tarih" }, now);
+  assert.equal(bozuk.source, "none");
+  assert.equal(bozuk.iso, now);
+  assert.deepEqual(bozuk.unparsable, [{ field: "modified", value: "bozuk-tarih" }]);
+  assert.equal(noteTimestamp({}, now).source, "none");
+  // Kelepçelenen damga da kaynağını KAYBETMEZ: iso geri düşüşe eşit olsa bile
+  // notun tarih verdiği bilgisi duruyor.
+  const kelepce = noteTimestamp({ modified: "2099-01-01T00:00:00Z" }, now);
+  assert.equal(kelepce.iso, now);
+  assert.equal(kelepce.source, "modified");
+});
+
+test("noteTimestamp: gövde geri düşüşü yalnız İSTENDİĞİNDE ve frontmatter'dan SONRA", () => {
+  const now = "2026-08-15T00:00:00.000Z";
+  const body = "Karar: 16 Tem 2026. Ölçüm 2026-05-29'da yinelendi.\n";
+  // `body` verilmezse davranış eskisiyle AYNI — mevcut çağıranlar (importer)
+  // buradan geçiyor.
+  assert.equal(noteTimestamp({}, now, {}).source, "none");
+  assert.equal(noteTimestamp({}, now).iso, now);
+  // İstendiğinde: gövdedeki EN YENİ tarih (not ondan önce yazılmış olamaz).
+  const b = noteTimestamp({}, now, { body });
+  assert.equal(b.source, "body");
+  assert.equal(b.iso, "2026-07-16T00:00:00.000Z");
+  // Frontmatter varsa gövdeye HİÇ bakılmaz.
+  assert.equal(noteTimestamp({ modified: "2026-01-02T00:00:00Z" }, now, { body }).source, "modified");
+  // Sürüm numarası ve makul olmayan yıl tarih sayılmaz: uydurulan bir sınır,
+  // ona dayanan hükmü yanlışlıkla açar.
+  assert.equal(noteTimestamp({}, now, { body: "v1.2.3 · 1999-01-01 · 13 Ağu 1899" }).source, "none");
+  // Gövdedeki gelecek tarihi de kelepçelenir: not kendi penceresini kapatamaz.
+  const gelecek = noteTimestamp({}, now, { body: "plan: 2099-01-01" });
+  assert.equal(gelecek.iso, now);
+  assert.deepEqual(gelecek.clamped, { field: "body", value: "2099-01-01" });
+});
+
 // Denetim: imported-flag-anchor. `--output/tmp/audit.txt` gibi bir token yol
 // şeklinde olduğu için çapa olarak saklanıyordu. Bugün sömürülebilir DEĞİL —
 // çapayı tüketen git çağrılarının hepsi ya `--` ayracı kullanıyor ya değeri

@@ -83,9 +83,24 @@ export function parseNote(raw: string): ParsedNote {
  */
 const VALUE_ECHO_MAX = 200;
 
+/**
+ * `NoteTimestamp.iso` değerinin NEREDEN geldiği.
+ *
+ * `"none"` = NOT HİÇBİR TARİH VERMİYOR; `iso` çağıranın verdiği geri düşüştür.
+ * Bu ayrım sonradan eklendi ve sebebi ölçülmüş: fonksiyon her zaman bir `iso`
+ * döndürüyor ve dönen değerin hiçbir yerinde "bu notun kendi tarihi değil"
+ * yazmıyordu. "Not tarih vermiyor" cevabı API'de YAPISAL OLARAK
+ * TEMSİL EDİLEMEZ olduğu için (a) 28 notun 28'i sessizce içe aktarma anına
+ * düştü ve bu görünmedi, (b) o cevaba ihtiyaç duyan bir araç kendi tarih
+ * çıkarıcısını yazdı — sınır ilkelinin ıraksak kopyası.
+ */
+export type NoteDateSource = "modified" | "created" | "date" | "body" | "none";
+
 export interface NoteTimestamp {
   /** Kullanılacak ISO damga; churn penceresi (Görev 7) buradan başlar. */
   iso: string;
+  /** `iso`nun kaynağı. `"none"` ise not tarih vermiyor, `iso` geri düşüştür. */
+  source: NoteDateSource;
   /**
    * Damga içe aktarma anına KELEPÇELENDİ: notun verdiği değer gelecekteydi.
    * Dolu olması sessiz bir düzeltme değil, çağıranın olaya yazması gereken bir
@@ -99,7 +114,10 @@ export interface NoteTimestamp {
 const echo = (v: string) => (v.length > VALUE_ECHO_MAX ? v.slice(0, VALUE_ECHO_MAX) + "…" : v);
 
 /**
- * Frontmatter'daki not tarihini seçer; churn penceresi buradan başlar (Görev 7).
+ * Notun tarihini seçer; churn penceresi buradan başlar (Görev 7). Sıra:
+ * frontmatter `modified` > `created` > `date` > (istenirse) gövdedeki en yeni
+ * tarih > geri düşüş. Seçilen kaynak `source` alanında döner — "notun tarihi
+ * yok" cevabı ancak öyle temsil edilebiliyor.
  *
  * `fallbackIso` iki iş yapar: alan yoksa GERİ DÜŞÜŞ, alan varsa TAVAN. Çağıran
  * onu içe aktarma anı olarak verir (`nowIso()`), yani tavan "şimdi"dir.
@@ -115,11 +133,25 @@ const echo = (v: string) => (v.length > VALUE_ECHO_MAX ? v.slice(0, VALUE_ECHO_M
  * eskidir ve geniş pencere denetimi SIKILAŞTIRIR, gevşetmez); gelecek damga ise
  * fiziksel olarak imkânsız ve tek etkisi pencereyi kapatmak.
  */
-export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): NoteTimestamp {
+export function noteTimestamp(
+  fm: Record<string, string>,
+  fallbackIso: string,
+  opts?: { body?: string },
+): NoteTimestamp {
   const ceiling = Date.parse(fallbackIso);
   const unparsable: { field: string; value: string }[] = [];
   const extra = () => (unparsable.length > 0 ? { unparsable } : {});
-  for (const key of ["modified", "created", "date"]) {
+  const settle = (t: number, source: NoteDateSource, field: string, value: string): NoteTimestamp => {
+    // `fallbackIso` ayrıştırılamıyorsa tavan yok — bu çağıranın hatası, ama
+    // burada uydurma bir tavan üretmek yanlış pencereyi sessizce dayatırdı.
+    if (!Number.isNaN(ceiling) && t > ceiling)
+      return { iso: new Date(ceiling).toISOString(), source, clamped: { field, value }, ...extra() };
+    // ISO'ya normalize: churn penceresi (Görev 7) ve depodaki createdAt
+    // karşılaştırmaları tek biçim varsayıyor; "11 Aug 2026" gibi ayrıştırılabilir
+    // ama ISO olmayan bir frontmatter değeri oraya ham geçerse pencere kayar.
+    return { iso: new Date(t).toISOString(), source, ...extra() };
+  };
+  for (const key of ["modified", "created", "date"] as const) {
     const v = fm[key];
     if (v === undefined) continue;
     const t = Date.parse(v);
@@ -130,16 +162,60 @@ export function noteTimestamp(fm: Record<string, string>, fallbackIso: string): 
       unparsable.push({ field: key, value: echo(v) });
       continue;
     }
-    // `fallbackIso` ayrıştırılamıyorsa tavan yok — bu çağıranın hatası, ama
-    // burada uydurma bir tavan üretmek yanlış pencereyi sessizce dayatırdı.
-    if (!Number.isNaN(ceiling) && t > ceiling)
-      return { iso: new Date(ceiling).toISOString(), clamped: { field: key, value: echo(v) }, ...extra() };
-    // ISO'ya normalize: churn penceresi (Görev 7) ve depodaki createdAt
-    // karşılaştırmaları tek biçim varsayıyor; "11 Aug 2026" gibi ayrıştırılabilir
-    // ama ISO olmayan bir frontmatter değeri oraya ham geçerse pencere kayar.
-    return { iso: new Date(t).toISOString(), ...extra() };
+    return settle(t, key, key, echo(v));
   }
-  return { iso: fallbackIso, ...extra() };
+  // Gövde taraması İSTEĞE BAĞLI ve frontmatter'dan SONRA gelir: mevcut
+  // çağıranların (importer) davranışı `body` verilmediği sürece değişmiyor.
+  // Ölçüm (29 altın not, 15 Ağu 2026): frontmatter 24'ünü, gövde taraması
+  // 27'sini kapsıyor ve gövdenin kapsayıp frontmatter'ın kaçırdığı 3 not var;
+  // TERSİ SIFIR. Yani gövde geri düşüşü olmadan tek mekanizma, iki notu
+  // ölçülebilirken ölçülemez sayardı.
+  const bodyDate = opts?.body === undefined ? null : newestBodyDate(opts.body);
+  if (bodyDate !== null) return settle(Date.parse(bodyDate), "body", "body", bodyDate);
+  return { iso: fallbackIso, source: "none", ...extra() };
+}
+
+const TR_MONTHS: Record<string, number> = {
+  oca: 1, şub: 2, sub: 2, mar: 3, nis: 4, may: 5, haz: 6,
+  tem: 7, ağu: 8, agu: 8, eyl: 9, eki: 10, kas: 11, ara: 12,
+};
+
+const ISO_DATE_RE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
+const TR_DATE_RE = /(?<!\d)(\d{1,2})\s+(Oca|Şub|Sub|Mar|Nis|May|Haz|Tem|Ağu|Agu|Eyl|Eki|Kas|Ara)[a-zçğıöşü]*\s+(\d{4})/giu;
+
+const ymd = (y: number, m: number, d: number): string =>
+  `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+/**
+ * Gövdede geçen EN YENİ tarih — notun yazılma zamanı için bir ALT SINIR.
+ *
+ * Mantık: bir not, içinde andığı en yeni tarihten ÖNCE yazılmış olamaz. Tam
+ * tarihten zayıf ama frontmatter tarih taşımadığında elde kalan tek ucuz kaynak:
+ * hafıza notları git'te değil (`~/.context-police/golden/...`), yani `git log`
+ * yazarlık geçmişi vermiyor ve dosya mtime kopyalamayla bozulur.
+ *
+ * ÇIKTI KISITLI: yalnız yeniden kurulmuş `YYYY-MM-DD`. Gövde GÜVENİLMEYEN metin
+ * ve bu değer aşağı akışta bir istemin TALİMAT alanına giriyor — ham eşleşme
+ * değil, regex'in yakaladığı sayılardan yeniden kurulmuş dizge yazılır.
+ *
+ * 2000–2100 aralığı sürüm numarası ve anlamsız yılı eler (`v1.2.3`, `13 Ağu 1899`);
+ * sessizce sınır uydurmak, sınıra bağlı hükmü yanlışlıkla AÇAR.
+ */
+function newestBodyDate(body: string): string | null {
+  let best: string | null = null;
+  const take = (s: string): void => { if (best === null || s > best) best = s; };
+  for (const m of body.matchAll(ISO_DATE_RE)) {
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    if (y < 2000 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) continue;
+    take(ymd(y, mo, d));
+  }
+  for (const m of body.matchAll(TR_DATE_RE)) {
+    const d = Number(m[1]), y = Number(m[3]);
+    const mo = TR_MONTHS[m[2]!.toLowerCase()];
+    if (mo === undefined || y < 2000 || y > 2100 || d < 1 || d > 31) continue;
+    take(ymd(y, mo, d));
+  }
+  return best;
 }
 
 /**
