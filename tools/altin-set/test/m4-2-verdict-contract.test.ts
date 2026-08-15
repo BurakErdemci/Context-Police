@@ -19,8 +19,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BORN_WRONG, GATE_MARK, adjudicatorSchema, buildPrompt, extractAuthorshipBound,
-  extractGatedClaims, gateClaims,
+  BORN_WRONG, GATE_MARK, NOT_MEASURABLE, OLCULEMEZ, UNMEASURABLE_REASON_FIELD,
+  USER_QUESTION_AUTHORSHIP_DATE, USER_RESOLVABLE,
+  adjudicatorSchema, authorshipBound, buildPrompt, extractGatedClaims, gateClaims,
 } from "../adjudicate-lib.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -31,26 +32,53 @@ const NODE_ARGS = ["--disable-warning=ExperimentalWarning"];
 const DATED_BODY = "# not\n\nKarar: 27 Tem 2026. Ölçüm 2026-07-29'da yinelendi.\n";
 const UNDATED_BODY = "# not\n\nWorktree her zaman ana depo dışında kurulur.\n";
 
+const NOW = "2026-08-15T00:00:00.000Z";
+
 // --- yazılma zamanı alt sınırı --------------------------------------------
 
 test("yazılma zamanı sınırı gövdedeki EN YENİ tarih", () => {
   // Not, andığı en yeni tarihten önce yazılmış olamaz; sınır o.
-  assert.equal(extractAuthorshipBound(DATED_BODY)?.iso, "2026-07-29");
+  assert.equal(authorshipBound(DATED_BODY, NOW)?.iso, "2026-07-29");
 });
 
 test("Türkçe ay adı ISO'dan yeniyse sınırı o belirler", () => {
-  assert.equal(extractAuthorshipBound("2026-01-02 ve 12 Ağu 2026")?.iso, "2026-08-12");
-  assert.equal(extractAuthorshipBound("2026-01-02 ve 12 Ağustos 2026")?.iso, "2026-08-12");
+  assert.equal(authorshipBound("2026-01-02 ve 12 Ağu 2026", NOW)?.iso, "2026-08-12");
+  assert.equal(authorshipBound("2026-01-02 ve 12 Ağustos 2026", NOW)?.iso, "2026-08-12");
 });
 
 test("tarihsiz not için sınır yok", () => {
-  assert.equal(extractAuthorshipBound(UNDATED_BODY), null);
+  assert.equal(authorshipBound(UNDATED_BODY, NOW), null);
 });
 
 test("tarih gibi görünen ama tarih olmayan sayılar sınır üretmez", () => {
   // Sürüm numarası ve makul olmayan yıl: sessizce sınır uydurmak, kapının
   // korumak istediği hükmü yanlışlıkla AÇAR.
-  assert.equal(extractAuthorshipBound("v1.2.3 · 1999-01-01 · 13 Ağu 1899"), null);
+  assert.equal(authorshipBound("v1.2.3 · 1999-01-01 · 13 Ağu 1899", NOW), null);
+});
+
+// Tek mekanizma: sınır artık ÜRÜNÜN `noteTimestamp`'inden geliyor, bu yüzden
+// frontmatter alan sırası, `metadata:` girintisi ve gelecek-kelepçesi burada da
+// geçerli. Ayrı bir gövde tarayıcısı olsaydı bunların hiçbiri araç tarafında
+// çalışmıyordu — ıraksamanın ölçülebilir yüzü tam olarak bu.
+test("sınır önce frontmatter damgasından okunur, kaynağı da bildirilir", () => {
+  const raw = "---\nname: n\nmetadata:\n  modified: 2026-07-31T09:00:00Z\n---\n\nÖlçüm 2026-01-02'de yapıldı.\n";
+  const b = authorshipBound(raw, NOW);
+  assert.equal(b?.iso, "2026-07-31");
+  assert.match(b!.source, /frontmatter `modified`/);
+});
+
+test("frontmatter tarih vermiyorsa gövdeye düşülür (kapsamı kaybetmeden)", () => {
+  const raw = "---\nname: n\ndescription: d\n---\n\nKarar: 16 Tem 2026.\n";
+  const b = authorshipBound(raw, NOW);
+  assert.equal(b?.iso, "2026-07-16");
+  assert.match(b!.source, /gövde/);
+});
+
+test("gelecek tarihli frontmatter damgası sınırı bugünün ötesine itemez", () => {
+  // Ürünün kelepçesi (untrusted-audit-window) araç tarafında da geçerli: not
+  // kendi ölçüm penceresini kapatamaz.
+  const raw = "---\nmodified: 2099-01-01T00:00:00Z\n---\n\ngövde\n";
+  assert.equal(authorshipBound(raw, NOW)?.iso, "2026-08-15");
 });
 
 // --- istem: hükmü kazanma ölçütü ------------------------------------------
@@ -68,7 +96,18 @@ test("tarihsiz notta dogustan-yanlis istemde KAPATILIYOR", () => {
   const p = buildPrompt("n", UNDATED_BODY, null);
   assert.match(p, /dogustan-yanlis[^\n]*KAPALI/);
   assert.match(p, /KULLANILAMAZ/);
-  assert.match(p, /en fazla\n?\s*`?curuk`?/);
+});
+
+test("tarihsiz notta istem `curuk`a kaçmayı YASAKLAR, dürüst çıkışı gösterir", () => {
+  // Mimari hüküm: ölçülmemiş bir "o zaman doğruydu" iddiasını kapının ya da
+  // modelin uydurması, bu ürünün önlemek için var olduğu arızanın kendisi.
+  const p = buildPrompt("n", UNDATED_BODY, null);
+  assert.match(p, /ONUN YERİNE `curuk` YAZMA/);
+  assert.match(p, /"o zaman DOĞRUYDU" diye bir ölçüm İDDİA/);
+  assert.ok(p.includes(`${UNMEASURABLE_REASON_FIELD} = \`${USER_RESOLVABLE}\``), "dürüst çıkış istemde yok");
+  assert.ok(p.includes(`${UNMEASURABLE_REASON_FIELD} = \`${NOT_MEASURABLE}\``), "sıradan olculemez ayrımı istemde yok");
+  // Kullanıcıya devrin ne demek olduğu yazılı: çözümsüz değil, cevaplanabilir.
+  assert.match(p, /bu ölçümü kullanıcı açabilir/);
 });
 
 test("curuk ile dogustan-yanlis ayrımı mekanik olarak yazılı", () => {
@@ -106,9 +145,18 @@ test("sır sınırı tarihsiz notta da var", () => {
 
 // --- şema kapısı ----------------------------------------------------------
 
-type SchemaShape = { properties: { claims: { items: { properties: { verdict: { enum: string[] } } } } } };
-const verdictEnum = (s: unknown): string[] =>
-  (s as SchemaShape).properties.claims.items.properties.verdict.enum;
+type SchemaShape = {
+  properties: {
+    claims: {
+      items: {
+        required: string[];
+        properties: { verdict: { enum: string[] }; unmeasurable_reason?: { enum: string[] } };
+      };
+    };
+  };
+};
+const claimItem = (s: unknown) => (s as SchemaShape).properties.claims.items;
+const verdictEnum = (s: unknown): string[] => claimItem(s).properties.verdict.enum;
 
 test("şema dogustan-yanlis'i yalnız sınır beslendiğinde kabul eder", () => {
   assert.ok(verdictEnum(adjudicatorSchema({ bornWrongAvailable: true })).includes(BORN_WRONG));
@@ -119,6 +167,15 @@ test("şema dogustan-yanlis'i yalnız sınır beslendiğinde kabul eder", () => 
   }
 });
 
+test("kapı kapalıyken şema alt sebebi kabul eder, açıkken sunmaz", () => {
+  const gated = claimItem(adjudicatorSchema({ bornWrongAvailable: false }));
+  assert.deepEqual(gated.properties.unmeasurable_reason?.enum, [USER_RESOLVABLE, NOT_MEASURABLE]);
+  // Zorunlu DEĞİL: sıradan bir hükümde alan hiç yazılmaz.
+  assert.ok(!gated.required.includes(UNMEASURABLE_REASON_FIELD));
+  // Kapı açıkken tarih ölçülmüş demektir; kullanıcıya devredilecek bir şey yok.
+  assert.equal(claimItem(adjudicatorSchema({ bornWrongAvailable: true })).properties.unmeasurable_reason, undefined);
+});
+
 // --- ayrıştırıcı kapısı ---------------------------------------------------
 
 const RAW = '{"claims":[' +
@@ -126,12 +183,37 @@ const RAW = '{"claims":[' +
   '{"text":"b","line_start":2,"line_end":2,"verdict":"curuk","evidence":"x"},' +
   '{"text":"c","line_start":3,"line_end":3,"verdict":"gecerli","evidence":"y"}]}';
 
-test("sınır yokken modelden gelen dogustan-yanlis curuk'a düşürülür", () => {
+test("sınır yokken modelden gelen dogustan-yanlis olculemez/kullanıcı-çözebilir olur", () => {
   const out = extractGatedClaims(RAW, false) as Record<string, unknown>[];
-  assert.equal(out[0]!.verdict, "curuk");
-  // İddia SİLİNMİYOR, düşürüldüğü kanıtta iz bırakıyor (§3.2).
+  // `curuk` DEĞİL: o hüküm "o zaman doğruydu" ölçümünü iddia eder ve kimse
+  // yapmadı. Ölçülemeyeni ölçülmüş saymak yasak.
+  assert.equal(out[0]!.verdict, OLCULEMEZ);
+  assert.notEqual(out[0]!.verdict, "curuk");
+  assert.equal(out[0]![UNMEASURABLE_REASON_FIELD], USER_RESOLVABLE);
+  // Kullanıcıya gösterilecek metin SENDEN NE GEREKTİĞİNİ söylüyor.
+  assert.equal(out[0]!.user_question, USER_QUESTION_AUTHORSHIP_DATE);
+  assert.match(String(out[0]!.user_question), /Bu not ne zaman yazıldı/);
+  assert.match(String(out[0]!.user_question), /Tarihi girin/);
+  // İddia SİLİNMİYOR: metin, satır aralığı ve hakemin kanıtı duruyor (§3.2).
   assert.equal(out[0]!.evidence, `sha 123 ${GATE_MARK}`);
+  assert.equal(out[0]!.text, "a");
+  assert.equal(out[0]!.line_start, 1);
   assert.equal(out.length, 3);
+});
+
+test("modelin kendi verdiği user_resolvable'a soru metni doldurulur", () => {
+  const raw = '{"claims":[{"text":"a","line_start":1,"line_end":1,"verdict":"olculemez",' +
+    `"${UNMEASURABLE_REASON_FIELD}":"${USER_RESOLVABLE}","evidence":"bugün yanlış"}]}`;
+  const out = extractGatedClaims(raw, false) as Record<string, unknown>[];
+  assert.equal(out[0]!.user_question, USER_QUESTION_AUTHORSHIP_DATE);
+  assert.equal(out[0]!.evidence, "bugün yanlış"); // kanıt olduğu gibi
+});
+
+test("sıradan olculemez kullanıcı kuyruğuna girmez", () => {
+  const raw = '{"claims":[{"text":"a","line_start":1,"line_end":1,"verdict":"olculemez","evidence":"dış servis"}]}';
+  const out = extractGatedClaims(raw, false) as Record<string, unknown>[];
+  assert.equal(out[0]![UNMEASURABLE_REASON_FIELD], undefined);
+  assert.equal(out[0]!.user_question, undefined);
 });
 
 test("sınır varken dogustan-yanlis olduğu gibi geçer", () => {
@@ -150,7 +232,8 @@ test("kapı kurtarma katmanından geçen çıktıda da işler", () => {
   // Kod çitiyle sarılmış cevap: şema doğrulamasından geçmemiş olabilir, o
   // yüzden kapının ayrıştırıcı tarafı burada tek savunma.
   const out = extractGatedClaims("```json\n" + RAW + "\n```", false) as Record<string, unknown>[];
-  assert.equal(out[0]!.verdict, "curuk");
+  assert.equal(out[0]!.verdict, OLCULEMEZ);
+  assert.equal(out[0]![UNMEASURABLE_REASON_FIELD], USER_RESOLVABLE);
 });
 
 test("ayrıştırılamayan metin null döner (kapı sessizce boş küme uydurmaz)", () => {
@@ -210,6 +293,10 @@ function runTool(body: string): { prompt: string; schema: string } {
 test("uçtan uca: tarihsiz not için alt sürece giden şema dogustan-yanlis taşımaz", () => {
   const { prompt, schema } = runTool(UNDATED_BODY);
   assert.ok(!verdictEnum(JSON.parse(schema)).includes(BORN_WRONG));
+  // Dürüst çıkış alt sürece GERÇEKTEN gidiyor: şemada alan, istemde kural.
+  assert.deepEqual(claimItem(JSON.parse(schema)).properties.unmeasurable_reason?.enum,
+    [USER_RESOLVABLE, NOT_MEASURABLE]);
+  assert.match(prompt, /ONUN YERİNE `curuk` YAZMA/);
   assert.match(prompt, /KULLANILAMAZ/);
   assert.match(prompt, /Bir sırrın VARLIĞI ölçülür/);
 });

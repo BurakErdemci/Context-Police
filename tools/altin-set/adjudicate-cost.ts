@@ -59,7 +59,7 @@ import { evidenceFor } from "./evidence-block.ts";
 import {
   type Usage, addUsage, totalTokens,
   decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
-  buildPrompt, adjudicatorSchema, extractAuthorshipBound,
+  buildPrompt, adjudicatorSchema, authorshipBound,
 } from "./adjudicate-lib.ts";
 
 // --evidence: mekanik katmanın ZATEN ölçtüğü çapa kanıtını isteme koyar.
@@ -562,7 +562,7 @@ async function one(note: string): Promise<void> {
   // Şema ile istem AYNI kaynaktan karar alıyor: notun yazılma zamanı gövdeden
   // çıkarılabiliyorsa `dogustan-yanlis` her ikisinde de açık, çıkarılamıyorsa
   // her ikisinde de kapalı.
-  const bornWrongAvailable = extractAuthorshipBound(body) !== null;
+  const bornWrongAvailable = authorshipBound(body) !== null;
   const r = await runCodex(
     buildPrompt(note, body, evidence),
     bornWrongAvailable ? schemaPaths.open : schemaPaths.gated,

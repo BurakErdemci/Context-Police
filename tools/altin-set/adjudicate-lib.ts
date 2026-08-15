@@ -16,6 +16,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   DATA_FENCE_CLOSE, DATA_FENCE_OPEN, DATA_FENCE_RULE, fenceUntrusted,
 } from "../../core/src/prompt-fence.ts";
+// Aynı gerekçe: "bu not ne zaman yazıldı" bir SINIR İLKELİ, kopyası ıraksar.
+import { type NoteDateSource, noteTimestamp, parseNote } from "../../core/src/importer/parse.ts";
 
 export type Usage = {
   input_tokens?: number;
@@ -400,57 +402,76 @@ export function validateOutPath(raw: string | undefined): OutPathCheck {
  * Seçim ikisi birden: tarih ÇIKARILABİLİYORSA besle (hüküm kazanılabilir hâle
  * gelsin), çıkarılamıyorsa hükmü KAPAT — hem istemde hem şemada hem
  * ayrıştırıcıda. Ölçülemeyen bir hüküm, ulaşılamaz olmalı.
+ *
+ * KAPININ VARDIĞI YER DÜZELTİLDİ (15 Ağu 2026): kapalı hâlde hüküm `curuk`a
+ * DEĞİL `olculemez` + `user_resolvable`a düşüyor. Gerekçe gateClaims'te.
  */
 
 export type AuthorshipBound = { iso: string; source: string };
 
-const TR_MONTHS: Record<string, number> = {
-  oca: 1, şub: 2, sub: 2, mar: 3, nis: 4, may: 5, haz: 6,
-  tem: 7, ağu: 8, agu: 8, eyl: 9, eki: 10, kas: 11, ara: 12,
+const BOUND_SOURCE_LABEL: Record<Exclude<NoteDateSource, "none">, string> = {
+  modified: "frontmatter `modified` alanı",
+  created: "frontmatter `created` alanı",
+  date: "frontmatter `date` alanı",
+  body: "notun gövdesindeki en yeni tarih",
 };
 
-const ISO_DATE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
-const TR_DATE = /(?<!\d)(\d{1,2})\s+(Oca|Şub|Sub|Mar|Nis|May|Haz|Tem|Ağu|Agu|Eyl|Eki|Kas|Ara)[a-zçğıöşü]*\s+(\d{4})/giu;
-
-const iso = (y: number, m: number, d: number): string =>
-  `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-
 /**
- * Notun YAZILMA ZAMANI için bir ALT SINIR çıkarır: gövdede geçen EN YENİ tarih.
+ * Notun YAZILMA ZAMANI için bir ALT SINIR: notun kendi verdiği tarih.
  *
- * Mantık: bir not, içinde andığı en yeni tarihten ÖNCE yazılmış olamaz. Yani
- * gerçek yazım anı [bound, bugün] aralığında. Bu, tam tarihten zayıf ama
- * `dogustan-yanlis` için YETERLİ bir kanıt zemini: iddia `bound`'da da yanlışsa
- * ve o tarihten bu yana onu doğru kılan bir commit yoksa, gerçek yazım anı
- * aralığın neresinde olursa olsun iddia yazıldığında yanlıştı.
+ * Mantık: bir not, ne frontmatter damgasından ne de andığı en yeni tarihten
+ * ÖNCE yazılmış olabilir. Gerçek yazım anı [bound, bugün] aralığında. Tam
+ * tarihten zayıf ama `dogustan-yanlis` için YETERLİ bir kanıt zemini: iddia
+ * `bound`'da da yanlışsa ve o tarihten bu yana onu doğru kılan bir commit yoksa,
+ * gerçek yazım anı aralığın neresinde olursa olsun iddia yazıldığında yanlıştı.
  *
- * Hafıza notları git'te değil (`~/.context-police/golden/...`), yani `git log`
- * yazarlık geçmişi vermiyor; dosya mtime ise kopyalamayla bozulur. Gövdedeki
- * tarih tek ucuz kaynak. Ölçüldü: 28 notun 26'sında var.
+ * MEKANİZMA ÜRÜNÜN — kopya değil (aynı gerekçe: prompt-fence import'u). Burada
+ * eskiden AYRI bir gövde tarayıcısı vardı; "bu not ne zaman yazıldı" sorusuna
+ * ürünün `noteTimestamp`'iyle ıraksak iki cevap veriyordu. Iraksamanın sebebi
+ * dikkatsizlik değil API'ydi: `noteTimestamp` her zaman bir `iso` döndürüyor ve
+ * "not tarih vermiyor" cevabı temsil edilemiyordu. O cevap artık `source:"none"`.
  *
- * ÇIKTI KISITLI: yalnız normalize edilmiş `YYYY-MM-DD`. Gövde GÜVENİLMEYEN
- * metin ve bu değer istemin TALİMAT alanına giriyor — regex'in ürettiğinden
- * başka hiçbir şey oraya geçemesin diye ham eşleşme değil, yeniden kurulmuş
- * tarih dizgesi yazılıyor.
+ * Ölçüm (29 altın not, 15 Ağu 2026): frontmatter 24, gövde 27, birleşik 27 —
+ * yani gövde geri düşüşü GEREKLİ (yalnız frontmatter 3 notu kaybederdi), tersi
+ * sıfır. İki mekanizma değil, tek mekanizmanın iki kaynağı.
  */
-export function extractAuthorshipBound(body: string): AuthorshipBound | null {
-  let best: string | null = null;
-  const take = (s: string): void => { if (best === null || s > best) best = s; };
-  for (const m of body.matchAll(ISO_DATE)) {
-    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
-    if (y < 2000 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) continue;
-    take(iso(y, mo, d));
-  }
-  for (const m of body.matchAll(TR_DATE)) {
-    const d = Number(m[1]), y = Number(m[3]);
-    const mo = TR_MONTHS[m[2]!.toLowerCase()];
-    if (mo === undefined || y < 2000 || y > 2100 || d < 1 || d > 31) continue;
-    take(iso(y, mo, d));
-  }
-  return best === null ? null : { iso: best, source: "notun gövdesindeki en yeni tarih" };
+export function authorshipBound(raw: string, nowIso?: string): AuthorshipBound | null {
+  const { frontmatter, body } = parseNote(raw);
+  const stamp = noteTimestamp(frontmatter, nowIso ?? new Date().toISOString(), { body });
+  if (stamp.source === "none") return null;
+  // Gün çözünürlüğü: sınır `git log --until=` argümanı oluyor ve saat/dilim
+  // kısmı orada bir şey kazandırmıyor, yanlış dilim yorumuyla kaybettirebilir.
+  return { iso: stamp.iso.slice(0, 10), source: BOUND_SOURCE_LABEL[stamp.source] };
 }
 
 export const BORN_WRONG = "dogustan-yanlis";
+export const OLCULEMEZ = "olculemez";
+
+/*
+ * --- `olculemez` ALT SEBEBİ (M4.2, 15 Ağu 2026 mimari hükmü) --------------
+ *
+ * `olculemez` iki AYRI şeyi anlatıyordu ve ikisi kullanıcı için taban tabana
+ * zıt: "hiçbir ölçüm bunu çözemez" (depo dışı yol, ağ, kullanıcı beyanı) ile
+ * "ben ölçemem ama SEN çözebilirsin" (notun yazılma tarihi eksik). İkincisi bir
+ * SORU KUYRUĞU; birincisi kapanmış bir dosya. Tek etiketle ikisi ayırt
+ * edilemediği için kullanıcıya sorulabilecek her şey sessizce kayboluyordu.
+ */
+/** UI dalı: `verdict === OLCULEMEZ && unmeasurable_reason === USER_RESOLVABLE` → soru kuyruğu. */
+export const USER_RESOLVABLE = "user_resolvable";
+/** Ölçümle kapanmış hâl; alanın YOKLUĞU da bunu demektir (eski çıktılarla uyum). */
+export const NOT_MEASURABLE = "not_measurable";
+export const UNMEASURABLE_REASON_FIELD = "unmeasurable_reason";
+
+/**
+ * Kullanıcının GÖRECEĞİ metin. Ölçüt: "ölçemedim" demek yetmez, SENDEN NE
+ * GEREKTİĞİNİ söylemeli — bu kayıt bir bildirim değil, cevaplanabilir bir soru.
+ */
+export const USER_QUESTION_AUTHORSHIP_DATE =
+  "Bu not ne zaman yazıldı? Not hiçbir tarih taşımıyor: frontmatter'ında " +
+  "`modified`/`created`/`date` alanı yok, gövdesinde de tarih geçmiyor. " +
+  "Hakem bu iddianın yazıldığı an da yanlış olduğunu söyledi; bunu ölçmek için " +
+  "notun yazılma tarihi gerekiyor. Tarihi girin ya da nota bir `modified:` alanı " +
+  "ekleyin — hüküm o zaman ölçülebilir hâle gelir.";
 export const VERDICTS_WITH_HISTORY = ["gecerli", "curuk", BORN_WRONG, "olculemez"] as const;
 export const VERDICTS_WITHOUT_HISTORY = ["gecerli", "curuk", "olculemez"] as const;
 
@@ -460,6 +481,23 @@ export const VERDICTS_WITHOUT_HISTORY = ["gecerli", "curuk", "olculemez"] as con
  * yorumlar, şemayı yorumlamaz.
  */
 export function adjudicatorSchema(opts: { bornWrongAvailable: boolean }): unknown {
+  const properties: Record<string, unknown> = {
+    text: { type: "string" },
+    line_start: { type: "integer" },
+    line_end: { type: "integer" },
+    verdict: {
+      enum: [...(opts.bornWrongAvailable ? VERDICTS_WITH_HISTORY : VERDICTS_WITHOUT_HISTORY)],
+    },
+    evidence: { type: "string" },
+  };
+  // Alt sebep YALNIZ kapı kapalıyken şemada. Sebep triadın kendisi: istem bu
+  // ayrımı yalnız o dalda anlatıyor, şema da yalnız o dalda kabul etmeli.
+  // Kapı açıkken (sınır beslenmiş) `user_resolvable` diyecek bir şey YOK —
+  // notun tarihi ölçülmüş durumda — ve alanı yine de sunmak modele
+  // kullanmayacağı bir kaçış yolu göstermek olurdu.
+  if (!opts.bornWrongAvailable) {
+    properties[UNMEASURABLE_REASON_FIELD] = { enum: [USER_RESOLVABLE, NOT_MEASURABLE] };
+  }
   return {
     type: "object",
     additionalProperties: false,
@@ -471,42 +509,62 @@ export function adjudicatorSchema(opts: { bornWrongAvailable: boolean }): unknow
           type: "object",
           additionalProperties: false,
           required: ["text", "line_start", "line_end", "verdict", "evidence"],
-          properties: {
-            text: { type: "string" },
-            line_start: { type: "integer" },
-            line_end: { type: "integer" },
-            verdict: {
-              enum: [...(opts.bornWrongAvailable ? VERDICTS_WITH_HISTORY : VERDICTS_WITHOUT_HISTORY)],
-            },
-            evidence: { type: "string" },
-          },
+          properties,
         },
       },
     },
   };
 }
 
-export const GATE_MARK = "[kapı: dogustan-yanlis -> curuk, notun yazılma zamanı ölçülemedi]";
+export const GATE_MARK =
+  "[kapı: dogustan-yanlis -> olculemez (kullanıcı çözebilir), notun yazılma tarihi ölçülemedi]";
 
 /**
  * Şema kapısının AYRIŞTIRICI tarafı.
  *
  * Neden şema yetmiyor: `--output-schema` bir SÖZLEŞME, garanti değil — kurtarma
  * katmanı (çit soyma, dengeli blok) şemadan geçmemiş metni de ayrıştırabiliyor
- * ve akış kesildiğinde kısmi çıktı geliyor. Beslenmemiş bir yazılma zamanıyla
- * verilmiş `dogustan-yanlis` KAZANILAMAZ bir hüküm olduğu için burada `curuk`a
- * düşürülüyor — silinmiyor: iddia korunuyor, yalnız kanıtlanabilir olana
- * indirgeniyor ve düşürüldüğü kanıta İZ olarak yazılıyor (§3.2, hiçbir şey
- * silinmez; bir kararın geri alınabilmesi için görünür olması gerekir).
+ * ve akış kesildiğinde kısmi çıktı geliyor.
+ *
+ * NEREYE DÜŞÜRÜLÜYOR — ve neden artık `curuk` DEĞİL (mimari hüküm, 15 Ağu 2026).
+ * `dogustan-yanlis` tümüyle GEÇMİŞ hakkında bir iddia. Yazılma tarihi
+ * ölçülemediği hâlde verilmişse hakem çoğunlukla iki yarının HİÇBİRİNİ
+ * ölçmemiştir — bu hüküm belirsizliğin döküldüğü kova olarak ÖLÇÜLDÜ (14 Ağu:
+ * 65 `dogustan-yanlis`in %41,5'i altın setin `gecerli` dediği iddianın üstünde).
+ * `curuk` ise "O ZAMAN DOĞRUYDU, şimdi yanlış" diye bir ölçüm İDDİA EDER.
+ * Kimsenin yapmadığı o ölçümü kapının kendisi uydurursa araç, kullanıcının
+ * bilerek yazdığı ve hâlâ geçerli bir notu "çürümüş" diye attırabilir —
+ * ölçülemeyeni ölçülmüş saymak bu ürünün var oluş sebebi olan arızanın ta
+ * kendisi. O yüzden hüküm `olculemez` + `user_resolvable`: kullanıcıya
+ * SORULABİLİR bir eksik olarak kaydediliyor.
+ *
+ * İddia SİLİNMİYOR: metin, satır aralığı ve hakemin kanıtı olduğu gibi duruyor,
+ * üstüne düşürme izi ekleniyor (§3.2 — bir kararın geri alınabilmesi için
+ * görünür olması gerekir).
  */
 export function gateClaims(claims: unknown[], bornWrongAvailable: boolean): unknown[] {
   if (bornWrongAvailable) return claims;
   return claims.map((c) => {
     if (typeof c !== "object" || c === null) return c;
     const rec = c as Record<string, unknown>;
-    if (rec.verdict !== BORN_WRONG) return c;
-    const ev = typeof rec.evidence === "string" ? rec.evidence : "";
-    return { ...rec, verdict: "curuk", evidence: ev ? `${ev} ${GATE_MARK}` : GATE_MARK };
+    if (rec.verdict === BORN_WRONG) {
+      const ev = typeof rec.evidence === "string" ? rec.evidence : "";
+      return {
+        ...rec,
+        verdict: OLCULEMEZ,
+        [UNMEASURABLE_REASON_FIELD]: USER_RESOLVABLE,
+        user_question: USER_QUESTION_AUTHORSHIP_DATE,
+        evidence: ev ? `${ev} ${GATE_MARK}` : GATE_MARK,
+      };
+    }
+    // Model alt sebebi KENDİ verdiyse (şema o dalda kabul ediyor) soru metni
+    // yine buradan gelir: kullanıcıya gösterilecek cümle modelin serbest
+    // metnine bırakılmıyor.
+    if (rec.verdict === OLCULEMEZ && rec[UNMEASURABLE_REASON_FIELD] === USER_RESOLVABLE
+      && typeof rec.user_question !== "string") {
+      return { ...rec, user_question: USER_QUESTION_AUTHORSHIP_DATE };
+    }
+    return c;
   });
 }
 
@@ -527,11 +585,25 @@ function bornWrongSection(bound: AuthorshipBound | null): { listSuffix: string; 
     return {
       listSuffix: "  — BU NOT İÇİN KAPALI, aşağıya bak",
       rule: `
-Bu notun yazılma zamanı ölçülemedi (gövdesinde tarih yok). O yüzden "o zaman"
-ne olduğu KANITLANAMAZ ve \`dogustan-yanlis\` bu koşumda KULLANILAMAZ — çıktı
-şeması da onu kabul etmiyor. Bugün yanlış olan bir iddia için en fazla
-\`curuk\` diyebilirsin. Bu bir kısıtlama değil, kanıt yükümlülüğü: kanıtı
-olmayan hüküm verilmez.`,
+Bu notun yazılma tarihi ÖLÇÜLEMEDİ: ne frontmatter'ında \`modified\`/\`created\`/
+\`date\` alanı var ne de gövdesinde tarih geçiyor. O yüzden "o zaman" ne olduğu
+KANITLANAMAZ ve \`dogustan-yanlis\` bu koşumda KULLANILAMAZ — çıktı şeması da
+onu kabul etmiyor. Çağdaş kanıt olmadan o hükme uzanmak yasak.
+
+ONUN YERİNE \`curuk\` YAZMA. \`curuk\` "o zaman DOĞRUYDU" diye bir ölçüm İDDİA
+eder; o ölçümü yapmadıysan bu uydurmadır — ve bedeli somut: kullanıcının bilerek
+yazdığı, hâlâ geçerli bir notu çöpe attırır. Ayrım şu:
+
+  - İddia bugün yanlış VE bir zamanlar doğru olduğunun somut kanıtı elinde
+    (\`git log\`/\`git show\` ile o hâli GÖRDÜN) → \`curuk\`.
+  - İddia bugün yanlış ama bir zamanlar doğru olduğunu gösteremiyorsun ve
+    eksiğin yalnız notun YAZILMA TARİHİ → dürüst çıkış:
+        verdict = \`olculemez\`,  ${UNMEASURABLE_REASON_FIELD} = \`${USER_RESOLVABLE}\`
+    Bu "çözümsüz" demek değil: "bu ölçümü kullanıcı açabilir" demek. Tarih
+    kullanıcıdan gelince hüküm yeniden ölçülür. Bugün yaptığın ölçümü
+    \`evidence\` alanına YİNE YAZ — kanıt atılmıyor.
+  - Depoya karşı hiçbir biçimde doğrulanamayan iddia (dış servis, ağ, kullanıcı
+    beyanı) → \`olculemez\`, ${UNMEASURABLE_REASON_FIELD} = \`${NOT_MEASURABLE}\`.`,
     };
   }
   return {
@@ -576,7 +648,7 @@ export function buildPrompt(note: string, body: string, evidence: string | null)
   const ev = evidence
     ? `\n${fenceUntrusted("ÖNCEDEN ÖLÇÜLMÜŞ KANIT (mekanik katman, aynı commit)", evidence)}\n\nBu kanıt zaten ölçüldü; yeniden ölçme. Yalnız kanıtın YETMEDİĞİ yerlerde depoya bak.\n`
     : "";
-  const bornWrong = bornWrongSection(extractAuthorshipBound(body));
+  const bornWrong = bornWrongSection(authorshipBound(body));
   return `Bir yazılım deposunun kök dizinindesin. Depo \`b4065f1\` commit'ine sabitlenmiş.
 
 Aşağıda o depoya ait bir hafıza notu var. Görevin bu notu OKUMAK değil, ÖLÇMEK:
