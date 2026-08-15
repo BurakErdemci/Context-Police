@@ -240,6 +240,20 @@ const USAGE_FIELDS = [
  */
 const MAX_STREAM_LINE = 1_000_000;
 
+/**
+ * Tavanın TEK tanımı. Soru "biriken tampon büyüdü mü" değil, "bu satır büyük mü":
+ * aynı sınıf üç turda üç kez çıktı (atılan tampon hiç sayılmıyordu; tavan UTF-16
+ * kod birimi sayıyordu; tavan hiç bakılmadan tamamlanmış satır geçiyordu) — üçü
+ * de tavanın satırın ÜRETİLDİĞİ yerde değil, tamponda ölçülmesinden.
+ *
+ * Bellek sınırlandığı için ölçü BAYT. `* 3` ön kontrolü yaygın yolu bedava
+ * bırakıyor: UTF-8 kod birimi başına 3 bayttan fazlasını asla harcamaz, yani o
+ * sınırın altında tavan erişilemez ve byteLength tamponu dolaşmak zorunda kalmaz.
+ */
+function exceedsLineCeiling(s: string): boolean {
+  return s.length * 3 > MAX_STREAM_LINE && Buffer.byteLength(s, "utf8") > MAX_STREAM_LINE;
+}
+
 /** Ayrıştırıcının BEKLEDİĞİ olay adları; dışındaki her ad şema kayması sayılır. */
 const KNOWN_EVENT_TYPES = new Set(["item.completed", "turn.completed"]);
 
@@ -313,22 +327,29 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
         // Atılan satırın KUYRUĞU yeni bir satır değil: `dropping` olmadan bu
         // parça handleLine'a giriyor ve kesme noktası şansa `{`'a denk gelirse
         // "bozuk satır" diye ikinci kez sayılıyordu.
-        if (dropping) dropping = false;
-        else handleLine(line);
+        if (dropping) {
+          dropping = false;
+          continue;
+        }
+        // Tamamlanmış satır da tavana tabi. Sonlandırıcı yeni-satırı aynı
+        // chunk'ta gelen bir satır eskiden HİÇ ölçülmeden handleLine'a giriyordu
+        // (ölçüldü, doğrulama turu 3: 1.000.089 baytlık satır ayrıştırıldı).
+        // `dropping` KURULMAZ: kuyruğu değil satırın tamamı zaten tüketildi.
+        if (exceedsLineCeiling(line)) {
+          oversizeDrops++;
+          unparsedLines++;
+          continue;
+        }
+        handleLine(line);
       }
       // Sınırı aşan tampon atılıyor ama SAYILIYOR: atılan şey bozuk bir ikili
       // çıktı da olabilir, sınırın üstünde GEÇERLİ bir olay da (ölçüldü, doğrulama
       // turu 14 Ağu: 1,1 MiB'lık geçerli bir olay hiçbir sayacı artırmadan
       // siliniyordu — "akış gelmedi" ile "akış anlaşılmadı" ayrımı bu yolda hâlâ
       // kapalıydı). Satır başına TEK sayım: sınır tekrar tekrar aşılsa da atılan
-      // şey hâlâ aynı satır.
-      // The ceiling bounds MEMORY, so it must be measured in bytes: `.length`
-      // counts UTF-16 code units, and a 1.2 MB UTF-8 line of accented text sat
-      // under 1,000,000 units and sailed through (verification round 2, 15 Aug).
-      // The `* 3` pre-check keeps the common path free: UTF-8 never spends more
-      // than 3 bytes per code unit, so under that bound the ceiling is
-      // unreachable and byteLength does not need to walk the buffer.
-      if (!dropping && rest.length * 3 > MAX_STREAM_LINE && Buffer.byteLength(rest, "utf8") > MAX_STREAM_LINE) {
+      // şey hâlâ aynı satır. Yeni-satırı hiç gelmeyen satır da sınırlanmalı;
+      // ölçüt tamamlanmış satırla AYNI (exceedsLineCeiling).
+      if (!dropping && exceedsLineCeiling(rest)) {
         rest = "";
         dropping = true;
         oversizeDrops++;
