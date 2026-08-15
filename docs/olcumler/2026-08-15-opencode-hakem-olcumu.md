@@ -9,13 +9,24 @@ Depo pin'i `b4065f1`, izole klon üzerinde.
 bir modelin hakem olarak ne kadar iyi olduğu*. Maliyet ölçütü de bedava
 modelle anlamsız biçimde geçer.
 
+> **DÜZELTME (15 Ağu 2026 akşam, denetim turu).** Bu raporun ilk sürümü opencode
+> yakalamasını **%29,3** diye verdi. Sayı yanlıştı ve sebebi ölçme aletiydi:
+> `score.ts` kapsamı hakemin KENDİ çıktısından türetiyordu, dolayısıyla hakemin
+> `parse_failed` ile çuvalladığı 6 not paydadan tamamen düştü ve onlardaki 19
+> hedef "kaçırılmış" sayılmadı. Yani alet bozuldukça skor yükseliyordu. Kapsam
+> artık maliyet günlüğündeki DENENMİŞ not listesinden geliyor; doğru sayı
+> **%20,0**. Aşağıdaki tablo düzeltilmiş hâliyle duruyor.
+> Codex sayıları ETKİLENMEDİ (o koşum 28/28 notu kapsıyor), yani M4'ün kapı
+> tabanı değişmedi.
+
 ## Sonuç
 
 | | Codex (gpt-5.6-sol) | **opencode (deepseek-v4-flash-free)** |
 |---|---|---|
-| kapsanan not | 28/28 | **22/28** |
+| kapsanan not | 28/28 | 28/28 denendi, **22'si iddia üretebildi** |
 | çıkarılan iddia | 1210 | **397** |
-| yakalama | 53/60 = %88,3 | **12/41 = %29,3** |
+| yakalama | 53/60 = %88,3 | **12/60 = %20,0** |
+| not düzeyi yakalama | 18/18 = %100 | **8/18 = %44,4** |
 | yanlış alarm | 24 | **2** |
 | maliyet | kotalı | **$0,00** |
 
@@ -28,8 +39,8 @@ saatinde ~35 dk), **maliyet sıfır** — 28 koşumun hepsinde `cost: 0`.
 ## Okuma: aşırı temkinli bir hakem
 
 Profil Codex'in tam tersi. Yanlış alarm 24'ten **2'ye** düşüyor, ama yakalama
-%88'den **%29'a** iniyor. Model yanlış bir şey söylemekten kaçınıyor ve
-bedeli hedeflerin yaklaşık dörtte üçünü kaçırmak oluyor.
+%88'den **%20'ye** iniyor. Model yanlış bir şey söylemekten kaçınıyor ve
+bedeli hedeflerin beşte dördünü kaçırmak oluyor.
 
 **Kaçırmanın birinci sebebi yargı değil, BÖLME.** opencode not başına ortalama
 **18 iddia** çıkarıyor, Codex **43**. Etiketlenmeyen bir iddia hiç

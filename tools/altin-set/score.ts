@@ -2,7 +2,7 @@
 //
 // Kullanım:
 //   node --experimental-strip-types tools/altin-set/score.ts \
-//     docs/olcumler/altin-set/golden-v1.jsonl <hakem-ciktisi.jsonl>
+//     docs/olcumler/altin-set/golden-v1.jsonl <hakem-ciktisi.jsonl> [maliyet.jsonl]
 //
 // NEDEN KATI EŞLEME DEĞİL: iki taraf iddiaları farklı bölüyor (ölçüldü,
 // 13 Ağu: hakem 3 notta 192 iddia çıkarırken altın set 68 çıkardı, bölme
@@ -36,9 +36,9 @@ type Claim = {
   unmeasurable_reason?: string;
 };
 
-const [goldenPath, actualPath] = process.argv.slice(2);
+const [goldenPath, actualPath, costPath] = process.argv.slice(2);
 if (!goldenPath || !actualPath) {
-  console.error("kullanım: score.ts <golden.jsonl> <hakem.jsonl>");
+  console.error("kullanım: score.ts <golden.jsonl> <hakem.jsonl> [maliyet.jsonl]");
   process.exit(2);
 }
 
@@ -55,9 +55,33 @@ const overlaps = (a: Claim, b: Claim) =>
 // Yalnız hakemin GERÇEKTEN baktığı notlar puanlanır. Bir not hiç
 // denetlenmediyse onu kaçırmak hakemin değil sıralamanın sorunudur; ikisini
 // karıştırmak hangi katmanın kusurlu olduğunu gizler.
-const covered = new Set(H.map((h) => h.note));
+//
+// Coverage comes from the cost log's ATTEMPTED notes, not from the judge's own
+// output: "never adjudicated" and "adjudicated and produced nothing" are not the
+// same thing. Measured 15 Aug 2026 — an opencode run lost 6 notes to
+// `parse_failed`, their 19 targets left the denominator, and recall read
+// 12/41 = 29.3% instead of 12/60 = 20.0%. That inflated number reached a report.
+const attempted = new Set<string>(
+  costPath
+    ? readFileSync(costPath, "utf8").split("\n").filter((l) => l.trim())
+        .map((l) => JSON.parse(l).note)
+        .filter((n: unknown): n is string => typeof n === "string" && n.length > 0)
+    : [],
+);
+if (!costPath) {
+  console.error(
+    "UYARI: maliyet günlüğü verilmedi — kapsam yalnız hakem çıktısından türetiliyor.\n" +
+    "  Hakemin çuvalladığı notlar paydadan düşer, yani oran olduğundan yüksek çıkar.\n" +
+    "  Üçüncü argüman olarak <hakem>-maliyet.jsonl verin.",
+  );
+}
+const covered = new Set([...H.map((h) => h.note), ...attempted]);
 const gCovered = G.filter((g) => covered.has(g.note));
 const skipped = [...new Set(G.map((g) => g.note))].filter((n) => !covered.has(n));
+// Attempted, produced nothing. Stays in the denominator, and is printed
+// separately: as this count grows, what needs questioning is the instrument's
+// health rather than the judge's verdicts.
+const barren = [...attempted].filter((n) => !H.some((h) => h.note === n)).sort();
 
 const targets = gCovered.filter((g) => WRONG.has(g.verdict));
 const caught = targets.filter((g) => H.some((h) => overlaps(g, h) && WRONG.has(h.verdict)));
@@ -85,6 +109,10 @@ console.log(`altın set : ${goldenPath}`);
 console.log(`hakem     : ${actualPath}`);
 console.log(`\nkapsanan not: ${covered.size}/${new Set(G.map((g) => g.note)).size}` +
   (skipped.length ? `  (denetlenmeyen: ${skipped.join(", ")})` : ""));
+if (barren.length) {
+  console.log(`  bunların ${barren.length}'i DENENDİ ama tek iddia üretemedi (payda İÇİNDE): ` +
+    barren.join(", "));
+}
 console.log(`hakem iddiası: ${H.length}   altın iddia (kapsanan notlarda): ${gCovered.length}`);
 
 console.log(`\n── ÇIKIŞ KAPISI ─────────────────────────`);
@@ -118,7 +146,12 @@ const gNotes = [...new Set(gCovered.map((g) => g.note))];
 const decayedNotes = gNotes.filter((n) => gCovered.some((g) => g.note === n && WRONG.has(g.verdict)));
 const flagged = decayedNotes.filter((n) => H.some((h) => h.note === n && WRONG.has(h.verdict)));
 const cleanNotes = gNotes.filter((n) => !decayedNotes.includes(n));
-const falseFlagged = cleanNotes.filter((n) => H.some((h) => h.note === n && WRONG.has(h.verdict)));
+// Derived from the claim-level set, never recomputed. The earlier rule here
+// skipped the overlap test, so a flag with no golden claim under it counted as
+// a false alarm — the exemption the claim-level rule grants deliberately. The
+// two numbers printed under the same name measured different things and were
+// neither subset nor superset of each other.
+const falseFlagged = cleanNotes.filter((n) => falseAlarms.some((f) => f.note === n));
 console.log(`\n── not düzeyine yuvarlama (M3 ile aynı birim) ──`);
 console.log(`  yakalama      ${flagged.length}/${decayedNotes.length}   %${pct(flagged.length, decayedNotes.length)}   (M3: 6/17 = %35,3)`);
 console.log(`  yanlış alarm  ${falseFlagged.length}/${cleanNotes.length}                (M3: 0/11)`);
