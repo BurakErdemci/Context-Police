@@ -18,12 +18,22 @@
 // hakem kod olduğu sürece o iddialar ulaşılamaz (CLAUDE.md §2.1), paydaya
 // konursa tavan yapay olarak düşer ve denetçi ölçülemeyeni kaçırdığı için
 // cezalandırılır.
+//
+// O PAYDANIN AÇTIĞI DELİK ve neden aşağıda bir sayı daha var: `olculemez`
+// paydadan DÜŞTÜĞÜ için her şeye "ölçemedim" diyen dejenere bir hakem kusursuz
+// bir yanlış-alarm oranı alır — sıfır yanlış alarm, çünkü hiç hüküm vermemiş.
+// Kapının üç sayısı bu yüzden TEK BAŞINA okunamaz olmalı: aynı blokta,
+// kullanıcıya devredilen (`olculemez` + `user_resolvable`) iddia sayısı da
+// basılıyor. Üç sayının hesabı DEĞİŞMEDİ; yanına ne kadarının puntolandığı
+// yazılıyor.
 
 import { readFileSync } from "node:fs";
 
 type Claim = {
   note: string; claim_id?: string; line_start: number; line_end: number;
   text: string; verdict: string;
+  /** `olculemez` alt sebebi; `user_resolvable` = kullanıcı çözebilir (adjudicate-lib.ts). */
+  unmeasurable_reason?: string;
 };
 
 const [goldenPath, actualPath] = process.argv.slice(2);
@@ -63,6 +73,12 @@ const falseAlarms = H.filter(
     !gCovered.some((g) => overlaps(g, h) && WRONG.has(g.verdict)),
 );
 
+// Kullanıcıya devredilen iddialar: skorun paydasına GİRMİYORLAR, o yüzden
+// sayıları raporun birinci sınıf parçası. Alanın YOKLUĞU sıradan `olculemez`
+// demek (eski çıktılar ve `not_measurable` böyle okunur).
+const userResolvable = H.filter((h) => h.verdict === "olculemez" && h.unmeasurable_reason === "user_resolvable");
+const userResolvableNotes = new Set(userResolvable.map((h) => h.note));
+
 const pct = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(1) : "—");
 
 console.log(`altın set : ${goldenPath}`);
@@ -74,6 +90,8 @@ console.log(`hakem iddiası: ${H.length}   altın iddia (kapsanan notlarda): ${g
 console.log(`\n── ÇIKIŞ KAPISI ─────────────────────────`);
 console.log(`  YAKALAMA      ${caught.length}/${targets.length}   %${pct(caught.length, targets.length)}`);
 console.log(`  YANLIŞ ALARM  ${falseAlarms.length}   (geçerli altın iddia: ${gValid.length})`);
+console.log(`  KULLANICIYA   ${userResolvable.length}   (olculemez · kullanıcı çözebilir, ${userResolvableNotes.size} notta` +
+  ` — PAYDA DIŞI: yukarıdaki üç sayı bunları hiç görmez)`);
 
 const missed = targets.filter((g) => !caught.includes(g));
 if (missed.length) {
@@ -104,3 +122,4 @@ const falseFlagged = cleanNotes.filter((n) => H.some((h) => h.note === n && WRON
 console.log(`\n── not düzeyine yuvarlama (M3 ile aynı birim) ──`);
 console.log(`  yakalama      ${flagged.length}/${decayedNotes.length}   %${pct(flagged.length, decayedNotes.length)}   (M3: 6/17 = %35,3)`);
 console.log(`  yanlış alarm  ${falseFlagged.length}/${cleanNotes.length}                (M3: 0/11)`);
+console.log(`  kullanıcıya   ${gNotes.filter((n) => userResolvableNotes.has(n)).length}/${gNotes.length}                (payda dışı)`);
