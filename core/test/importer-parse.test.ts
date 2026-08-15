@@ -84,7 +84,9 @@ test("extractAnchors: kota tavanı KÜÇÜLTMEZ — az türlü notta 16 dolu kul
 
 test("extractAnchors: dört tür de kotasından pay alır, öncelik sırası korunur", () => {
   const text =
-    Array.from({ length: 10 }, (_, i) => `\`sembol${i}\``).join(" ") + " " +
+    // camelCase şart: M4.6'dan beri tek-kelime küçük harfli bir sembol seçici
+    // sayılmıyor ve çapa üretmiyor (m4-6-anchor-quality.test.ts).
+    Array.from({ length: 10 }, (_, i) => `\`sembolAdi${i}\``).join(" ") + " " +
     Array.from({ length: 10 }, (_, i) => `src/m${i}/d${i}.ts`).join(" ") + " " +
     Array.from({ length: 10 }, (_, i) => `abcdef${i}0`).join(" ") + " " +
     Array.from({ length: 10 }, (_, i) => `~/dis${i}/y${i}.json`).join(" ");

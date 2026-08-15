@@ -207,8 +207,65 @@ const ANCHOR_PRIORITY: readonly Anchor["kind"][] = ["symbol", "file_path", "comm
 // aşırı-üretimden büyük: gerçekte çapasız bir not sahte çapayla `unanchored`
 // olmaktan çıkıyor ve M0-D5'in "çapasız not nötrdür" koruması siliniyordu.
 const SHA_RE = /(?<![0-9a-f-])[0-9a-f]{7,40}(?![0-9a-f-])/g;
-const PATH_RE = /(?:~\/|\/)?[\w.-]+(?:\/[\w.-]+)+\.\w{1,8}\b/g;
+
+/**
+ * The leading lookbehind is a PERFORMANCE fix, not a semantic one.
+ *
+ * Without it the engine retries the whole match at every offset inside a long
+ * unbroken `[\w.-]` run, so cost is quadratic in the run length (measured
+ * 12 Aug 2026: 4 KiB 15,7 ms · 8 KiB 59,3 ms · 16 KiB 242 ms · 32 KiB 1.016 ms,
+ * exactly 4x per doubling). The lookbehind kills every restart that begins
+ * mid-token, which linearises it — measured on the pathological input,
+ * node 24.10 / macOS: 18.180 ms -> 0,63 ms.
+ *
+ * It DOES change output for one input class: a path glued directly to the
+ * preceding token with no separator (`see~/x/a.ts`, `foo//a/b.ts`). Previously
+ * the engine walked into the token and emitted the tail as an anchor — and
+ * could even flip its kind, since restarting one character later turns
+ * `/a/b.ts` (external_path) into `a/b.ts` (file_path). Now such a path is not
+ * emitted at all. Re-measured 15 Aug 2026 over 122 real note files
+ * (`~/.claude/projects/*​/memory/*.md` + the golden set): ZERO occurrences,
+ * 209 path matches identical on both regexes. The class is pinned by test
+ * rather than by corpus, because the corpus does not currently contain it.
+ */
+const PATH_RE = /(?<![\w.\-/~])(?:~\/|\/)?[\w.-]+(?:\/[\w.-]+)+\.\w{1,8}\b/g;
+
 const SYMBOL_RE = /`([A-Za-z_$][A-Za-z0-9_$]{3,})(?:\(\))?`/g;
+
+/**
+ * A symbol anchor exists to answer ONE question: "has this note's subject moved?"
+ * A token that appears in most of the history cannot answer it. `SYMBOL_RE` alone
+ * matches any backticked word, so ordinary prose keywords became anchors.
+ *
+ * Rule: keep a symbol only if it carries a naming-convention marker — a `_`/`$`,
+ * or an uppercase letter past the first position together with a lowercase one
+ * (camelCase / PascalCase compounds). Single-word all-lower (`return`, `list`,
+ * `write`) and single-word all-upper (`HEAD`, `PATH`) are rejected.
+ *
+ * Measured (15 Aug 2026, 305 distinct symbols from the 28 golden GaMachine notes,
+ * scored by commits touched via `git log --all -S<sym>` over a 263-commit repo):
+ *
+ *              n    median  mean   >20 commits
+ *   kept      212      3     5,3      11
+ *   rejected   93     23    38,2      51
+ *
+ * Worst rejected: `return` 193 commits (73% of history), `list` 142, `type` 131,
+ * `None` 127, `write` 115. Worst kept: `workspace_path` 35.
+ *
+ * A `()` call-suffix escape hatch was measured and REJECTED: across the golden
+ * set only 16 symbols are written as `` `name()` `` and it would rescue exactly
+ * 3 rejected ones (`decide`, `Sync`, `poll`) — all still low-selectivity words.
+ * A language-keyword stoplist was likewise unnecessary: every keyword this rule
+ * must catch is already a single-case single word, and a stoplist would have
+ * missed the larger share of the noise (`list`, `value`, `tool`, `memory`).
+ *
+ * Cost of a false rejection is bounded: a note left with no anchors falls into
+ * the `unanchored` class, which is neutral by M0-D5 — it does not score.
+ */
+function isSelectiveSymbol(s: string): boolean {
+  if (/[_$]/.test(s)) return true;
+  return /[A-Z]/.test(s.slice(1)) && /[a-z]/.test(s);
+}
 
 export function extractAnchors(text: string): { anchors: Anchor[]; dropped: number } {
   const seen = new Set<string>();
@@ -272,6 +329,7 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
   for (const m of text.matchAll(SYMBOL_RE)) {
     const v = m[1]!;
     if (/^[0-9a-f]{7,40}$/.test(v)) continue; // backtick'li sha zaten commit_sha
+    if (!isSelectiveSymbol(v)) continue;
     push("symbol", v);
   }
 
