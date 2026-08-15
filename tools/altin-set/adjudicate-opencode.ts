@@ -71,8 +71,8 @@
 //     [--evidence] [--parallel N] [--timeout-sec 600] [--model M] [--binary PATH] \
 //     <worktree> <notlar-dizini> <cikti.jsonl> <not> [<not> ...]
 
-import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { extractAnchors } from "../../core/src/importer/parse.ts";
 import { openGit } from "../../core/src/signals/git.ts";
@@ -80,7 +80,7 @@ import { checkAnchors } from "../../core/src/signals/anchor-drift.ts";
 import { evidenceFor } from "./evidence-block.ts";
 import {
   type Usage, addUsage,
-  appendTail, validateRoot, validateNoteName, validateOutPath,
+  appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
   buildPrompt, adjudicatorSchema, authorshipBound, extractGatedClaims,
 } from "./adjudicate-lib.ts";
 
@@ -165,9 +165,76 @@ function killProcessGroup(pid: number | undefined): void {
   }
 }
 
+/**
+ * İKİNCİ deneme: grup VE düz PID, ilki hata vermese bile.
+ *
+ * `killProcessGroup` düz PID'ye yalnız grup denemesi İSTİSNA fırlattığında
+ * düşüyor; sinyalin gönderildiği ama teslim edilmediği hâlde (izin sorunu, D
+ * durumundaki süreç) fallback hiç denenmiyor. Kardeş araçta ölçülmüş bulgu
+ * (M4.1, adjudicate-kill-failure-leaks).
+ */
+function killHard(pid: number | undefined): void {
+  if (pid == null) return;
+  try { process.kill(-pid, "SIGKILL"); } catch { /* grup yok */ }
+  try { process.kill(pid, "SIGKILL"); } catch { /* zaten ölmüş */ }
+}
+
 function isAlive(pid: number | undefined): boolean {
   if (pid == null) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// SIGKILL'den sonra çekirdeğin süreci toplaması milisaniyeler sürer; 5 sn
+// cömert bir üst sınır. Bu süre dolduysa kill GERÇEKTEN tutmamıştır.
+// (Kardeş araçtaki `KILL_GRACE_MS` ile aynı gerekçe ve aynı değer.)
+const KILL_GRACE_MS = 5_000;
+
+/**
+ * Kesme anında `pid`'nin ALTINDA duran her süreç, geçişli olarak.
+ *
+ * Neden grup kill'i yetmiyor — ÖLÇÜLDÜ (15 Ağu 2026, fake-killstat probe'u):
+ * `setsid()` çağıran bir torun KENDİ oturumuna geçiyor, dolayısıyla
+ * `kill(-pgid)` ona ULAŞMIYOR. Çocuk 3 ms'de ölüp `close` yayıyor, torun 300
+ * saniye yaşamaya devam ediyor ve satır "hiçbir şey kaçmadı" diyor. Torun grubu
+ * terk etse de kesme anında PPID zinciri HÂLÂ çocuğa çıkıyor (ebeveyni ölmeden
+ * önce bakıldığı için), o yüzden tek `ps` çekimi onu yakalıyor.
+ *
+ * `ps -Ao` bilerek: macOS'ta `-e` "ortamı da göster" demek, `-A` ise iki
+ * platformda da "tüm süreçler". Ölçüm alınamazsa boş küme dönüyor — o zaman
+ * yalnız grup kill'i kalır, yani eski davranış.
+ */
+function descendantsOf(pid: number): number[] {
+  const r = spawnSync("ps", ["-Ao", "pid=,ppid="], { encoding: "utf8" });
+  if (r.status !== 0 || typeof r.stdout !== "string") return [];
+  const children = new Map<number, number[]>();
+  for (const line of r.stdout.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!m) continue;
+    const kid = Number(m[1]);
+    const parent = Number(m[2]);
+    if (kid === parent) continue; // kendi ebeveyni olan bir kayıt sonsuz döngü demek
+    const sibs = children.get(parent);
+    if (sibs) sibs.push(kid); else children.set(parent, [kid]);
+  }
+  const out: number[] = [];
+  const seen = new Set<number>([pid, process.pid]); // kendimizi ASLA hedef alma
+  const stack = [pid];
+  while (stack.length > 0) {
+    for (const kid of children.get(stack.pop()!) ?? []) {
+      if (seen.has(kid)) continue;
+      seen.add(kid);
+      out.push(kid);
+      stack.push(kid);
+    }
+  }
+  return out;
+}
+
+/** Tek tek SIGKILL: gruptan ayrılmış torunlara ulaşmanın tek yolu. */
+function killPids(pids: number[]): void {
+  for (const p of pids) {
+    try { process.kill(p, "SIGKILL"); } catch { /* zaten ölmüş */ }
+  }
 }
 
 // Sinyal temizliği (CLAUDE.md §3): yaratan adımın kapanışı zorunlu yazılır.
@@ -291,6 +358,10 @@ type PassResult = {
   unknownEvents: number;
   costUsd: number | null;
   stderrTail: string;
+  // ÖLÇÜM, sabit değil: iki kill denemesinden sonra hâlâ yaşayan bir süreç var mı.
+  killFailed: boolean;
+  leakedPid: number | null;
+  cleanupCmd: string | null;
 };
 
 /**
@@ -331,6 +402,10 @@ function runPass(prompt: string, session: string | null): Promise<PassResult> {
     let stderrTail = "";
     let cap: Omit<Cap, "pass"> | null = null;
     let settled = false;
+    // Kesme anında çekilen hedef listesi (çocuk + torunları). Boş kaldığı sürece
+    // "bu geçişi biz kesmedik" demek — `close` doğrudan sonucu yazar.
+    let killTargets: number[] = [];
+    let graceTimer: NodeJS.Timeout | null = null;
 
     function handleLine(line: string): void {
       const s = line.trim();
@@ -377,13 +452,43 @@ function runPass(prompt: string, session: string | null): Promise<PassResult> {
     const timer = setTimeout(() => {
       cap = { kind: "time", limit: TIMEOUT_SEC, observed: Math.round((Date.now() - t0) / 1000) };
       // macOS'ta `timeout` ikilisi YOK (hafıza: kabuk-tuzaklari-macos); kesme
-      // süreç içinde. Kill'den sonra `close` beklenir — gelmezse emniyet
-      // zamanlayıcısı promise'i çözer, yoksa tek asılı işçi Promise.all'u
-      // kilitler ve 28 notluk koşum sonsuza kadar bekler.
+      // süreç içinde. Hedefler kill'den ÖNCE çekiliyor: ebeveyn öldükten sonra
+      // torunlar init'e evlat ediniliyor ve PPID zinciri kopuyor, yani listeyi
+      // sonra çıkarmak imkânsız.
+      if (child.pid != null) killTargets = [child.pid, ...descendantsOf(child.pid)];
       killProcessGroup(child.pid);
-      const grace = setTimeout(() => finish(-1), 5_000);
-      grace.unref();
+      killPids(killTargets);
+      // Kill'den sonra `close` beklenir — gelmezse emniyet zamanlayıcısı
+      // doğrulamayı başlatır, yoksa tek asılı işçi Promise.all'u kilitler ve
+      // 28 notluk koşum sonsuza kadar bekler.
+      graceTimer = setTimeout(verifyKill, KILL_GRACE_MS);
+      graceTimer.unref(); // ilk beklemede süreç kapanışını geciktirme
     }, TIMEOUT_SEC * 1000);
+
+    /**
+     * İKİNCİ deneme + HÜKÜM. Kardeş araçtaki `retryKill` kalıbı, tek farkı
+     * hedefin yalnız `child.pid` değil kesme anındaki tüm alt ağaç olması.
+     *
+     * Hiçbir hedef yaşamıyorsa sonuç ANINDA yazılır (kesme yolu tipik olarak
+     * buraya düşer, ek gecikme yok). Yaşayan varsa grup VE düz PID bir kez daha
+     * denenir, ikinci grace beklenir (bu sefer `unref` YOK: sahiplik temizlik
+     * bitene kadar bırakılmıyor) ve hâlâ yaşayan varsa satıra SIZAN PID ile
+     * kopyalanabilir temizlik komutu düşer.
+     */
+    function verifyKill(): void {
+      if (settled) return;
+      // `close` bekleme dolmadan geldiyse bekleyen tetik iptal: aksi hâlde aynı
+      // doğrulama iki kez koşup üst üste grace zamanlayıcısı yığar.
+      if (graceTimer) clearTimeout(graceTimer);
+      const alive = killTargets.filter(isAlive);
+      if (alive.length === 0) { finish(-1); return; }
+      killHard(child.pid);
+      killPids(alive);
+      graceTimer = setTimeout(() => {
+        const still = killTargets.filter(isAlive);
+        finish(-1, { leakedPid: still[0] ?? null });
+      }, KILL_GRACE_MS);
+    }
 
     child.stdout.setEncoding("utf8"); // çok baytlı karakter chunk sınırında bölünmesin
     child.stdout.on("data", (d: string) => {
@@ -398,15 +503,35 @@ function runPass(prompt: string, session: string | null): Promise<PassResult> {
     // bulgu: adjudicate-stderr-discarded).
     child.stderr.on("data", (d: string) => { stderrTail = appendTail(stderrTail, d); });
 
-    function finish(rc: number): void {
+    function finish(rc: number, opts?: { leakedPid: number | null }): void {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
       if (pending) handleLine(pending);
-      if (child.pid != null) liveGroups.delete(child.pid);
+      const leakedPid = opts?.leakedPid ?? null;
+      if (leakedPid !== null) {
+        // Süreç hâlâ yaşıyor ve borularımıza yazmaya devam edebilir; Node'un
+        // çıkışını engellememesi için event loop'tan çıkar.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        // Sızan süreç ÇOCUK OLMAYABİLİR (kaçan bir torun da olabilir) ve o
+        // hâlde deftere hiç girmemişti. Deftere alınıyor ki sinyal temizliği
+        // ona da uzansın: `setsid` çağırmış bir torunun grup kimliği kendi
+        // PID'si, dolayısıyla `killProcessGroup` onun için de doğru araç.
+        liveGroups.add(leakedPid);
+      }
+      // Defterden düşüş KOŞULLU: süreç hâlâ canlıyken kaydı silmek, çıkış/sinyal
+      // temizliğinin (cleanupNow) ona ulaşmasını imkânsız kılardı — kaçağı
+      // bulan ölçüm aynı anda onu sahipsiz bırakırdı.
+      if (child.pid != null && !isAlive(child.pid)) liveGroups.delete(child.pid);
       resolve({
         rc, usage, ms: Date.now() - t0, text, sessionId, cap, items, turns,
         unparsedLines, unknownEvents, costUsd, stderrTail,
+        killFailed: leakedPid !== null,
+        leakedPid,
+        cleanupCmd: leakedPid === null ? null : cleanupCommand(leakedPid),
       });
     }
     // `error` (ENOENT: ikili yok) da bir SONUÇ — koşumu düşürmez, satır yazılır.
@@ -414,16 +539,58 @@ function runPass(prompt: string, session: string | null): Promise<PassResult> {
       stderrTail = appendTail(stderrTail, String((e as Error).message));
       finish(-1);
     });
-    child.on("close", (rc) => finish(rc ?? -1));
+    // KESME YOLUNDA `close` SONUCU YAZMAZ. Çocuk SIGKILL'den ~3 ms sonra kapanıyor
+    // (ölçüldü); o anda satır yazılırsa gruptan kaçmış bir torun daha ölmeden
+    // "hiçbir şey kaçmadı" iddiası kaydedilir. Hükmü `verifyKill` veriyor.
+    child.on("close", (rc) => {
+      if (killTargets.length > 0) { verifyKill(); return; }
+      finish(rc ?? -1);
+    });
   });
 }
 
 const gitCtx = WITH_EVIDENCE ? await openGit(wt, { fetch: false, originRef: "19c623f" }) : null;
 if (WITH_EVIDENCE && !gitCtx) { console.error("git bağlamı açılamadı"); process.exit(1); }
 
-writeFileSync(outPath, "");
+const RAW_SUFFIX = ".raw.jsonl";
+const PASS1_SUFFIX = ".pass1.txt";
+
+/**
+ * Önceki koşumun not-başına artefaktlarını siler ve KAÇ TANE sildiğini döner.
+ *
+ * Kabuk glob'u KULLANILMIYOR: zsh'de eşleşmeyen bir glob komutun tamamını iptal
+ * ediyor (hafıza: kabuk-tuzaklari-macos), yani ilk temiz koşumda temizlik hiç
+ * çalışmazdı. Liste `readdirSync` + filtreden çıkıyor.
+ */
+function purgeStaleArtifacts(dirs: string[], prefix: string): number {
+  let removed = 0;
+  for (const dir of dirs) {
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const f of entries) {
+      if (!f.startsWith(prefix)) continue;
+      if (!f.endsWith(RAW_SUFFIX) && !f.endsWith(PASS1_SUFFIX)) continue;
+      rmSync(join(dir, f), { force: true });
+      removed++;
+    }
+  }
+  return removed;
+}
+
 const incompleteDir = join(dirname(outPath), "incomplete");
 mkdirSync(incompleteDir, { recursive: true });
+// MALİYET DOSYASININ SIFIRLANMASIYLA ARTEFAKTLARIN SİLİNMESİ TEK ADIM.
+// Ölçüldü (15 Ağu 2026, stale-raw probe'u): yalnız `writeFileSync(outPath, "")`
+// yapılınca önceki koşumun `<cikti>.<not>.raw.jsonl` dosyaları yerinde kalıyor
+// ve `flatten.ts` DİZİNDEKİ TÜM ham dosyaları topladığı için 2 notluk bir
+// koşumun ardından 1 notla yapılan yeniden koşum düz dosyada yine 2 not
+// puanlıyor. Daha kötü varyantı: bugün EKSİK çıkan bir not `incomplete/`e
+// giderken dünkü TAM ham dosyası üst dizinde kalıyor ve ESKİ hükümler puanlanıyor.
+// Ayrı bırakılan temizlik yapılmıyor (CLAUDE.md §3), o yüzden aynı satırda.
+const purged = purgeStaleArtifacts([dirname(outPath), incompleteDir], `${basename(outPath)}.`);
+writeFileSync(outPath, "");
+// Sessiz silme bu projede bulgu: kaç dosya gittiği ölçülebilir kalsın.
+console.error(`bayat artefakt silindi: ${purged}`);
 console.log("not".padEnd(30) + "satır  p1(sn) p2(sn)  girdi  önbellek  çıktı   akıl  iddia");
 console.log("─".repeat(88));
 
@@ -510,6 +677,15 @@ async function one(note: string): Promise<void> {
   const s = sumPasses(p1, p2);
   const u = s.usage;
   const stderrTail = [p1.stderrTail, p2?.stderrTail ?? ""].filter(Boolean).join("\n");
+  // İki geçişin herhangi biri sızdırdıysa not sızdırmıştır: satır tek, sızıntı
+  // ise geçiş başına ölçülüyor. İlk sızan PID kazanır — ikincisi varsa aynı
+  // temizlik komutu grubu zaten kapsıyor.
+  const leaked = p1.leakedPid ?? p2?.leakedPid ?? null;
+  const kill = {
+    failed: p1.killFailed || (p2?.killFailed ?? false),
+    pid: leaked,
+    cmd: p1.cleanupCmd ?? p2?.cleanupCmd ?? null,
+  };
   appendRow({
     note, lines, rc, ms: p1.ms + (p2?.ms ?? 0), evidence_fed: WITH_EVIDENCE,
     // Kapı dalı ÖLÇÜLMÜŞ OLGU olarak kaydediliyor: `flatten.ts` bunu okuyor ve
@@ -526,12 +702,12 @@ async function one(note: string): Promise<void> {
     turns: s.turns,
     unparsed_lines: s.unparsed,
     unknown_events: s.unknown,
-    // Kardeş araçtaki kill-emniyeti alanları burada sabit: bu araç ikinci bir
-    // kill denemesi yapmıyor. Alanlar yine de yazılıyor ki iki aracın satırları
-    // aynı okuyucudan geçebilsin.
-    kill_failed: false,
-    leaked_pid: null,
-    cleanup_command: null,
+    // Kill-emniyeti alanları ÖLÇÜM, sabit değil. İki aracın satırları aynı
+    // okuyucudan geçiyor; burada sabit bırakmak "hiçbir şey kaçmadı"yı BAKMADAN
+    // iddia etmek olurdu ve bir ölçüm aletinde en pahalı hata sınıfı bu.
+    kill_failed: kill.failed,
+    leaked_pid: kill.pid,
+    cleanup_command: kill.cmd,
     stderr_tail: stderrTail === "" ? null : stderrTail,
     input_tokens: u.input_tokens ?? null,
     cached_input_tokens: u.cached_input_tokens ?? null,
@@ -569,8 +745,12 @@ async function one(note: string): Promise<void> {
     (s.unparsed > 0 || s.unknown > 0
       ? `  ŞEMA KAYMASI (bozuk satır ${s.unparsed}, tanınmayan olay ${s.unknown})`
       : "") +
+    (kill.failed ? `  KILL BAŞARISIZ (sızan pid ${kill.pid})` : "") +
     (rc !== 0 && stderrTail ? `  stderr: ${stderrTail.trim()}` : ""),
   );
+  // Sızan süreç SESSİZ kalmıyor: temizlik komutu satırda da var ama operatörün
+  // konsolda görmesi gereken tek şey bu.
+  if (kill.cmd) console.log(`  ↳ elle temizlik:  ${kill.cmd}`);
 }
 
 const queue = [...notes];

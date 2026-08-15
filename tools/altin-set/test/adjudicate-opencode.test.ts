@@ -427,3 +427,141 @@ test("geçersiz not adı gürültüyle reddediliyor", () => {
     rmSync(sb.dir, { recursive: true, force: true });
   }
 });
+
+// --- Bayat artefaktlar -----------------------------------------------------
+// Koşum başında YALNIZ maliyet dosyasını sıfırlamak İKİ KOŞUMU TEK ÖLÇÜME
+// KARIŞTIRIYOR: `flatten.ts` çıktı dizinindeki TÜM `.raw.jsonl` dosyalarını
+// topluyor, dolayısıyla önceki koşumdan kalan bir ham dosya bugünkü skora
+// giriyor — üstelik maliyet dosyasında satırı olmadığı için kapı dalı BUGÜNKÜ
+// not gövdesinden yeniden hesaplanıyor. Ölçüldü 15 Ağu 2026 (stale-raw probe'u):
+// 2 notla koş, 1 notla yeniden koş, düz dosyada 2 not.
+
+function flatten(sb: Sandbox): Set<string> {
+  const flat = join(sb.dir, "flat.jsonl");
+  const r = spawnSync(
+    process.execPath,
+    [...NODE_ARGS, join(HERE, "..", "flatten.ts"), sb.notes, sb.out, flat],
+    { encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, `flatten hata verdi: ${r.stderr}`);
+  return new Set(readFileSync(flat, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).note));
+}
+
+test("yeniden koşum önceki koşumun artefaktlarını siler: iki koşum tek ölçüme karışmaz", () => {
+  const sb = makeSandbox(TWO_PASS, { "eski-not": NOTE_WITH_DATE, "yeni-not": NOTE_WITH_DATE });
+  try {
+    assert.equal(runTool(sb, ["eski-not", "yeni-not"]).status, 0);
+    assert.ok(existsSync(`${sb.out}.eski-not.raw.jsonl`), "ön koşul: 1. koşum iki ham dosya üretmeli");
+    assert.ok(existsSync(`${sb.out}.eski-not.pass1.txt`));
+
+    // AYNI çıktı yoluna, bu sefer tek notla.
+    const r2 = runTool(sb, ["yeni-not"]);
+    assert.equal(r2.status, 0, `araç hata verdi: ${r2.stderr}`);
+    // Silme SESSİZ değil — 2 not × (raw + pass1).
+    assert.match(String(r2.stderr), /bayat artefakt silindi: 4/);
+    assert.equal(existsSync(`${sb.out}.eski-not.raw.jsonl`), false, "bayat ham dosya kalmamalı");
+    assert.equal(existsSync(`${sb.out}.eski-not.pass1.txt`), false);
+
+    // ASIL ÖLÇÜT diskteki dosya değil PUANLANAN KÜME: kusur tam da burada
+    // görünüyordu, çünkü maliyet dosyası zaten tek notluk doğru cevabı veriyordu.
+    assert.deepEqual([...flatten(sb)], ["yeni-not"]);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+test("dünkü TAM ham dosya bugünkü EKSİK koşumu gölgeleyemez", () => {
+  const sb = makeSandbox(TWO_PASS, { "tarihli-not": NOTE_WITH_DATE });
+  try {
+    assert.equal(runTool(sb, ["tarihli-not"]).status, 0);
+    assert.ok(existsSync(`${sb.out}.tarihli-not.raw.jsonl`), "ön koşul: 1. koşum TAM");
+
+    // AYNI not, bu sefer sözleşmeyi üretemiyor → yeni ham dosya `incomplete/`e
+    // gidiyor. Bayat TAM dosya silinmezse üst dizinde kalır ve `flatten.ts`
+    // DÜNKÜ hükümleri puanlar; not "denetlendi" görünür, kanıtı ise bugünkü
+    // koşumun hiç ulaşamadığı bir cevaptır.
+    writeFileSync(sb.bin, PASS2_GARBAGE);
+    chmodSync(sb.bin, 0o755);
+    const r = runTool(sb, ["tarihli-not"]);
+    assert.equal(r.status, 0, `araç hata verdi: ${r.stderr}`);
+
+    assert.equal(rowFor(sb, "tarihli-not").claims_complete, false);
+    assert.equal(existsSync(`${sb.out}.tarihli-not.raw.jsonl`), false, "dünkü TAM ham dosya silinmeli");
+    assert.ok(existsSync(join(sb.dir, "incomplete", "out.jsonl.tarihli-not.raw.jsonl")));
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+// --- Kaçan süreç -----------------------------------------------------------
+// `kill_failed` / `leaked_pid` / `cleanup_command` SABİT yazılıyordu. Kardeş
+// koşucuda (`adjudicate-cost.ts`) aynı üç alan gerçek ölçüm ve iki aracın
+// satırları AYNI okuyucudan geçiyor — sabit bırakmak "hiçbir şey kaçmadı"yı
+// bakmadan iddia etmek demekti.
+//
+// Sahte ikili `setsid()` çağıran bir torun bırakıyor: torun KENDİ oturumuna
+// geçtiği için `kill(-pgid)` ona ULAŞMIYOR, çocuk 3 ms'de ölüp `close` yayıyor
+// ve satır zamanında yazılıyordu. Ölçülen davranış (15 Ağu, fake-killstat
+// probe'u): koşum bittikten sonra torun hâlâ hayattaydı, satır `kill_failed:
+// false` diyordu.
+//
+// NE SINANMIYOR (yanlışlama ile ölçüldü): kesme ERİŞİMİ geri alınırsa test
+// kırmızıya dönüyor (torun sağ kalıyor, satır "kaçmadı" diyor), AMA yalnız üç
+// alan sabite çevrilip erişim yerinde bırakılırsa test yeşil kalıyor — hiçbir
+// şey kaçmadığı için sabit tesadüfen doğru oluyor. Öldürülemeyen bir süreci
+// deterministik üretmenin yolu yok (SIGKILL kullanıcı alanında engellenemez),
+// o yüzden raporlama dalı bu testte DEĞİL, canlı probe'da ölçüldü.
+
+/** `kill(pid, 0)` sinyal göndermez, yalnız varlığı sınar. */
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * Torun kendi oturumuna geçip PID'sini dosyaya yazıyor, sonra `sleep 300`
+ * oluyor. `pkill -f <işaret>` ile İZLENEMEZ: `exec` sonrası komut satırında
+ * işaret kalmıyor (probe'da ölçüldü), o yüzden PID DOSYASI.
+ * stdout/stderr `/dev/null`: bu test kill defterini ölçüyor, boru asılmasını değil.
+ */
+const LEAKS_GRANDCHILD = (pidFile: string) => `#!/bin/sh
+trap '' TERM
+printf '{"sessionID":"ses-1","type":"step_start","timestamp":1,"part":{}}\\n'
+perl -e 'use POSIX; POSIX::setsid(); open(F,">","${pidFile}"); print F $$; close F; exec("sleep","300")' >/dev/null 2>&1 &
+sleep 300
+`;
+
+test("gruptan kaçan torun ya öldürülüyor ya da satırda RAPORLANIYOR", () => {
+  const leakDir = mkdtempSync(join(tmpdir(), "adj-oc-leak-"));
+  const pidFile = join(leakDir, "leaked.pid");
+  const sb = makeSandbox(LEAKS_GRANDCHILD(pidFile), { "asili-not": NOTE_WITH_DATE });
+  let leaked = 0;
+  try {
+    const r = runTool(sb, ["asili-not"], ["--timeout-sec", "2"]);
+    assert.equal(r.status, 0, `araç hata verdi: ${r.stderr}`);
+    const row = rowFor(sb, "asili-not");
+    assert.ok(row.cap, "ön koşul: tavan ateşlenmeli, yoksa kesme yolu hiç ölçülmez");
+    assert.ok(existsSync(pidFile), "ön koşul: sahte ikili kaçak süreci kurmalı");
+    leaked = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(leaked) && leaked > 0, `okunamayan kaçak pid: ${leaked}`);
+
+    if (alive(leaked)) {
+      // Öldürülemedi → satır BUNU SÖYLEMEK ZORUNDA. Sabit alanlarda bu dal
+      // erişilemezdi: satır her hâlükârda "kaçmadı" diyordu.
+      assert.equal(row.kill_failed, true, "kaçan süreç satırda raporlanmalı");
+      assert.equal(row.leaked_pid, leaked);
+      assert.match(String(row.cleanup_command), new RegExp(String(leaked)));
+    } else {
+      // Öldürüldü: grup kill'i ona ulaşamadığına göre kesme anındaki alt ağaç
+      // çekimi işini yaptı. O zaman satırın "kaçmadı" demesi bir ÖLÇÜM.
+      assert.equal(row.kill_failed, false);
+      assert.equal(row.leaked_pid, null);
+      assert.equal(row.cleanup_command, null);
+    }
+  } finally {
+    // Test kendi yarattığı kaçağın temizliğinden sorumlu (CLAUDE.md §3):
+    // torun her oturumun dışında, kimse ona ulaşamaz.
+    if (leaked > 0) { try { process.kill(leaked, "SIGKILL"); } catch { /* zaten ölü */ } }
+    rmSync(leakDir, { recursive: true, force: true });
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
