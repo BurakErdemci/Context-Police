@@ -335,7 +335,12 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
         // ceiling never fires. Measured by the verification round — turns of
         // 900, -900, 900 against a 1000-token cap reported inputTokens=900 and
         // no capExceeded, having actually spent 1800.
-        if (Number.isFinite(v) && (v as number) >= 0) {
+        // Safe-integer, not merely finite: above 2^53 addition stops changing
+        // the total (2^53 + 1 rounds back to 2^53), so a stream reporting
+        // astronomic counts pins totalTokens and the ceiling never becomes
+        // true. A real token count is far below that range, so anything above
+        // it is malformed by definition.
+        if (Number.isSafeInteger(v) && (v as number) >= 0) {
           totals.set(camel, (totals.get(camel) ?? 0) + (v as number));
           totalTokens += v as number;
         } else malformedUsageFields++;

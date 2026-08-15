@@ -435,6 +435,22 @@ test("negatif usage değeri tavanı delemez", async () => {
   assert.ok(res.capExceeded, "1800 token harcanmışken 1000'lik tavan ateşlemeli");
 });
 
+// class: unsafe-integer-token-accounting
+// Verification round two: above 2^53 addition stops changing the total
+// (2^53 + 1 rounds back to 2^53), so a stream reporting astronomic counts pins
+// totalTokens and the ceiling can never become true. Real token counts are far
+// below that range, so anything above it is malformed by definition.
+test("güvenli tamsayı aralığı dışındaki usage toplama girmez", async () => {
+  const bin = fakeCodexBinary("ok", [
+    '{"type":"turn.completed","usage":{"input_tokens":9007199254740992}}',
+    '{"type":"turn.completed","usage":{"input_tokens":1}}',
+  ]);
+  const exec = createCodexExecutor({ binary: bin });
+  const res = await exec.run({ prompt: "x", caps: { maxTotalTokens: 9007199254740992 } });
+  assert.equal(res.usage?.malformedUsageFields, 1);
+  assert.equal(res.usage?.inputTokens, 1, "güvenli olmayan değer toplama girmemeli");
+});
+
 // class: timeout-is-not-an-upper-bound
 // killProcessGroup is best-effort and a grandchild in its own session survives
 // it while holding the inherited pipes, so `close` never fires. Measured
