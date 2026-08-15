@@ -147,6 +147,16 @@ function migrateClassifyStamps(db: DatabaseSync): void {
  * koşuyor ve `CREATE TABLE IF NOT EXISTS` var olan depoda eksik TABLOYU yaratır
  * — yapamadığı şey var olan bir tabloya SÜTUN eklemek (CLAUDE.md §7'nin vakası).
  * Yine de var olan bir depo dosyasına karşı testle doğrulandı.
+ *
+ * `verdicts` (M5) is that case, and there is no `migrateVerdicts` on purpose.
+ * Everything it needs — the table, its two partial indexes and its three
+ * append-only triggers — is created by an `IF NOT EXISTS` statement that runs on
+ * every open, and no EXISTING table gains a column. The one thing that would not
+ * self-heal is a missing trigger on a store that already has the table; that is
+ * why the three verdict guards are in `ensureGuards`'s required list rather than
+ * left to schema.sql alone. Both paths (store predating the table, store already
+ * carrying it and its rows) are tested against a real store file copy, because
+ * CLAUDE.md §7 says a fresh store proves nothing.
  */
 
 /**
@@ -377,6 +387,12 @@ function ensureGuards(db: DatabaseSync, schema: string): void {
     // olduğu hâlde dışarıdan yerinde yeniden yazmayı mümkün kılıyor (schema.sql).
     "findings_no_replace",
     "events_no_replace",
+    // Verdict guards are in the SAME list, not a softer one: a verdict carries
+    // the correction text the user is about to approve into a memory file, so an
+    // in-place rewrite of one is worse than an in-place rewrite of a finding.
+    "verdicts_measurement_immutable",
+    "verdicts_no_delete",
+    "verdicts_no_replace",
   ];
   if (required.every((t) => present.has(t))) return;
   db.exec(schema); // CREATE TRIGGER IF NOT EXISTS — eksikleri geri koyar

@@ -183,6 +183,77 @@ CREATE TABLE IF NOT EXISTS anchors (
 CREATE INDEX IF NOT EXISTS idx_anchors_finding ON anchors(finding_id);
 CREATE INDEX IF NOT EXISTS idx_anchors_value ON anchors(kind, value);
 
+-- Adjudication outcome, kept apart from `findings.status`/`suspicion`.
+--
+-- Why a table and not another events row: an events row answers "what happened",
+-- while the user surface has to answer "what does the tool conclude about this
+-- note, what did it measure, and what should the note say instead". The third
+-- part (`correction`) has no home anywhere else in the store — and K9 forbids
+-- writing it into the memory file before the user approves, so it has to wait
+-- somewhere durable.
+--
+-- Verdict space is the project's existing five (tools/altin-set/validate.ts);
+-- no new value is invented here, because a sixth label would make the M0 and
+-- M4 measurements incomparable. `sub_reason` is the extension point instead:
+-- it refines a verdict without splitting it (e.g. an `olculemez` that the user
+-- could resolve vs one nobody can).
+--
+-- claim_ref '' = the verdict is about the whole note. Sentinel, not NULL, and
+-- the reason is measured in this repo already (classify_stamps.b_id): NULL ≠ NULL
+-- in SQLite, so a NULL key silently matches no row in `ON CONFLICT`/unique
+-- indexes — here it would let two live verdicts exist for the same note.
+--
+-- SUPERSESSION IS THE ONLY WAY A VERDICT CHANGES (spec §3.2). A newer verdict on
+-- the same claim points the older row's `superseded_by` at itself; the older row
+-- keeps its verdict, evidence and correction and stays readable. `review` is a
+-- SEPARATE axis: it records what the USER did (approve/reject), not what a later
+-- measurement did. Merging the two into one status column would make "the user
+-- rejected this" and "a newer measurement replaced this" indistinguishable —
+-- and the first is the tool's own error-rate signal (spec §3.2), which must stay
+-- countable.
+CREATE TABLE IF NOT EXISTS verdicts (
+  id            INTEGER PRIMARY KEY,
+  project_id    INTEGER NOT NULL REFERENCES projects(id),
+  finding_id    INTEGER NOT NULL REFERENCES findings(id),
+  claim_ref     TEXT NOT NULL DEFAULT '',
+  verdict       TEXT NOT NULL
+                CHECK (verdict IN ('gecerli','curuk','dogustan-yanlis','olculemez','tarihsel')),
+  sub_reason    TEXT,
+  decay_type    TEXT,
+  -- What was measured, and with which command. Evidence is what lets the user
+  -- check the tool instead of trusting it (spec §2.1).
+  evidence      TEXT,
+  method        TEXT,
+  -- Replacement wording for the note. NULL = the verdict has no correction to
+  -- offer (a measurement can prove a note wrong without knowing what is right).
+  correction    TEXT,
+  source        TEXT NOT NULL CHECK (source IN ('mechanical','adjudicator')),
+  run_id        TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  review        TEXT NOT NULL DEFAULT 'pending' CHECK (review IN ('pending','approved','rejected')),
+  reviewed_at   TEXT,
+  -- DEFERRED, and the reason is the unique index below: it is checked per
+  -- statement, so the old row must stop being live BEFORE the new row is
+  -- inserted — which means pointing it at an id that does not exist yet.
+  -- An immediate FK rejects that write order and there is no other one.
+  superseded_by INTEGER REFERENCES verdicts(id) DEFERRABLE INITIALLY DEFERRED
+);
+
+-- At most one live verdict per claim. Enforced by the schema rather than by the
+-- writer, because "which verdict is current" is read by every UI query; a second
+-- live row makes all of them silently pick one at random.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_verdicts_live
+  ON verdicts(finding_id, claim_ref) WHERE superseded_by IS NULL;
+
+-- The approval queue, which is the one query the user surface runs on every
+-- render. Partial: superseded and already-reviewed rows are the bulk of the
+-- table over time and never appear in it.
+CREATE INDEX IF NOT EXISTS idx_verdicts_pending
+  ON verdicts(project_id, id) WHERE review = 'pending' AND superseded_by IS NULL;
+
+-- One claim's history, oldest first.
+CREATE INDEX IF NOT EXISTS idx_verdicts_claim ON verdicts(finding_id, claim_ref, id);
+
 CREATE TABLE IF NOT EXISTS events (
   id         INTEGER PRIMARY KEY,
   project_id INTEGER REFERENCES projects(id),
@@ -230,6 +301,29 @@ BEFORE INSERT ON findings
 WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM findings WHERE id = NEW.id)
 BEGIN
   SELECT RAISE(ABORT, 'findings append-only: var olan id uzerine INSERT OR REPLACE yasak');
+END;
+
+-- A verdict is a measurement record: it may be superseded or reviewed, never
+-- rewritten. Same contract as findings.content, same reason — a correction that
+-- can be edited in place is a correction whose history cannot be audited.
+CREATE TRIGGER IF NOT EXISTS verdicts_measurement_immutable
+BEFORE UPDATE OF project_id, finding_id, claim_ref, verdict, sub_reason, decay_type,
+                 evidence, method, correction, source, run_id, created_at ON verdicts
+BEGIN
+  SELECT RAISE(ABORT, 'verdicts append-only: yeni hukum acip supersede edin');
+END;
+
+CREATE TRIGGER IF NOT EXISTS verdicts_no_delete
+BEFORE DELETE ON verdicts
+BEGIN
+  SELECT RAISE(ABORT, 'verdicts silinemez: yalnizca superseded isaretlenir');
+END;
+
+CREATE TRIGGER IF NOT EXISTS verdicts_no_replace
+BEFORE INSERT ON verdicts
+WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM verdicts WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'verdicts append-only: var olan id uzerine INSERT OR REPLACE yasak');
 END;
 
 CREATE TRIGGER IF NOT EXISTS events_no_replace

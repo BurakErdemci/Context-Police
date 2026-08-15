@@ -1,0 +1,473 @@
+// M5: the verdict table — where an adjudication outcome, its evidence and its
+// suggested correction wait for the user's approval (spec §3.2, K9).
+//
+// Every test here exercises BEHAVIOUR through the store/audit API or through the
+// schema's own guards; none of them reads source text.
+
+import { test, before } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { openStore } from "../src/store/db.ts";
+import { auditProject } from "../src/audit.ts";
+import { appendFinding, listActive } from "../src/store/findings.ts";
+import { listEvents } from "../src/store/events.ts";
+import {
+  recordVerdict, getVerdict, getLiveVerdict, listPendingVerdicts, listVerdictHistory, reviewVerdict,
+} from "../src/store/verdicts.ts";
+import { fakeExecutor, tmpDir, tmpStorePath } from "./helpers.ts";
+
+// --- store API ----------------------------------------------------------------
+
+function seed() {
+  const store = openStore(":memory:");
+  const projectId = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(store, {
+    projectId, source: "imported", content: "DURUM: eski", sourceRef: "n.md",
+    anchors: [{ kind: "file_path", value: "src/a.ts" }],
+  });
+  return { store, projectId, findingId };
+}
+
+test("hüküm üç şeyi de taşıyor: hüküm, kanıt ve düzeltme metni", () => {
+  const { store, projectId, findingId } = seed();
+  const { id, recorded } = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "missing_now: src/a.ts", method: "anchor-drift (git)",
+    correction: "DURUM: iş bitti, dosya kaldırıldı.",
+    source: "adjudicator", runId: "r1",
+  });
+  assert.equal(recorded, true);
+
+  const live = getLiveVerdict(store, findingId)!;
+  assert.equal(live.id, id);
+  assert.equal(live.verdict, "curuk");
+  assert.equal(live.evidence, "missing_now: src/a.ts");
+  assert.equal(live.correction, "DURUM: iş bitti, dosya kaldırıldı.", "düzeltme metni satırın var olma sebebi");
+  assert.equal(live.review, "pending");
+  assert.equal(live.supersededBy, null);
+  store.close();
+});
+
+test("olculemez alt-sebebi taşıyabiliyor — kullanıcının çözebileceği hâl temsil edilebilir", () => {
+  const { store, projectId, findingId } = seed();
+  recordVerdict(store, {
+    projectId, findingId, verdict: "olculemez", subReason: "user-resolvable",
+    evidence: "iddia bir tercihe atıf yapıyor; depoda ölçülebilir karşılığı yok",
+    source: "adjudicator", runId: "r1",
+  });
+  const live = getLiveVerdict(store, findingId)!;
+  assert.equal(live.verdict, "olculemez");
+  assert.equal(live.subReason, "user-resolvable");
+  store.close();
+});
+
+test("yeni hüküm eskisini supersede eder; eski satır kanıtıyla birlikte OKUNABİLİR kalır", () => {
+  const { store, projectId, findingId } = seed();
+  const first = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "missing_now: src/a.ts", correction: "ilk öneri", source: "mechanical", runId: "r1",
+  }).id;
+  const second = recordVerdict(store, {
+    projectId, findingId, verdict: "dogustan-yanlis",
+    evidence: "never_existed: src/a.ts", correction: "ikinci öneri", source: "adjudicator", runId: "r2",
+  });
+  assert.equal(second.recorded, true);
+  assert.equal(second.supersededId, first);
+
+  const old = getVerdict(store, first)!;
+  assert.equal(old.supersededBy, second.id);
+  assert.equal(old.verdict, "curuk", "supersede eski hükmü SİLMEZ");
+  assert.equal(old.correction, "ilk öneri");
+  assert.equal(getLiveVerdict(store, findingId)!.id, second.id);
+
+  const history = listVerdictHistory(store, findingId);
+  assert.deepEqual(history.map((v) => v.id), [first, second.id], "geçmiş eskiden yeniye okunur");
+  store.close();
+});
+
+test("aynı sonuç ikinci kez kaydedilmez; reddedilmiş hüküm yeniden onaya düşmez", () => {
+  const { store, projectId, findingId } = seed();
+  const input = {
+    projectId, findingId, verdict: "curuk" as const, decayType: "dosya-silindi",
+    evidence: "missing_now: src/a.ts", source: "mechanical" as const, runId: "r1",
+  };
+  const first = recordVerdict(store, input).id;
+  assert.equal(reviewVerdict(store, first, "rejected"), true);
+
+  const again = recordVerdict(store, { ...input, runId: "r2", method: "başka bir ölçüm yolu" });
+  assert.equal(again.recorded, false, "değişmeyen sonuç satır açmamalı");
+  assert.equal(again.id, first);
+  assert.equal(listVerdictHistory(store, findingId).length, 1);
+  assert.equal(getVerdict(store, first)!.review, "rejected", "reddedilen hüküm yeniden pending olmamalı");
+  store.close();
+});
+
+test("onay kuyruğu yalnız canlı ve incelenmemiş hükümleri gösterir", () => {
+  const { store, projectId, findingId } = seed();
+  const other = appendFinding(store, {
+    projectId, source: "imported", content: "ikinci not", sourceRef: "m.md",
+    anchors: [{ kind: "file_path", value: "src/b.ts" }],
+  });
+  const supersededSoon = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1", source: "mechanical", runId: "r1",
+  }).id;
+  const live = recordVerdict(store, {
+    projectId, findingId, verdict: "olculemez", evidence: "e2", source: "mechanical", runId: "r2",
+  }).id;
+  const approved = recordVerdict(store, {
+    projectId, findingId: other, verdict: "curuk", decayType: "dosya-silindi", evidence: "e3",
+    source: "adjudicator", runId: "r2",
+  }).id;
+  reviewVerdict(store, approved, "approved");
+
+  const pending = listPendingVerdicts(store, projectId).map((v) => v.id);
+  assert.deepEqual(pending, [live]);
+  assert.ok(!pending.includes(supersededSoon), "supersede edilmiş hüküm onay bekleyemez");
+  store.close();
+});
+
+test("supersede edilmiş hüküm İNCELENEMEZ", () => {
+  const { store, projectId, findingId } = seed();
+  const first = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1",
+    correction: "geri çekilmiş öneri", source: "mechanical", runId: "r1",
+  }).id;
+  recordVerdict(store, { projectId, findingId, verdict: "gecerli", evidence: "e2", source: "adjudicator", runId: "r2" });
+
+  assert.equal(reviewVerdict(store, first, "approved"), false,
+    "geri çekilmiş bir düzeltme onaylanabilseydi kullanıcı eskimiş metni hafızasına yazardı");
+  assert.equal(getVerdict(store, first)!.review, "pending");
+  store.close();
+});
+
+test("iddia başına ayrı hüküm: aynı notun iki iddiası aynı anda canlı olabilir", () => {
+  const { store, projectId, findingId } = seed();
+  const a = recordVerdict(store, {
+    projectId, findingId, claimRef: "c1", verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "e1", source: "adjudicator", runId: "r1",
+  }).id;
+  const b = recordVerdict(store, {
+    projectId, findingId, claimRef: "c2", verdict: "gecerli", evidence: "e2", source: "adjudicator", runId: "r1",
+  }).id;
+
+  assert.equal(getLiveVerdict(store, findingId, "c1")!.id, a);
+  assert.equal(getLiveVerdict(store, findingId, "c2")!.id, b);
+  assert.equal(getLiveVerdict(store, findingId), undefined, "not düzeyinde hüküm yok");
+  assert.equal(listVerdictHistory(store, findingId).length, 2, "notun geçmişi tüm iddialarını kapsar");
+  store.close();
+});
+
+// --- schema guards ------------------------------------------------------------
+
+test("iddia başına İKİ canlı hüküm şema tarafından imkânsız", () => {
+  const { store, projectId, findingId } = seed();
+  recordVerdict(store, { projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1", source: "mechanical", runId: "r1" });
+  assert.throws(
+    () => store.run(
+      "INSERT INTO verdicts (project_id, finding_id, claim_ref, verdict, source, run_id, created_at) " +
+        "VALUES (?,?,?,?,?,?,?)",
+      projectId, findingId, "", "gecerli", "adjudicator", "r2", "2026-08-15T00:00:00.000Z",
+    ),
+    /UNIQUE/i,
+    "ikinci canlı hüküm, 'şu an ne düşünüyoruz' sorusunu cevapsız bırakırdı",
+  );
+  store.close();
+});
+
+test("hüküm silinemez, ölçüm alanları yerinde değiştirilemez; inceleme durumu değiştirilebilir", () => {
+  const { store, projectId, findingId } = seed();
+  const id = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1",
+    correction: "öneri", source: "mechanical", runId: "r1",
+  }).id;
+
+  assert.throws(() => store.run("DELETE FROM verdicts WHERE id = ?", id), /silinemez/);
+  assert.throws(() => store.run("UPDATE verdicts SET correction = ? WHERE id = ?", "sessiz düzeltme", id), /append-only/);
+  assert.throws(() => store.run("UPDATE verdicts SET verdict = ? WHERE id = ?", "gecerli", id), /append-only/);
+  assert.equal(getVerdict(store, id)!.correction, "öneri");
+
+  assert.equal(reviewVerdict(store, id, "approved"), true, "inceleme ekseni yazılabilir kalmalı");
+  assert.equal(getVerdict(store, id)!.review, "approved");
+  store.close();
+});
+
+test("var olan id üzerine INSERT OR REPLACE hükmü yerinde yeniden yazamaz", () => {
+  const { store, projectId, findingId } = seed();
+  const id = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1", source: "mechanical", runId: "r1",
+  }).id;
+  assert.throws(
+    () => store.run(
+      "INSERT OR REPLACE INTO verdicts (id, project_id, finding_id, claim_ref, verdict, source, run_id, created_at) " +
+        "VALUES (?,?,?,?,?,?,?,?)",
+      id, projectId, findingId, "", "gecerli", "adjudicator", "r2", "2026-08-15T00:00:00.000Z",
+    ),
+    /append-only/,
+  );
+  assert.equal(getVerdict(store, id)!.verdict, "curuk");
+  store.close();
+});
+
+test("bilinmeyen hüküm değeri şema tarafından reddedilir", () => {
+  const { store, projectId, findingId } = seed();
+  assert.throws(
+    () => store.run(
+      "INSERT INTO verdicts (project_id, finding_id, verdict, source, run_id, created_at) VALUES (?,?,?,?,?,?)",
+      projectId, findingId, "belki", "adjudicator", "r1", "2026-08-15T00:00:00.000Z",
+    ),
+    /CHECK/i,
+  );
+  store.close();
+});
+
+test("dışarıdan düşürülen hüküm tetikleyicisi verifyGuards ile geri geliyor", () => {
+  const path = tmpStorePath();
+  const store = openStore(path);
+
+  // Depo AÇIKKEN başka bir süreç korumayı düşürüyor. Yeniden açılış bunu zaten
+  // onarırdı (schema.sql her açılışta koşuyor); onarılmayan hâl tam olarak bu:
+  // uzun yaşayan bir bağlantı, tarama boyunca korumasız devam ederdi.
+  const raw = new DatabaseSync(path);
+  raw.exec("DROP TRIGGER verdicts_no_delete");
+  raw.close();
+
+  store.verifyGuards();
+  const projectId = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(store, { projectId, source: "observed", content: "n", anchors: [{ kind: "file_path", value: "a.ts" }] });
+  const id = recordVerdict(store, { projectId, findingId, verdict: "gecerli", evidence: "e", source: "adjudicator", runId: "r" }).id;
+  assert.throws(() => store.run("DELETE FROM verdicts WHERE id = ?", id), /silinemez/);
+  store.close();
+});
+
+// --- migration: VAR OLAN depo (CLAUDE.md §7) ----------------------------------
+
+test("göç: tabloyu HİÇ tanımayan var olan depo açılır, veri korunur, hüküm yazılabilir", () => {
+  const path = tmpStorePath();
+  const first = openStore(path);
+  const projectId = Number(first.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(first, {
+    projectId, source: "imported", content: "eski depodaki not", sourceRef: "n.md",
+    anchors: [{ kind: "file_path", value: "src/a.ts" }],
+  });
+  first.close();
+
+  // Tablonun HİÇ olmadığı kuşağı taklit et: tablo düşünce indeksleri ve
+  // tetikleyicileri de gider — yani "eski depo" gerçekten eksik.
+  const raw = new DatabaseSync(path);
+  raw.exec("DROP TABLE verdicts");
+  assert.equal(
+    (raw.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name = 'verdicts'").get() as { n: number }).n, 0);
+  raw.close();
+
+  const store = openStore(path);
+  assert.equal(store.get<{ n: number }>("SELECT COUNT(*) n FROM findings")?.n, 1, "göç veri kaybetti");
+  const id = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "missing_now: src/a.ts",
+    correction: "yeni metin", source: "adjudicator", runId: "r1",
+  }).id;
+  assert.equal(getLiveVerdict(store, findingId)!.id, id);
+  // Tetikleyiciler ve canlı-hüküm indeksi de geri gelmiş olmalı; biri eksik
+  // olsaydı tablo "var" görünürken sözleşmesi çökmüş olurdu.
+  assert.throws(() => store.run("DELETE FROM verdicts WHERE id = ?", id), /silinemez/);
+  assert.throws(
+    () => store.run(
+      "INSERT INTO verdicts (project_id, finding_id, claim_ref, verdict, source, run_id, created_at) VALUES (?,?,?,?,?,?,?)",
+      projectId, findingId, "", "gecerli", "adjudicator", "r2", "2026-08-15T00:00:00.000Z",
+    ),
+    /UNIQUE/i,
+  );
+  store.close();
+});
+
+test("göç: tabloyu ZATEN taşıyan depo yeniden açılınca satırlar ve supersede zinciri korunur", () => {
+  const path = tmpStorePath();
+  const first = openStore(path);
+  const projectId = Number(first.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(first, {
+    projectId, source: "imported", content: "not", sourceRef: "n.md",
+    anchors: [{ kind: "file_path", value: "src/a.ts" }],
+  });
+  const older = recordVerdict(first, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1", source: "mechanical", runId: "r1",
+  }).id;
+  const newer = recordVerdict(first, {
+    projectId, findingId, verdict: "gecerli", evidence: "e2", correction: "düzeltme", source: "adjudicator", runId: "r2",
+  }).id;
+  first.close();
+
+  const store = openStore(path);
+  assert.deepEqual(listVerdictHistory(store, findingId).map((v) => v.id), [older, newer]);
+  assert.equal(getVerdict(store, older)!.supersededBy, newer);
+  assert.equal(getLiveVerdict(store, findingId)!.correction, "düzeltme");
+  assert.equal(listPendingVerdicts(store, projectId).map((v) => v.id).join(), String(newer));
+  store.close();
+});
+
+test("göç: GERÇEK deponun kopyası açılır, hüküm tablosu belirir, var olan satırlar durur", (t) => {
+  const real = join(homedir(), ".context-police", "store.db");
+  if (!existsSync(real)) return t.skip("gerçek depo yok — bu makinede ölçülemez");
+
+  const copy = join(tmpDir("cp-realstore-"), "store.db");
+  copyFileSync(real, copy); // ASLA orijinal açılmaz: kopya açılır.
+
+  const before = new DatabaseSync(copy, { readOnly: true });
+  const findingCount = (before.prepare("SELECT COUNT(*) n FROM findings").get() as { n: number }).n;
+  const hasVerdicts = (before.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name = 'verdicts'")
+    .get() as { n: number }).n;
+  before.close();
+  assert.equal(hasVerdicts, 0, "kopya zaten tabloyu taşıyorsa bu test göçü değil kendini ölçer");
+
+  const store = openStore(copy);
+  assert.equal(store.get<{ n: number }>("SELECT COUNT(*) n FROM findings")?.n, findingCount, "gerçek depo göçte veri kaybetti");
+  assert.equal(store.get<{ n: number }>("SELECT COUNT(*) n FROM sqlite_master WHERE name = 'verdicts'")?.n, 1);
+
+  // Tablonun VAR OLMASI yetmez: gerçek depo üzerinde yazılabilir de olmalı.
+  // Bu makinedeki depo boş olabilir (ölçüldü, 15 Ağu 2026: 0 satır), o yüzden
+  // gereken satırlar kopyanın üstüne açılıyor — kopya, orijinal değil.
+  const projectId = store.get<{ id: number }>("SELECT id FROM projects ORDER BY id LIMIT 1")?.id
+    ?? Number(store.run(
+      "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+    ).lastInsertRowid);
+  const findingId = store.get<{ id: number }>("SELECT id FROM findings ORDER BY id LIMIT 1")?.id
+    ?? appendFinding(store, {
+      projectId, source: "observed", content: "kopya üzerinde açılan not",
+      anchors: [{ kind: "file_path", value: "src/a.ts" }],
+    });
+  const id = recordVerdict(store, {
+    projectId, findingId, verdict: "olculemez", subReason: "user-resolvable",
+    evidence: "kopya üzerinde ölçüm", correction: "önerilen metin", source: "adjudicator", runId: "r-real",
+  }).id;
+  assert.equal(getLiveVerdict(store, findingId)!.id, id);
+  assert.throws(() => store.run("DELETE FROM verdicts WHERE id = ?", id), /silinemez/);
+  store.close();
+});
+
+// --- audit wiring -------------------------------------------------------------
+
+const NOTE = "---\nname: curuk\nmodified: 2020-01-01T00:00:00.000Z\n---\n" +
+  "DURUM: iş sürüyor. `src/silinecek.ts` üzerinde çalışılıyor, henüz bitmedi.";
+
+let repo: string;
+before(() => {
+  repo = tmpDir("cp-verdict-repo-");
+  const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" }).trim();
+  git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t");
+  mkdirSync(join(repo, "src"));
+  writeFileSync(join(repo, "src", "silinecek.ts"), "export const a = 1;\n");
+  git("add", "-A"); git("commit", "-qm", "ilk");
+  rmSync(join(repo, "src", "silinecek.ts"));
+  git("add", "-A"); git("commit", "-qm", "silindi");
+});
+
+function auditSetup() {
+  const memoryDir = tmpDir("cp-verdict-mem-");
+  writeFileSync(join(memoryDir, "curuk.md"), NOTE);
+  const store = openStore(":memory:");
+  const id = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir, memory_dir) VALUES (?,?,?,?)",
+    repo, "claude-code", "/t", memoryDir,
+  ).lastInsertRowid);
+  return { store, project: { id, path: repo, memoryDir } };
+}
+
+const noContradictions = () => fakeExecutor([{ output: '{"verdicts":[]}' }]);
+
+test("denetim silinmiş çapayı hükme çevirir: kanıtlı, onay bekleyen, dosyaya yazılmamış (K9)", async () => {
+  const { store, project } = auditSetup();
+  const sum = await auditProject(store, project, { executor: noContradictions(), fetch: false });
+
+  assert.equal(sum.verdictsRecorded, 1);
+  const finding = listActive(store, project.id)[0]!;
+  const live = getLiveVerdict(store, finding.id)!;
+  assert.equal(live.verdict, "curuk");
+  assert.equal(live.decayType, "dosya-silindi");
+  assert.match(live.evidence!, /missing_now: src\/silinecek\.ts/, "kullanıcı aracı denetleyebilmeli");
+  assert.equal(live.source, "mechanical");
+  assert.equal(live.correction, null, "git bir notun yanlış olduğunu kanıtlar, doğrusunu bilmez");
+  assert.deepEqual(listPendingVerdicts(store, project.id).map((v) => v.id), [live.id]);
+  assert.equal(listEvents(store, { kind: "verdict_recorded" }).length, 1);
+  store.close();
+});
+
+test("eşik altı kalan kesin kanıt hüküm ÜRETMEZ: aracın kendi yüzeyinde şüpheli olmayan not onaya düşmez", async () => {
+  const { store, project } = auditSetup();
+  // Hiç var olmamış tek çapa 0,3 üretir (anchor-drift WEIGHT) — denetim bu notu
+  // şüpheli bile saymıyor, dolayısıyla kullanıcıdan onay istemek tutarsız olurdu.
+  writeFileSync(join(project.memoryDir, "uydurma.md"), "Not: `src/hic-olmadi.ts` dosyası vardı.");
+  const sum = await auditProject(store, project, { executor: noContradictions(), fetch: false });
+
+  const uydurma = listActive(store, project.id).find((f) => f.content.includes("hic-olmadi"))!;
+  assert.ok(uydurma.suspicion < 0.6);
+  assert.equal(getLiveVerdict(store, uydurma.id), undefined);
+  assert.equal(sum.verdictsRecorded, 1, "yalnız eşiği aşan not hüküm aldı");
+  store.close();
+});
+
+test("aynı denetim ikinci kez koşunca yeni hüküm satırı açılmaz", async () => {
+  const { store, project } = auditSetup();
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const sum2 = await auditProject(store, project, { executor: noContradictions(), fetch: false });
+
+  assert.equal(sum2.verdictsRecorded, 0, "değişmeyen dünya, büyüyen ekle-only tablo demek olamaz");
+  const finding = listActive(store, project.id)[0]!;
+  assert.equal(listVerdictHistory(store, finding.id).length, 1);
+  store.close();
+});
+
+test("çapa kanıtı geri geldiğinde hüküm SİLİNMEZ, olculemez ile geri çekilir", async () => {
+  const { store, project } = auditSetup();
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const finding = listActive(store, project.id)[0]!;
+  const first = getLiveVerdict(store, finding.id)!;
+  assert.equal(first.verdict, "curuk");
+
+  // Dosya geri kondu: kesin kanıt artık yok.
+  const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" }).trim();
+  writeFileSync(join(repo, "src", "silinecek.ts"), "export const a = 2;\n");
+  git("add", "-A"); git("commit", "-qm", "geri kondu");
+  try {
+    const sum = await auditProject(store, project, { executor: noContradictions(), fetch: false });
+    assert.equal(sum.verdictsRecorded, 1);
+    const live = getLiveVerdict(store, finding.id)!;
+    assert.equal(live.verdict, "olculemez");
+    assert.equal(live.subReason, "anchor-evidence-cleared");
+    assert.equal(getVerdict(store, first.id)!.supersededBy, live.id);
+    assert.equal(getVerdict(store, first.id)!.verdict, "curuk", "geri çekme eski kaydı yok etmez");
+    assert.deepEqual(listVerdictHistory(store, finding.id).map((v) => v.verdict), ["curuk", "olculemez"]);
+  } finally {
+    rmSync(join(repo, "src", "silinecek.ts"));
+    git("add", "-A"); git("commit", "-qm", "yeniden silindi");
+  }
+  store.close();
+});
+
+test("git yokken hüküm ne verilir ne geri çekilir: ölçmemek hüküm değildir", async () => {
+  const { store, project } = auditSetup();
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const finding = listActive(store, project.id)[0]!;
+  const first = getLiveVerdict(store, finding.id)!;
+
+  // Aynı hafıza, git'siz bir çalışma kökü: çapa boyutu HİÇ ölçülmedi.
+  // Sınıflama bilerek kapalı: açık olsaydı not "çelişki boyutu ölçülemedi"
+  // dalında zaten donardı ve bu test çapa korumasını HİÇ sınamamış olurdu
+  // (ölçüldü: o yolda `heldUnmeasured` 1, hüküm yolu çalışmıyor).
+  const noGit = tmpDir("cp-verdict-nogit-");
+  const sum = await auditProject(store, { ...project, path: noGit }, { executor: null, fetch: false });
+
+  assert.equal(sum.gitAvailable, false);
+  assert.equal(sum.verdictsRecorded, 0);
+  assert.equal(getLiveVerdict(store, finding.id)!.id, first.id, "ölçüm yapılamayan koşum hükmü geri çekemez");
+  store.close();
+});

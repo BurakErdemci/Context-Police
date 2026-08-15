@@ -178,7 +178,16 @@ export type EventKind =
    * gösterirken içerik başka bir ağaçtan gelseydi, o notun çapaları yanlış
    * repoya karşı ölçülürdü. "errors" değil ayrı sayaç: arıza değil karar.
    */
-  | "import_entry_rejected";
+  | "import_entry_rejected"
+  /**
+   * A verdict was written for a claim (store/verdicts.ts), in the SAME
+   * transaction as the row itself. `detail.supersededId` names the verdict it
+   * replaced — the tool's own reversal rate (spec §3.2) is counted from that
+   * chain. An unchanged conclusion writes no row, so it writes no event either.
+   */
+  | "verdict_recorded"
+  /** The user approved or rejected a verdict; the rejected share is the tool's error rate. */
+  | "verdict_reviewed";
 
 export function logEvent(
   store: Store,

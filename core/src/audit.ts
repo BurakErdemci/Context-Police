@@ -24,6 +24,7 @@ import { findCoverageCandidates } from "./signals/coverage.ts";
 import { classifyCandidates, MAX_CLASSIFY_ITEMS } from "./signals/classify.ts";
 import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect } from "./store/findings.ts";
 import { readRotationState, writeClassifyStamps } from "./store/classify-stamps.ts";
+import { recordVerdict, getLiveVerdict, type VerdictValue } from "./store/verdicts.ts";
 import { parseNote } from "./importer/parse.ts";
 import { logEvent, type EventKind } from "./store/events.ts";
 
@@ -144,6 +145,12 @@ export interface AuditSummary {
    * bırakmıyor ve sessiz kalırsa kullanıcı bayat bir ölçümü taze sanıyor.
    */
   fetchFailed: boolean;
+  /**
+   * Bu koşumda depoya YENİ yazılan hüküm satırı sayısı (store/verdicts.ts).
+   * Değişmeyen bir sonuç satır açmadığı için bu sayı "kaç not çürük" değil,
+   * "kullanıcının onay kuyruğunda ne değişti" demek.
+   */
+  verdictsRecorded: number;
 }
 
 interface ScoreEntry {
@@ -151,7 +158,58 @@ interface ScoreEntry {
   reasons: string[];
   /** Yalnız SIFIR OLMAYAN durumlar — olay detayını gereksiz şişirmemek için. */
   states: Partial<Record<AnchorState, number>>;
+  /** Kesin çapa kanıtı: git ölçtü ve yüzey gitmiş. Yoksa null (bkz. anchorEvidence). */
+  decisive: AnchorEvidence | null;
+  /** Çapa boyutu bu koşumda GERÇEKTEN ölçüldü mü (git vardı ve çapa vardı). */
+  anchorsMeasured: boolean;
 }
+
+interface AnchorEvidence {
+  verdict: VerdictValue;
+  decayType: string | null;
+  evidence: string;
+}
+
+/** Kanıt metninde listelenecek çapa sayısı: teşhise yeter, satırı şişirmez. */
+const MAX_EVIDENCE_ANCHORS = 5;
+
+function evidenceLine(state: AnchorState, verdicts: AnchorVerdict[]): string {
+  const values = verdicts.map((v) => v.anchor.value.slice(0, 200)).sort();
+  const shown = values.slice(0, MAX_EVIDENCE_ANCHORS).join(", ");
+  const rest = values.length > MAX_EVIDENCE_ANCHORS ? ` (+${values.length - MAX_EVIDENCE_ANCHORS})` : "";
+  return `${state}: ${shown}${rest}`;
+}
+
+/**
+ * Mekanik katmanın hüküm verebildiği TEK durum: git bir yüzeyin gittiğini
+ * ÖLÇTÜ. Geri kalan her şey (temiz çapa, churn, DURUM kalıbı) şüphedir — ve
+ * şüphe hüküm değildir, çünkü hiçbiri notun METNİNİ okumuyor. `gecerli` bu
+ * yüzden buradan hiç dönmez: çapası duran bir not pekâlâ yanlış olabilir.
+ *
+ * Sıra ağırlığı izliyor (anchor-drift WEIGHT): dosya yoksa sembolün durumu
+ * ikincil bilgidir.
+ *
+ * `never_existed` → `dogustan-yanlis`, çünkü o hüküm ancak sonek çözümlemesi
+ * SIFIR eşleşme döndükten sonra ayakta kalıyor (anchor-drift.ts): yol hiçbir
+ * commit'te yoktu, yani not yazıldığı gün de yanlıştı. `decay_type` bilerek
+ * null — çürüme sözlüğü yalnız `curuk` içindir (tools/altin-set/validate.ts).
+ */
+function decisiveAnchorEvidence(verdicts: AnchorVerdict[]): AnchorEvidence | null {
+  const of = (s: AnchorState) => verdicts.filter((v) => v.state === s);
+  const missing = of("missing_now");
+  if (missing.length > 0)
+    return { verdict: "curuk", decayType: "dosya-silindi", evidence: evidenceLine("missing_now", missing) };
+  const lost = of("symbol_lost");
+  if (lost.length > 0)
+    return { verdict: "curuk", decayType: "sembol-kayboldu", evidence: evidenceLine("symbol_lost", lost) };
+  const never = of("never_existed");
+  if (never.length > 0)
+    return { verdict: "dogustan-yanlis", decayType: null, evidence: evidenceLine("never_existed", never) };
+  return null;
+}
+
+/** Mekanik katmanın geri alabileceği hükümler: kendi verdikleri. */
+const MECHANICAL_WITHDRAWABLE = new Set<VerdictValue>(["curuk", "dogustan-yanlis"]);
 
 function emptyAnchorStates(): Record<AnchorState, number> {
   return { ok: 0, missing_now: 0, never_existed: 0, symbol_lost: 0, churned: 0, unverifiable: 0 };
@@ -175,6 +233,7 @@ export async function auditProject(
     classifyDropped: 0, classifyCalls: 0,
     classifyUnclassified: 0, heldUnmeasured: 0, budgetExhaustedAnchors: 0,
     anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
+    verdictsRecorded: 0,
   };
 
   /**
@@ -293,7 +352,15 @@ export async function auditProject(
           reason: v.measurementFailed.reason.slice(0, 200),
         });
       }
-      scores.set(f.id, { score: drift.score, reasons: drift.reasons, states });
+      scores.set(f.id, {
+        score: drift.score, reasons: drift.reasons, states,
+        decisive: decisiveAnchorEvidence(verdicts),
+        // Git yoksa ya da notun çapası yoksa çapa boyutu ÖLÇÜLMEDİ. Aşağıdaki
+        // geri alma yolu buna bakmak zorunda: aksi hâlde git'i olmayan bir
+        // makinede koşan tek bir denetim, ölçülmüş bir çürük hükmünü "kanıt
+        // kalmadı" diye geri çekerdi (ölçmemek asla hüküm değildir).
+        anchorsMeasured: ctx !== null && anchors.length > 0,
+      });
       sum.checked++;
     }
     // Tavan üstü arıza tek özet satırıyla sayılır (scan.ts unknown_type_overflow
@@ -413,7 +480,7 @@ export async function auditProject(
           // onu görüyor. Çapasız notun tek denetlenebilir yolu bu.
           for (const id of [c.aId, c.bId]) {
             if (id === null) continue;
-            const cur = scores.get(id) ?? { score: 0, reasons: [], states: {} };
+            const cur = scores.get(id) ?? { score: 0, reasons: [], states: {}, decisive: null, anchorsMeasured: false };
             scores.set(id, {
               score: Math.max(cur.score, 0.7),
               reasons: [...cur.reasons, c.kind === "coverage"
@@ -423,6 +490,9 @@ export async function auditProject(
                 ? `kapsama ölçümü: not bugünkü depoyla uyuşmuyor (${c.reason})`
                 : `çelişki onaylandı (${c.kind}: ${c.reason})`],
               states: cur.states,
+              // Çelişki bir ÇAPA kanıtı değil: kesin kanıt ve ölçülmüşlük
+              // bayrağı çapa döngüsünden ne aldıysa o kalır.
+              decisive: cur.decisive, anchorsMeasured: cur.anchorsMeasured,
             });
           }
           // Olay HEMEN yazılmıyor, yazım tx'ine ertelendi. Aynı değişmez kural
@@ -436,6 +506,50 @@ export async function auditProject(
           pendingContradictionEvents.push({ kind: c.kind, aId: c.aId, bId: c.bId, reason: c.reason });
         }
       }
+    }
+
+    /**
+     * Skoru hükme çevirir — ve çoğu zaman ÇEVİRMEZ.
+     *
+     * Üç dal var, üçüncüsü "hiçbir şey yapma" ve en sık işleyen o:
+     *   1. Kesin çapa kanıtı VE eşik üstü skor → `curuk`/`dogustan-yanlis`.
+     *      Eşik koşulu kozmetik değil: tek bir `missing_now` 0,5 ağırlık verir,
+     *      yani denetim notu şüpheli bile saymaz. Onay kuyruğuna, aracın kendi
+     *      yüzeyinde şüpheli görünmeyen bir not düşemez.
+     *   2. Kanıt YOKSA ama elde bizim verdiğimiz bir çürük hüküm varsa ve çapa
+     *      boyutu bu koşumda gerçekten ölçüldüyse → hüküm `olculemez`
+     *      (`anchor-evidence-cleared`) ile geri alınır. Silme yok (§3.2): eski
+     *      satır kanıtıyla birlikte duruyor, yalnız supersede ediliyor. Geri alma
+     *      `gecerli` DEĞİL, çünkü çapasının durması notun metnini doğrulamaz.
+     *   3. Aksi hâlde dokunulmaz. Özellikle: hakemin (`adjudicator`) hükmü ucuz
+     *      katman tarafından geri alınamaz — pahalı ölçümü, hiç metin okumamış
+     *      bir sinyalin sessizce ezmesi olurdu.
+     *
+     * `correction` mekanik yolda hep null: git bir notun yanlış olduğunu
+     * kanıtlayabilir, doğrusunun ne olduğunu bilemez. Alanı dolduracak olan
+     * hakem (M5 sonrası).
+     */
+    function persistVerdict(findingId: number, s: ScoreEntry): void {
+      const method = "anchor-drift (git)";
+      if (s.decisive !== null && s.score >= SUSPICION_THRESHOLD) {
+        const r = recordVerdict(store, {
+          projectId: project.id, findingId, verdict: s.decisive.verdict,
+          decayType: s.decisive.decayType, evidence: s.decisive.evidence,
+          method, source: "mechanical", runId,
+        });
+        if (r.recorded) sum.verdictsRecorded++;
+        return;
+      }
+      if (!s.anchorsMeasured) return;
+      const live = getLiveVerdict(store, findingId);
+      if (live === undefined || live.source !== "mechanical" || !MECHANICAL_WITHDRAWABLE.has(live.verdict)) return;
+      const r = recordVerdict(store, {
+        projectId: project.id, findingId, verdict: "olculemez",
+        subReason: "anchor-evidence-cleared",
+        evidence: `önceki hükmün çapa kanıtı bu ölçümde yok (${live.evidence ?? "kanıt kaydı yok"})`,
+        method, source: "mechanical", runId,
+      });
+      if (r.recorded) sum.verdictsRecorded++;
     }
 
     // Yazım: skor SIFIRDAN (D-M3-3), geçiş active↔suspect (D-M3-9), her şey olaylı.
@@ -485,6 +599,7 @@ export async function auditProject(
         }
         setSuspicion(store, f.id, s.score);
         ev("signal_scored", { findingId: f.id, score: s.score, reasons: s.reasons, states: s.states });
+        persistVerdict(f.id, s);
         if (s.score >= SUSPICION_THRESHOLD && (f.status === "active" || f.status === "unanchored")) {
           markSuspect(store, f.id);
           sum.suspects++;
@@ -507,7 +622,7 @@ export async function auditProject(
       classifyCalls: sum.classifyCalls, measurementFailures: sum.measurementFailures,
       classifyUnclassified: sum.classifyUnclassified, heldUnmeasured: sum.heldUnmeasured,
       budgetExhaustedAnchors: sum.budgetExhaustedAnchors,
-      fetchFailed: sum.fetchFailed,
+      fetchFailed: sum.fetchFailed, verdictsRecorded: sum.verdictsRecorded,
       importErrors: sum.import?.errors ?? 0, importRejected: sum.import?.rejected ?? 0,
     });
     return sum;
