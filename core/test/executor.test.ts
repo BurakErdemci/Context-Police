@@ -435,6 +435,25 @@ test("negatif usage değeri tavanı delemez", async () => {
   assert.ok(res.capExceeded, "1800 token harcanmışken 1000'lik tavan ateşlemeli");
 });
 
+// class: nested-usage-double-counted-in-cap
+// cached_input_tokens arrives INSIDE input_tokens and reasoning_output_tokens
+// inside output_tokens, so adding them to the cap total counted them twice.
+// Measured on the 28-note run: inflation x1.95, which made a nominal 2M ceiling
+// fire at ~1.03M of real input and would have truncated 16 of 28 notes. Both
+// fields are still REPORTED; only their contribution to the ceiling is dropped.
+test("iç içe usage alanları tavan toplamında iki kez sayılmaz", async () => {
+  const bin = fakeCodexBinary("ok", [
+    '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":90,"output_tokens":10,"reasoning_output_tokens":4}}',
+  ]);
+  const exec = createCodexExecutor({ binary: bin });
+  // Cap total is 100 + 10 = 110. Counting the nested fields would give 204 and
+  // breach this ceiling; the run must come back clean.
+  const res = await exec.run({ prompt: "x", caps: { maxTotalTokens: 150 } });
+  assert.equal(res.capExceeded, undefined, "iç içe alanlar tavanı erken ateşledi");
+  assert.equal(res.usage?.cachedInputTokens, 90, "alan yine de raporlanmalı");
+  assert.equal(res.usage?.reasoningOutputTokens, 4, "alan yine de raporlanmalı");
+});
+
 // class: unsafe-integer-token-accounting
 // Verification round two: above 2^53 addition stops changing the total
 // (2^53 + 1 rounds back to 2^53), so a stream reporting astronomic counts pins

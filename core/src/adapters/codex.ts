@@ -247,14 +247,30 @@ function untrack(kind: "dir" | "group", value: string | number | undefined): voi
   if (liveTempDirs.size === 0 && liveGroups.size === 0) uninstallSignalHandlers();
 }
 
-/** codex `--json` akışındaki usage alanları; ExecutorUsage'ın camelCase karşılıkları. */
+/**
+ * codex `--json` akışındaki usage alanları; ExecutorUsage'ın camelCase
+ * karşılıkları. Üçüncü alan: bu kalem TAVAN TOPLAMINA girer mi.
+ *
+ * `cached_input_tokens` ve `reasoning_output_tokens` girmez, çünkü bunlar
+ * kendi üst kalemlerinin İÇİNDE geliyor ve toplama eklemek onları iki kez
+ * saydırıyordu. Ölçüldü (28 notluk gerçek koşum, hakem-full28-maliyet.jsonl):
+ * `cached <= input` 28/28 (oran 0,84–0,97) ve `reasoning <= output` 28/28.
+ * Şişme çarpanı x1,95 çıkıyordu — yani `--max-tokens 2M` gerçekte ~1,03M
+ * girdide ateşliyordu ve o koşumun 28 notunun 16'sı tavanı aşmış sayılırdı.
+ * Bir maliyet tavanının yanlış tarafta olması, ölçümü kesip veriyi çöpe atar.
+ *
+ * SINANMADI: tek yönlü eşitsizlik iç içelik KANITI değildir; sağlayıcının
+ * sözleşmesiyle uyuşuyor (input önbellek okumasını, output akıl yürütmeyi
+ * kapsar) ve iki alanın toplamı bağımsız olarak doğrulanmadı. Yanılıyorsak
+ * hata tavanı GEVŞEK yapar (ölçüm kesilmez), tersi ölçümü kaybettirirdi.
+ */
 const USAGE_FIELDS = [
-  ["input_tokens", "inputTokens"],
-  ["cached_input_tokens", "cachedInputTokens"],
-  // Ücretlendirilen bir kalem → tavan toplamına da girer (bkz. ExecutorUsage).
-  ["cache_write_input_tokens", "cacheWriteInputTokens"],
-  ["output_tokens", "outputTokens"],
-  ["reasoning_output_tokens", "reasoningOutputTokens"],
+  ["input_tokens", "inputTokens", true],
+  ["cached_input_tokens", "cachedInputTokens", false],
+  // Önbelleğe YAZMA ayrı ücretlendirilen ve input'a dahil OLMAYAN bir kalem.
+  ["cache_write_input_tokens", "cacheWriteInputTokens", true],
+  ["output_tokens", "outputTokens", true],
+  ["reasoning_output_tokens", "reasoningOutputTokens", false],
 ] as const;
 
 /**
@@ -323,7 +339,7 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
     if (type === "item.completed") items++;
     else if (type === "turn.completed" && event.usage) {
       turns++;
-      for (const [snake, camel] of USAGE_FIELDS) {
+      for (const [snake, camel, countsTowardCap] of USAGE_FIELDS) {
         const v = event.usage[snake];
         if (v === undefined) continue; // field simply absent: not a schema drift
         // Number.isFinite, not typeof: NaN passes `typeof v === "number"` and
@@ -341,8 +357,9 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
         // true. A real token count is far below that range, so anything above
         // it is malformed by definition.
         if (Number.isSafeInteger(v) && (v as number) >= 0) {
+          // Alan HER ZAMAN raporlanır; yalnız tavan toplamına katkısı koşullu.
           totals.set(camel, (totals.get(camel) ?? 0) + (v as number));
-          totalTokens += v as number;
+          if (countsTowardCap) totalTokens += v as number;
         } else malformedUsageFields++;
       }
     } else {
