@@ -168,14 +168,22 @@ proposal.forEach((op, i) => {
       // iddiası olmaması meşru bir durum (o zaman kayıt sona eklenir). Geriye
       // doğrulanabilir iki şey kalıyor: `old_verdict` gerçekten null mı, ve
       // aynı yer+metin zaten etiketli mi.
-      if (op.old_verdict !== null) {
-        errors.push(`${where} ekle ${op.note}:${op.line_start}: old_verdict null olmalı, '${op.old_verdict}' geldi`);
-        return;
-      }
       // No target record exists to compare against, so the op's OWN shape is
       // the only thing that can be checked. It has to be: these four fields go
       // straight into a synthesised claim, and any `undefined` among them is
       // dropped by `JSON.stringify` instead of failing loudly.
+      // `note` is checked first because every message below interpolates it,
+      // and because it was the one of the four left unchecked: the verification
+      // round produced a claim with `claim_id:"undefined#1"` and no `note` key
+      // at all, which nothing downstream can attach to a note.
+      if (typeof op.note !== "string" || !op.note) {
+        errors.push(`${where} ekle: 'note' boş olmayan string olmalı, ${JSON.stringify(op.note)} geldi`);
+        return;
+      }
+      if (op.old_verdict !== null) {
+        errors.push(`${where} ekle ${op.note}:${op.line_start}: old_verdict null olmalı, '${op.old_verdict}' geldi`);
+        return;
+      }
       if (typeof op.line_start !== "number" || typeof op.line_end !== "number") {
         errors.push(`${where} ekle ${op.note}: 'line_start'/'line_end' number olmalı, ${JSON.stringify(op.line_start)}/${JSON.stringify(op.line_end)} geldi`);
         return;

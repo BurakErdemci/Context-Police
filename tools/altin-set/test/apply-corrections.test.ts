@@ -506,6 +506,35 @@ test("ekle: text yoksa ya da boşsa ölümcül", () => {
   }
 });
 
+// KUSUR C5 (15 Ağu 2026 doğrulama turu). `ekle` dalı `line_start`/`line_end`/
+// `text`/`new_verdict` doğruluyordu ama `note`'u HİÇ doğrulamıyordu — oysa
+// dördü de aynı yoldan sentezlenen kaydın içine giriyor. Alan yokken
+// `claim_id: "undefined#1"` üretiliyor ve `note` anahtarı `JSON.stringify`
+// tarafından SESSİZCE düşürülüyordu: aşağıdaki hiçbir katmanın bir nota
+// bağlayamayacağı bir iddia, hata basmadan altın sete giriyordu.
+
+test("ekle: note yoksa ölümcül — 'undefined#1' kimliği doğmaz ve dosya yazılmaz", () => {
+  const r = runAndClean(
+    [claim("a", 1)],
+    [{ islem: "ekle", line_start: 9, line_end: 9, text: "yeni", old_verdict: null, new_verdict: "curuk" }],
+  );
+  assert.equal(r.rc, 1);
+  assert.equal(r.out, null, "çıktı dosyası HİÇ yazılmamalı");
+  assert.match(r.stderr, /'note' boş olmayan string olmalı, undefined geldi/);
+});
+
+test("ekle: note boş string ya da string değilse ölümcül", () => {
+  for (const bad of ["", null, 7]) {
+    const r = runAndClean(
+      [claim("a", 1)],
+      [{ islem: "ekle", note: bad, line_start: 9, line_end: 9, text: "yeni", old_verdict: null, new_verdict: "curuk" }],
+    );
+    assert.equal(r.rc, 1, `note=${JSON.stringify(bad)} reddedilmeli`);
+    assert.equal(r.out, null);
+    assert.match(r.stderr, /'note' boş olmayan string olmalı/);
+  }
+});
+
 // KUSUR J. Kaynak dosyada `identity()` içinde üç HAM NUL baytı vardı; git dosyayı
 // İKİLİ sayıyor, `git show` gövdesi "Binary files differ" diyor ve altın seti
 // yeniden yazan aracın satır düzeyi diff'i HİÇ olmuyordu. Ayıraç `\0` KAÇIŞ
