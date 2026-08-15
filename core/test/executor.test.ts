@@ -416,6 +416,25 @@ test("CodexExecutor: sayı olmayan usage alanı sessizce 0 sayılmaz", async () 
   assert.equal(res.usage?.reasoningOutputTokens, 90, "sağlam alan yine sayılmalı");
 });
 
+// class: malformed-usage-cap-bypass
+// Found by the verification round over the fix above: `Number.isFinite` alone
+// accepts NEGATIVE counts, and adding one SUBTRACTS from the running total, so
+// a single bad turn erases earlier usage and the ceiling never fires. Measured
+// with turns of 900, -900, 900 against a 1000-token cap: the run reported
+// inputTokens=900 and no capExceeded, having actually spent 1800.
+test("negatif usage değeri tavanı delemez", async () => {
+  const bin = fakeCodexBinary("ok", [
+    '{"type":"turn.completed","usage":{"input_tokens":900}}',
+    '{"type":"turn.completed","usage":{"input_tokens":-900}}',
+    '{"type":"turn.completed","usage":{"input_tokens":900}}',
+  ]);
+  const exec = createCodexExecutor({ binary: bin });
+  const res = await exec.run({ prompt: "x", caps: { maxTotalTokens: 1000 } });
+  assert.equal(res.usage?.malformedUsageFields, 1, "negatif alan kayıp sayacına girmeli");
+  assert.equal(res.usage?.inputTokens, 1800, "negatif değer birikeni azaltmamalı");
+  assert.ok(res.capExceeded, "1800 token harcanmışken 1000'lik tavan ateşlemeli");
+});
+
 // class: timeout-is-not-an-upper-bound
 // killProcessGroup is best-effort and a grandchild in its own session survives
 // it while holding the inherited pipes, so `close` never fires. Measured

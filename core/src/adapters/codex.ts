@@ -329,7 +329,13 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
         // Number.isFinite, not typeof: NaN passes `typeof v === "number"` and
         // poisons totalTokens, after which every ceiling comparison is false —
         // the cap silently stops existing rather than firing.
-        if (Number.isFinite(v)) {
+        // Negatives are malformed too, and finiteness alone let them through:
+        // a token count cannot be negative, and adding one SUBTRACTS from the
+        // running total, so a single bad turn erases earlier usage and the
+        // ceiling never fires. Measured by the verification round — turns of
+        // 900, -900, 900 against a 1000-token cap reported inputTokens=900 and
+        // no capExceeded, having actually spent 1800.
+        if (Number.isFinite(v) && (v as number) >= 0) {
           totals.set(camel, (totals.get(camel) ?? 0) + (v as number));
           totalTokens += v as number;
         } else malformedUsageFields++;
