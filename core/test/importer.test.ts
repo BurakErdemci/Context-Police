@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { openStore } from "../src/store/db.ts";
 import { importMemoryDir } from "../src/importer/import.ts";
-import { MAX_NOTE_CHARS } from "../src/importer/parse.ts";
+import { MAX_NOTE_CHARS, noteTimestamp } from "../src/importer/parse.ts";
 import { listActive, getFinding, getAnchors } from "../src/store/findings.ts";
 import { listEvents } from "../src/store/events.ts";
 import { tmpDir } from "./helpers.ts";
@@ -55,6 +55,26 @@ test("kod bloğundaki tarih notun damgası olmaz", async () => {
   await importMemoryDir(store, projectId, dir);
   const [f] = listActive(store, projectId);
   assert.ok(f!.createdAt > "2020-01-01", `kod örneği damgayı belirledi: ${f!.createdAt}`);
+});
+
+// class: markdown-code-date-leak / prose-date-overstripped
+// Verification round two found the strip wrong in BOTH directions. An
+// unterminated opening fence makes the rest of a CommonMark document code, but
+// the pattern demanded a closing fence and leaked those dates. And a span was
+// matched between backtick runs of DIFFERENT lengths, which CommonMark treats
+// as prose — over-stripping is the more expensive half, because it drops the
+// note back to the import-time fallback that the body scan exists to avoid.
+test("kapanmamış fence kod sayılır, eşleşmeyen backtick düzyazı kalır", () => {
+  const leak = noteTimestamp({}, "2026-08-15T00:00:00.000Z", {
+    body: "```ts\nconst d = '2001-01-01';\n",
+  });
+  assert.notEqual(leak.source, "body", "kapanmamış fence içindeki tarih damga oldu");
+
+  const prose = noteTimestamp({}, "2026-08-15T00:00:00.000Z", {
+    body: "`not closed 2026-03-04``",
+  });
+  assert.equal(prose.source, "body", "eşleşmeyen backtick düzyazıyı sildi");
+  assert.equal(prose.iso, "2026-03-04T00:00:00.000Z");
 });
 
 // The body is untrusted text, so widening the stamp's source widens what a note

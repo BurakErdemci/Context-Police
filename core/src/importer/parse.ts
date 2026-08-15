@@ -216,9 +216,25 @@ const ymd = (y: number, m: number, d: number): string =>
  * narrowing further would need to know which sentences are the author's, which
  * this cannot tell.
  */
+// Both directions were measured and both were wrong at first. An UNTERMINATED
+// opening fence makes the rest of a CommonMark document code, but the original
+// pattern required a closing fence and so leaked those dates; and matching a
+// span as `` `...` `` removed text between two backtick runs of DIFFERENT
+// lengths, which CommonMark treats as prose — over-stripping is the more
+// expensive error, because it drops the note back to the import-time fallback
+// that the body scan exists to avoid.
 const stripCode = (body: string): string =>
-  body.replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[ \t]*$/gm, "\n")
-      .replace(/`[^`\n]*`/g, " ");
+  body
+    // Terminated fence, then an unterminated one running to end of document.
+    .replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[ \t]*$/gm, "\n")
+    .replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*$/m, "\n")
+    // A span is delimited by backtick runs of equal length that are not part of
+    // a LONGER run — hence the guard on both sides of the closer. Without the
+    // lookbehind, `` `x 2026-03-04`` `` closed on the second of two backticks
+    // and swallowed prose CommonMark leaves alone. The inner group also refuses
+    // to cross a blank line, so an unpaired backtick cannot reach a distant one
+    // and take half the note with it.
+    .replace(/(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g, " ");
 
 function newestBodyDate(raw: string): string | null {
   const body = stripCode(raw);
