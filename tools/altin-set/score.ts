@@ -77,11 +77,16 @@ if (!costPath) {
 }
 const covered = new Set([...H.map((h) => h.note), ...attempted]);
 const gCovered = G.filter((g) => covered.has(g.note));
-const skipped = [...new Set(G.map((g) => g.note))].filter((n) => !covered.has(n));
+const goldenNotes = new Set(G.map((g) => g.note));
+const skipped = [...goldenNotes].filter((n) => !covered.has(n));
 // Attempted, produced nothing. Stays in the denominator, and is printed
 // separately: as this count grows, what needs questioning is the instrument's
 // health rather than the judge's verdicts.
-const barren = [...attempted].filter((n) => !H.some((h) => h.note === n)).sort();
+// Filtered against the golden set for the same reason the coverage count is:
+// without it the SAME note was printed as "does not enter the score" (foreign)
+// and "inside the denominator" (barren), one line apart.
+const barren = [...attempted]
+  .filter((n) => goldenNotes.has(n) && !H.some((h) => h.note === n)).sort();
 
 const targets = gCovered.filter((g) => WRONG.has(g.verdict));
 const caught = targets.filter((g) => H.some((h) => overlaps(g, h) && WRONG.has(h.verdict)));
@@ -113,7 +118,6 @@ console.log(`hakem     : ${actualPath}`);
 // itself: `kapsanan not: 1/1 (denetlenmeyen: golden-note)`, full coverage and
 // the sole target unexamined, in one sentence. This is the line an operator
 // reads to decide whether a run was complete.
-const goldenNotes = new Set(G.map((g) => g.note));
 const coveredGolden = [...covered].filter((n) => goldenNotes.has(n));
 const foreign = [...covered].filter((n) => !goldenNotes.has(n)).sort();
 console.log(`\nkapsanan not: ${coveredGolden.length}/${goldenNotes.size}` +

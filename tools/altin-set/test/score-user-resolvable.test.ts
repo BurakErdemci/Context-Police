@@ -135,6 +135,22 @@ test("altın sette olmayan not SESSİZCE düşmez: ayrı satırda 'skora girmez'
   assert.match(out, /yazim-hatasi-notu/);
 });
 
+// class: contradictory-coverage-report
+// Verification round two: `foreign` was filtered against the golden set but
+// `barren` was not, so the SAME note was printed as "does not enter the score"
+// and "inside the denominator", one line apart. A report that contradicts
+// itself is the failure mode this whole scorer exists to avoid.
+test("altın sette olmayan not aynı anda hem dışarıda hem paydada gösterilmez", () => {
+  const out = runScore(
+    [g("golden-note", 1, "curuk")],
+    [],
+    [{ note: "yabanci-maliyet-notu" }],
+  );
+  assert.match(out, /altın sette OLMAYAN 1 not/);
+  assert.doesNotMatch(out, /yabanci-maliyet-notu.*payda İÇİNDE/s);
+  assert.doesNotMatch(out, /payda İÇİNDE.*yabanci-maliyet-notu/s);
+});
+
 test("mevcut üç sayının hesabı DEĞİŞMEDİ", () => {
   // Yanlış alarm: hakem geçerli altın iddianın üstüne `curuk` demiş.
   const out = runScore(GOLDEN, [
