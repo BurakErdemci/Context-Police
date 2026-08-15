@@ -580,6 +580,13 @@ async function one(note: string): Promise<void> {
   const u = r.usage ?? {};
   appendRow({
     note, lines, rc: r.rc, ms: r.ms, evidence_fed: WITH_EVIDENCE,
+    // The raw output is written UNGATED, so whoever applies the gate later
+    // (flatten.ts) must know which branch ran. Recomputing it from the note body
+    // gets the other branch once the body changes, and `gateClaims(..., false)`
+    // then rewrites real `dogustan-yanlis` verdicts into `olculemez` — targets
+    // vanish from the scored file with no error anywhere. Recorded as a fact so
+    // it cannot be re-derived wrongly.
+    born_wrong_available: bornWrongAvailable,
     // Bu satır bir İŞÇİ İSTİSNASI satırı değil (bkz. aşağıdaki catch).
     worker_error: null,
     // ÖLÇÜT TAVAN TÜRÜ DEĞİL, ÇIKTININ TAMLIĞI. Token tavanı post-hoc
@@ -662,6 +669,10 @@ try {
           appendRow({
             note: n, lines: null, rc: null, ms: null, evidence_fed: WITH_EVIDENCE,
             worker_error: msg,
+            // The exception can precede the body read, so the branch was never
+            // measured. `false` would assert "the gate was closed"; null says
+            // "unknown", matching the other unmeasured fields on this row.
+            born_wrong_available: null,
             cap: null, olculemez: true, claims_complete: false, parse_failed: false,
             items: 0, turns: 0,
             // Ayrıştırıcı HİÇ koşmadı → ölçüm yok. 0 yazmak "sıfır kayma
