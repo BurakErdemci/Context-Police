@@ -101,6 +101,16 @@ export interface ExecutorUsage {
    * dönüşmedi" kümesinin tamamı); bu alan yalnız SEBEBİ ayırır.
    */
   oversizeDrops?: number;
+  /**
+   * usage fields that arrived under a known name but were not a finite number
+   * (a string, null, NaN). Its own counter because it is its own failure: the
+   * event parsed, the name was recognised, and every other counter therefore
+   * stayed silent while the tokens went uncounted — the batch reads as 0 tokens
+   * and the cost ceiling never fires. Measured 15 Aug 2026 with a 1290-token
+   * `turn.completed` carrying `"input_tokens":"1234"`: usage came back as
+   * `{items:1,turns:1}` with no token field and no counter raised.
+   */
+  malformedUsageFields?: number;
 }
 
 export interface ExecutorResult {

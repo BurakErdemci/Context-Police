@@ -86,7 +86,7 @@ const DRIP_TURN_LINES = (turns: number, tokensPerTurn: number): string[] =>
   ]).flat();
 
 function fakeCodexBinary(
-  behavior: "ok" | "fail" | "hang" | "drip" | "noeol",
+  behavior: "ok" | "fail" | "hang" | "drip" | "noeol" | "escapee",
   streamLines: string[] = DEFAULT_STREAM_LINES,
 ): string {
   const dir = mkdtempSync(join(tmpdir(), "cp-fake-codex-"));
@@ -110,7 +110,9 @@ if [ "$1" = "--version" ]; then echo "codex-cli 9.9.9"; exit 0; fi
 cat <<'CP_STREAM_EOF'
 ${streamLines.join("\n")}
 CP_STREAM_EOF
-echo "kota doldu" >&2; exit 1`
+echo "kota doldu" >&2
+echo "using api key: sk-FAKE-NOT-A-REAL-SECRET" >&2
+exit 1`
         : behavior === "noeol"
           ? // Son satır YENİ SATIRSIZ biter: onu ancak akış kapanırken koşan
             // finish() işler. Kesme yolunun "süreç zaten ölmüş" hâlini ölçmenin
@@ -131,6 +133,15 @@ exit 0`
 cat > /dev/null   # stdin'deki prompt'u tüket
 ${streamLines.map((l) => `echo '${l}'\nsleep 0.05`).join("\n")}
 sleep 60`
+          : behavior === "escapee"
+          ? // Ignores SIGTERM and leaves a grandchild in its OWN session, which
+            // therefore survives kill(-pid) while still holding the inherited
+            // stdout/stderr. That is what stops `close` from ever firing, so it
+            // is the only shape that measures whether timeoutMs is a real bound.
+            `#!/bin/sh
+trap '' TERM
+perl -e 'use POSIX; POSIX::setsid(); exec("/bin/sh","-c","sleep 30")' &
+sleep 30`
           : `#!/bin/sh
 cat <<'CP_STREAM_EOF'
 ${streamLines.join("\n")}
@@ -359,11 +370,22 @@ test("CodexExecutor: süre aşımı capExceeded taşımaz", async () => {
   assert.equal(res.capExceeded, undefined);
 });
 
-test("CodexExecutor: sıfır-dışı çıkış ok=false ve stderr kuyruğu taşır", async () => {
+// class: subprocess-stderr-carries-secret-value
+// This test used to assert the opposite — that the stderr tail reached
+// res.error — and so it pinned the leak in place. res.error travels to
+// observer_batch_unprocessed / classify_failed, whose detail events.ts
+// JSON-stringifies into the `events` table, so anything in it is persisted.
+// Measured 15 Aug 2026: a fake codex printing `sk-FAKE-SECRET-abc123` on
+// stderr had that string land verbatim in res.error.
+test("CodexExecutor: sıfır-dışı çıkış ok=false; stderr'in ŞEKLİ raporlanır, DEĞERİ asla", async () => {
   const exec = createCodexExecutor({ binary: fakeCodexBinary("fail") });
   const res = await exec.run({ prompt: "x" });
   assert.equal(res.ok, false);
-  assert.match(res.error!, /kota doldu/);
+  assert.match(res.error!, /çıkış 1/);
+  assert.match(res.error!, /stderr \d+ bayt \/ \d+ satır/);
+  const serialised = JSON.stringify(res);
+  assert.ok(!serialised.includes("sk-FAKE-NOT-A-REAL-SECRET"), "sır değeri sonuca sızdı");
+  assert.ok(!serialised.includes("kota doldu"), "stderr gövdesi sonuca sızdı");
 });
 
 test("CodexExecutor: zaman aşımı süreci öldürür ve ok=false döner", async () => {
@@ -371,6 +393,45 @@ test("CodexExecutor: zaman aşımı süreci öldürür ve ok=false döner", asyn
   const res = await exec.run({ prompt: "x" });
   assert.equal(res.ok, false);
   assert.match(res.error!, /zaman aşımı/);
+});
+
+// class: malformed-usage-field-counted-as-zero
+// A usage field under a known name but not a finite number used to be skipped
+// in silence: the line parsed and the event type was recognised, so no counter
+// moved. The batch then read as 0 tokens and the ceiling could not fire.
+// Measured 15 Aug 2026 on a 1290-token turn carrying `"input_tokens":"1234"`:
+// usage came back `{items:1,turns:1}`. NaN is the sharper half — it passes
+// `typeof v === "number"`, poisons totalTokens, and every ceiling comparison
+// against NaN is false, so the cap stops existing rather than firing.
+test("CodexExecutor: sayı olmayan usage alanı sessizce 0 sayılmaz", async () => {
+  const bin = fakeCodexBinary("ok", [
+    '{"type":"item.completed"}',
+    '{"type":"turn.completed","usage":{"input_tokens":"1234","output_tokens":null,"reasoning_output_tokens":90}}',
+  ]);
+  const exec = createCodexExecutor({ binary: bin });
+  const res = await exec.run({ prompt: "x" });
+  assert.equal(res.ok, true);
+  assert.equal(res.usage?.malformedUsageFields, 2);
+  assert.equal(res.usage?.inputTokens, undefined, "string alan token olarak sayılmamalı");
+  assert.equal(res.usage?.reasoningOutputTokens, 90, "sağlam alan yine sayılmalı");
+});
+
+// class: timeout-is-not-an-upper-bound
+// killProcessGroup is best-effort and a grandchild in its own session survives
+// it while holding the inherited pipes, so `close` never fires. Measured
+// 15 Aug 2026: run() with timeoutMs=2000 returned after 6462 ms, bounded only
+// by the escapee's own lifetime. The grace phase is what makes timeoutMs a
+// ceiling, so the assertion is on the BOUND, not merely on the message.
+test("CodexExecutor: kill ıskalasa bile zaman aşımı bir ÜST SINIRDIR", async () => {
+  const exec = createCodexExecutor({ binary: fakeCodexBinary("escapee"), timeoutMs: 500 });
+  const t0 = Date.now();
+  const res = await exec.run({ prompt: "x" });
+  const elapsed = Date.now() - t0;
+  assert.equal(res.ok, false);
+  assert.match(res.error!, /zaman aşımı/);
+  // 500 ms limit + 2000 ms grace, with headroom for a loaded machine. The point
+  // is that it is bounded at all: before the fix this never returned.
+  assert.ok(elapsed < 10_000, `run() ${elapsed} ms sürdü — üst sınır uygulanmadı`);
 });
 
 // class: executor-parent-kill-leaks

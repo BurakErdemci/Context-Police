@@ -44,7 +44,31 @@ const DEFAULT_TIMEOUT_MS = 180_000;
  * sonsuza kadar bekliyordu.
  */
 const DEFAULT_DETECT_TIMEOUT_MS = 10_000;
-const STDERR_TAIL = 500;
+
+/**
+ * How long the timeout path waits after the kill before settling anyway.
+ * Short: by this point the group has already been sent a SIGKILL, so anything
+ * still holding the pipes is something the kill could not reach.
+ */
+const KILL_GRACE_MS = 2_000;
+
+/**
+ * Reports the SHAPE of a child's stderr, never its content.
+ *
+ * The tail used to be pasted into `ExecutorResult.error` verbatim. That string
+ * travels to `observer_batch_unprocessed` / `classify_failed`, and events.ts
+ * JSON-stringifies the detail into the `events` table — so an auth failure
+ * carrying a key fragment was persisted to disk indefinitely. The contract is
+ * that a secret's EXISTENCE is measurable and its VALUE never is.
+ *
+ * The cost is accepted and real: diagnosing a non-zero exit now needs the run
+ * repeated by hand. Length and line count are what survive.
+ */
+const describeStderr = (raw: string): string => {
+  const s = raw.trim();
+  if (!s) return "stderr boş";
+  return `stderr ${Buffer.byteLength(s, "utf8")} bayt / ${s.split("\n").length} satır (içerik taşınmaz)`;
+};
 
 /**
  * Hatayı teşhis edilebilir bir dizeye çevirir. `code` (errno) mesajın ÖNÜNE
@@ -276,6 +300,7 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
   let unparsedLines = 0;
   let unknownEvents = 0;
   let oversizeDrops = 0;
+  let malformedUsageFields = 0;
   // Sınırı aşıp atılan bir satırın KUYRUĞUNU yutmak için: kesme noktasından
   // sonraki parça bağımsız bir satır değil.
   let dropping = false;
@@ -300,10 +325,14 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       turns++;
       for (const [snake, camel] of USAGE_FIELDS) {
         const v = event.usage[snake];
-        if (typeof v === "number") {
-          totals.set(camel, (totals.get(camel) ?? 0) + v);
-          totalTokens += v;
-        }
+        if (v === undefined) continue; // field simply absent: not a schema drift
+        // Number.isFinite, not typeof: NaN passes `typeof v === "number"` and
+        // poisons totalTokens, after which every ceiling comparison is false —
+        // the cap silently stops existing rather than firing.
+        if (Number.isFinite(v)) {
+          totals.set(camel, (totals.get(camel) ?? 0) + (v as number));
+          totalTokens += v as number;
+        } else malformedUsageFields++;
       }
     } else {
       // usage'sız `turn.completed` TANINAN bir olaydır (ölçüm taşımıyor sadece);
@@ -374,7 +403,8 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       // Anlaşılmayan satır/olay da bir ölçümdür: hiçbir olay tanınmasa bile
       // usage BASILIR (yalnız kayma sayaçlarıyla), yoksa "akış gelmedi" ile
       // "akış geldi ama anlaşılmadı" aynı `undefined`'a düşerdi.
-      if (turns === 0 && items === 0 && unparsedLines === 0 && unknownEvents === 0 && oversizeDrops === 0)
+      if (turns === 0 && items === 0 && unparsedLines === 0 && unknownEvents === 0 &&
+          oversizeDrops === 0 && malformedUsageFields === 0)
         return undefined;
       const usage: ExecutorUsage = {};
       for (const [, camel] of USAGE_FIELDS) {
@@ -391,6 +421,7 @@ function createUsageCollector(onProgress?: (p: { totalTokens: number; items: num
       if (unknownEvents > 0) usage.unknownEvents = unknownEvents;
       // "yokken yazma, 0 uydurma": alan yalnız gerçekten atılan tampon varken var.
       if (oversizeDrops > 0) usage.oversizeDrops = oversizeDrops;
+      if (malformedUsageFields > 0) usage.malformedUsageFields = malformedUsageFields;
       return usage;
     },
   };
@@ -546,6 +577,21 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           // Bu yüzden hata yutulur ama UNUTULMAZ.
           let stdinError: string | null = null;
           let stdinFlushed = false;
+          // A SIGKILL to the process group can MISS: a grandchild that called
+          // setsid() leaves the group and keeps the inherited stdout/stderr
+          // pipes open. `close` needs exit AND all stdio closed, so it never
+          // fires, and the promise had no second way to settle. Measured
+          // 15 Aug 2026 with a fake codex leaving such an escapee: run() called
+          // with timeoutMs=2000 returned after 6462 ms, bounded only by the
+          // escapee's own lifetime — timeoutMs was a request, not a ceiling.
+          let settled = false;
+          let graceTimer: NodeJS.Timeout | undefined;
+          const settle = (r: Parameters<typeof resolve>[0]) => {
+            if (settled) return;
+            settled = true;
+            if (graceTimer !== undefined) clearTimeout(graceTimer);
+            resolve(r);
+          };
           const timer = setTimeout(() => {
             timedOut = true;
             // `closed` bayrağı YETMİYOR: o yalnız `close` olayında doluyor, oysa
@@ -556,6 +602,23 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             // Burada `cleanupNow` ve capExceeded yolu ile aynı korumayı kuruyoruz.
             if (closed) return;
             if (child.pid !== undefined && isProcessAlive(child.pid)) killProcessGroup(child.pid);
+            // The kill is best-effort (killProcessGroup swallows its errors), so
+            // the ceiling cannot depend on it landing.
+            graceTimer = setTimeout(() => {
+              if (closed || settled) return;
+              settle({
+                code: null, stderr, timedOut: true, stdinError, stdinFlushed,
+                usage: usageCollector.finish(), capExceeded, capPostHoc,
+              });
+              // Settling is not enough to let the process exit: our ends of the
+              // escapee's pipes are still open handles on the event loop, so
+              // `observe` stayed alive indefinitely after reporting the timeout
+              // (measured 15 Aug 2026 — the run resolved at 4005 ms and node
+              // never exited). usageCollector.finish() has already run, so
+              // nothing measurable is lost by dropping the streams here.
+              for (const s of [child.stdout, child.stderr, child.stdin]) s?.destroy();
+            }, KILL_GRACE_MS);
+            graceTimer.unref();
           }, timeoutMs);
           child.stderr.on("data", (d: Buffer) => {
             stderr = (stderr + d.toString("utf8")).slice(-4096);
@@ -569,16 +632,19 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             // bırakılmıştı (soldan sağa değerlendirme) — sessizce kırılabilecek
             // bir bağımlılık. Artık yapıyla çözülü: finish() resolve'dan ÖNCE
             // koşar, capExceeded o çağrıdan SONRA okunur.
+            if (settled) return;
             const usage = usageCollector.finish();
-            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage, capExceeded, capPostHoc });
+            settle({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage, capExceeded, capPostHoc });
           });
           child.on("close", (code) => {
             closed = true;
             clearTimeout(timer);
             untrack("group", child.pid);
             // finish() resolve'dan ÖNCE (bkz. error handler'daki not).
+            // The grace path may have settled already; finish() must not run twice.
+            if (settled) return;
             const usage = usageCollector.finish();
-            resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage, capExceeded, capPostHoc });
+            settle({ code, stderr, timedOut, stdinError, stdinFlushed, usage, capExceeded, capPostHoc });
           });
           child.stdin.on("error", (err: NodeJS.ErrnoException) => {
             if (stdinError === null) stdinError = err.code ? `${err.code}: ${err.message}` : err.message;
@@ -621,9 +687,12 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             capExceeded: done.capExceeded,
           };
         }
-        if (done.timedOut) return { ok: false, output: "", error: `zaman aşımı (${timeoutMs} ms)`, durationMs, usage, ...postHocCap };
+        // Names the limit AND the elapsed time: they differ whenever the kill
+        // missed and the grace phase settled the run, and a message carrying
+        // only the limit contradicted durationMs in exactly that case.
+        if (done.timedOut) return { ok: false, output: "", error: `zaman aşımı (sınır ${timeoutMs} ms, süre ${durationMs} ms)`, durationMs, usage, ...postHocCap };
         if (done.code !== 0)
-          return { ok: false, output: "", error: `çıkış ${done.code}: ${done.stderr.trim().slice(-STDERR_TAIL)}`, durationMs, usage, ...postHocCap };
+          return { ok: false, output: "", error: `çıkış ${done.code}: ${describeStderr(done.stderr)}`, durationMs, usage, ...postHocCap };
         // Sıfır çıkış + dolu çıktı dosyası YETMEZ: prompt tam gitmediyse cevap
         // eksik bir soruya verilmiştir. Bu yolların hepsinde output boş dize —
         // cevabın kendisi güvenilmez. (Tek istisna post-hoc tavan aşımı; bkz.
