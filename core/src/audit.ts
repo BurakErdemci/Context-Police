@@ -323,6 +323,15 @@ export async function auditProject(
       const anchors = anchorsById.get(f.id)!;
       const statusPattern = hasStatusPattern(f.content);
       const verdicts = ctx !== null ? await checkAnchors(ctx, anchors, f.createdAt, budget) : [];
+      // Without git NOTHING was measured, so the loop below — which fills
+      // unmeasuredAnchorFindings from the verdicts — never runs and the acquittal
+      // guard downstream saw an empty `missing`. The verdict path was already
+      // protected (it reads anchorsMeasured); the suspicion path was not, so a
+      // single run on a machine without git cleared every anchored suspect in the
+      // project while the verdicts table still said `curuk` — two tables, two
+      // different answers to the same question. Anchorless findings stay out:
+      // their anchor dimension is not unmeasured, it is empty.
+      if (ctx === null && anchors.length > 0) unmeasuredAnchorFindings.add(f.id);
       const drift = scoreDrift(verdicts, statusPattern);
       const states = countStates(verdicts);
       for (const [state, n] of Object.entries(states)) sum.anchorStates[state as AnchorState] += n;

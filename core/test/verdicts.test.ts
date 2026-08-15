@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore } from "../src/store/db.ts";
 import { auditProject } from "../src/audit.ts";
-import { appendFinding, listActive } from "../src/store/findings.ts";
+import { appendFinding, listActive, getFinding, setSuspicion, markSuspect } from "../src/store/findings.ts";
 import { listEvents } from "../src/store/events.ts";
 import {
   recordVerdict, getVerdict, getLiveVerdict, listPendingVerdicts, listVerdictHistory, reviewVerdict,
@@ -469,5 +469,28 @@ test("git yokken hüküm ne verilir ne geri çekilir: ölçmemek hüküm değild
   assert.equal(sum.gitAvailable, false);
   assert.equal(sum.verdictsRecorded, 0);
   assert.equal(getLiveVerdict(store, finding.id)!.id, first.id, "ölçüm yapılamayan koşum hükmü geri çekemez");
+  store.close();
+});
+
+// class: gitless-run-acquits-existing-suspect
+// The guard above covered the VERDICT path only. The suspicion path derived its
+// "unmeasured" set from the anchor verdicts, and without git that list is empty,
+// so `missing` came out empty and clearSuspect ran. Measured 15 Aug 2026: one
+// gitless run took a finding from suspect/0.9 to active/0 while its live verdict
+// still read `curuk` — the two tables gave different answers and the run logged
+// `cleared=1`, presenting an acquittal as a measurement.
+test("git yokken var olan suspect TEMİZLENMEZ: iki tablo çelişmez", async () => {
+  const { store, project } = auditSetup();
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const finding = listActive(store, project.id)[0]!;
+  setSuspicion(store, finding.id, 0.9);
+  markSuspect(store, finding.id);
+
+  const noGit = tmpDir("cp-suspect-nogit-");
+  const sum = await auditProject(store, { ...project, path: noGit }, { executor: null, fetch: false });
+
+  assert.equal(sum.gitAvailable, false);
+  assert.equal(sum.cleared, 0, "ölçüm yapılamayan koşum aklama üretemez");
+  assert.equal(getFinding(store, finding.id)!.status, "suspect");
   store.close();
 });
