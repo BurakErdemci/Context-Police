@@ -105,7 +105,13 @@ export interface ExecutorUsage {
 
 export interface ExecutorResult {
   ok: boolean;
-  /** Modelin son mesajı; ok=false iken boş dize. */
+  /**
+   * Modelin son mesajı. `ok=false` iken boş dize — TEK istisnası POST-HOC tavan
+   * aşımı: usage akışın sonunda tek `turn.completed` ile düştüğü için aşım ancak
+   * cevap TAMAMEN geldikten sonra görülebiliyor (bkz. ExecutorCaps). Orada
+   * kesilen bir iş yok; cevabı atmak harcanmış bütçeyi ikinci kez ödetirdi.
+   * Yani `output` doluyken `ok` yanlış olabilir; ayrımı `capExceeded` verir.
+   */
   output: string;
   error?: string;
   durationMs: number;
@@ -113,7 +119,8 @@ export interface ExecutorResult {
    *  zaman aşımına uğrayan bir hakem de token harcamıştır, tavan onu da görmeli. */
   usage?: ExecutorUsage;
   /**
-   * Yalnız tavan aşımıyla kesilen koşumda dolar. SÜRE aşımı (timeoutMs) bunu
+   * Yalnız tavan aşan koşumda dolar — kesilen (akış ortası) ve kesilmeyen
+   * (post-hoc) aşımın ikisinde de. SÜRE aşımı (timeoutMs) bunu
    * TAŞIMAZ: üç eksen (süre / token / tur) ayrık kalmalı ki çağıran taraf
    * anchor-drift'in budgetExhausted ↔ measurementFailed ayrımına eşleyebilsin.
    */

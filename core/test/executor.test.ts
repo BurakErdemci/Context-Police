@@ -338,7 +338,11 @@ test("CodexExecutor: süreç kapandıktan sonra kesme çağrılmaz (PID geri dö
   process.kill = gercekKill;
 
   assert.equal(res.ok, false);
-  assert.equal(res.output, "");
+  // Bu tam olarak POST-HOC aşım: aşım akış kapandıktan sonra görüldü, kesilen iş
+  // yok. Sözleşme 15 Ağu'da değişti — çıktı artık KORUNUR (bkz.
+  // ExecutorResult.output). Satır eskiden `""` bekliyordu; silinmedi, bilerek
+  // yeni sözleşmeye çevrildi.
+  assert.equal(res.output, '{"findings":[]}', "post-hoc aşımda gelen cevap atılmamalı");
   assert.equal(res.capExceeded?.kind, "tokens");
   assert.equal(res.capExceeded?.observed, 5000, "aşım kuyruktaki son satırdan görülmeli");
   assert.deepEqual(kills, [], `kapanmış sürece sinyal gönderildi: ${JSON.stringify(kills)}`);

@@ -483,6 +483,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           stdinFlushed: boolean;
           usage?: ExecutorUsage;
           capExceeded?: ExecutorCapExceeded;
+          capPostHoc: boolean;
         }>((resolve) => {
           // detached: çocuk kendi süreç grubunun lideri olur, böylece timeout'ta
           // torunlarıyla birlikte öldürülebilir (killProcessGroup). unref()
@@ -497,6 +498,13 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
           // ikisi karışırsa çağıran taraf "süre bitti" ile "bütçe bitti"yi
           // ayırt edemez, oysa ikisi farklı kararlar doğuruyor.
           let capExceeded: ExecutorCapExceeded | undefined;
+          // POST-HOC = aşım ancak akış kapandıktan sonra görüldü, yani kesilen
+          // bir iş yok: cevap eksiksiz geldi, yalnız pahalıydı. Ayrım ölçümün
+          // yapısından geliyor (executor.ts ExecutorCaps): usage tek bir
+          // `turn.completed` ile en sonda düşüyor. Ayrımı "kind === tokens" ile
+          // yapmak yanlış olurdu — token tavanı akış ORTASINDA da ateşleyebilir
+          // (çok turlu akış) ve orada süreç gerçekten öldürülür.
+          let capPostHoc = false;
           // Süreç kapandıktan SONRA öldürme yasak: PID'yi işletim sistemi geri
           // dönüştürmüş olabilir ve `kill(-pid)` ALAKASIZ bir süreç grubunu
           // vurur. Bu gerçek bir yol: usageCollector.finish() kuyrukta kalan
@@ -518,8 +526,12 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             // dönüştürülebiliyor (ölçüm: probes/signal-cleanup-stale-group.sh).
             // Canlılık sınaması `cleanupNow` ile aynı; artık üç öldürme yolu da
             // (timeout, detect timeout, kap aşımı) aynı korumadan geçiyor.
-            if (closed) return; // öldürecek süreç yok (yukarıdaki PID geri dönüşümü)
-            if (child.pid !== undefined && isProcessAlive(child.pid)) killProcessGroup(child.pid);
+            const killable = !closed && child.pid !== undefined && isProcessAlive(child.pid);
+            // Post-hoc ölçütü ÖLDÜRME ile aynı koşuldan türüyor: kesilen iş
+            // ancak öldürdüğümüz iştir. (`kind === "tokens"` ölçüt olamaz —
+            // çok turlu bir akışta token tavanı akış ORTASINDA da ateşler.)
+            capPostHoc = !killable;
+            if (killable) killProcessGroup(child.pid!);
           });
           // setEncoding: çok baytlı karakter iki chunk'a bölünürse Node birleştirir.
           child.stdout.setEncoding("utf8");
@@ -558,7 +570,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             // bir bağımlılık. Artık yapıyla çözülü: finish() resolve'dan ÖNCE
             // koşar, capExceeded o çağrıdan SONRA okunur.
             const usage = usageCollector.finish();
-            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage, capExceeded });
+            resolve({ code: null, stderr, timedOut, spawnError: err.message, stdinError, stdinFlushed, usage, capExceeded, capPostHoc });
           });
           child.on("close", (code) => {
             closed = true;
@@ -566,7 +578,7 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             untrack("group", child.pid);
             // finish() resolve'dan ÖNCE (bkz. error handler'daki not).
             const usage = usageCollector.finish();
-            resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage, capExceeded });
+            resolve({ code, stderr, timedOut, stdinError, stdinFlushed, usage, capExceeded, capPostHoc });
           });
           child.stdin.on("error", (err: NodeJS.ErrnoException) => {
             if (stdinError === null) stdinError = err.code ? `${err.code}: ${err.message}` : err.message;
@@ -585,31 +597,41 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
         const usage = done.usage;
         // Başarısız koşum da token harcamıştır; usage her yolda taşınır ki
         // maliyet tavanı yalnız başarılı koşumları saymasın.
-        if (done.spawnError) return { ok: false, output: "", error: `codex başlatılamadı: ${done.spawnError}`, durationMs, usage };
+        // Post-hoc aşımda koşum KESİLMEDİ, yalnız pahalı çıktı — aşağıdaki her
+        // hata yolu kendi sebebini raporlar ama bütçe ihlalini de taşımalı,
+        // yoksa "tavan aşıldı mı" sorusunun cevabı ikinci bir arıza yüzünden
+        // kayboluyor. Kesilen (mid-stream) aşımda bu alan zaten erken dönüşte.
+        const postHocCap = done.capExceeded && done.capPostHoc ? { capExceeded: done.capExceeded } : {};
+        const capError = (c: ExecutorCapExceeded) =>
+          `maliyet tavanı aşıldı: ${c.observed} ${c.kind === "tokens" ? "token" : "item"} > ${c.limit}`;
+
+        if (done.spawnError)
+          return { ok: false, output: "", error: `codex başlatılamadı: ${done.spawnError}`, durationMs, usage, ...postHocCap };
         // Tavan, süreden ÖNCE bakılır: kesme sırasında zamanlayıcı da ateşlemiş
         // olabilir, ama koşumu bitiren karar tavandır ve sebep o olmalı.
-        if (done.capExceeded) {
-          const { kind, limit, observed } = done.capExceeded;
-          const birim = kind === "tokens" ? "token" : "item";
+        // Yalnız AKIŞ ORTASINDA yakalanan aşım burada biter: orada süreç
+        // öldürüldü, elde kalan çıktı yarımdır ve tutulması yanıltıcı olur.
+        if (done.capExceeded && !done.capPostHoc) {
           return {
             ok: false,
             output: "",
-            error: `maliyet tavanı aşıldı: ${observed} ${birim} > ${limit}`,
+            error: capError(done.capExceeded),
             durationMs,
             usage,
             capExceeded: done.capExceeded,
           };
         }
-        if (done.timedOut) return { ok: false, output: "", error: `zaman aşımı (${timeoutMs} ms)`, durationMs, usage };
+        if (done.timedOut) return { ok: false, output: "", error: `zaman aşımı (${timeoutMs} ms)`, durationMs, usage, ...postHocCap };
         if (done.code !== 0)
-          return { ok: false, output: "", error: `çıkış ${done.code}: ${done.stderr.trim().slice(-STDERR_TAIL)}`, durationMs, usage };
+          return { ok: false, output: "", error: `çıkış ${done.code}: ${done.stderr.trim().slice(-STDERR_TAIL)}`, durationMs, usage, ...postHocCap };
         // Sıfır çıkış + dolu çıktı dosyası YETMEZ: prompt tam gitmediyse cevap
-        // eksik bir soruya verilmiştir. Sözleşme gereği ok=false iken output
-        // MUTLAKA boş dize (executor.ts), hata mesajı sebebi taşır.
+        // eksik bir soruya verilmiştir. Bu yolların hepsinde output boş dize —
+        // cevabın kendisi güvenilmez. (Tek istisna post-hoc tavan aşımı; bkz.
+        // executor.ts ExecutorResult.output.)
         if (done.stdinError !== null)
-          return { ok: false, output: "", error: `prompt stdin'e yazılamadı (${done.stdinError})`, durationMs, usage };
+          return { ok: false, output: "", error: `prompt stdin'e yazılamadı (${done.stdinError})`, durationMs, usage, ...postHocCap };
         if (!done.stdinFlushed)
-          return { ok: false, output: "", error: "prompt stdin'e tam yazılmadan süreç kapandı", durationMs, usage };
+          return { ok: false, output: "", error: "prompt stdin'e tam yazılmadan süreç kapandı", durationMs, usage, ...postHocCap };
 
         // Okuma hatası ile BOŞ DOSYA ayrı raporlanır. Eskiden `.catch(() => "")`
         // ikisini aynı değere indiriyordu ve çağıran, izinsiz/eksik bir dosya
@@ -625,10 +647,17 @@ export function createCodexExecutor(opts: CodexOptions = {}): ExecutorAdapter {
             error: `codex son mesaj dosyası okunamadı (${describeError(err)})`,
             durationMs,
             usage,
+            ...postHocCap,
           };
         }
         if (!output.trim())
-          return { ok: false, output: "", error: "codex son mesaj dosyasını boş bıraktı", durationMs, usage };
+          return { ok: false, output: "", error: "codex son mesaj dosyasını boş bıraktı", durationMs, usage, ...postHocCap };
+        // Post-hoc aşımda ÇIKTI KORUNUR. Koşum ok:false — bütçe ihlali sessizce
+        // geçmemeli — ama cevap eksiksiz geldi ve atılması harcanan bütçeyi ikinci
+        // kez ödetirdi. `ok:false ⇒ output:""` sözleşmesinin TEK istisnası budur
+        // ve executor.ts'te yazılı.
+        if (done.capExceeded)
+          return { ok: false, output, error: capError(done.capExceeded), durationMs, usage, capExceeded: done.capExceeded };
         return { ok: true, output, durationMs, usage };
       };
 
