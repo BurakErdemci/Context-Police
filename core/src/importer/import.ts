@@ -211,9 +211,16 @@ export async function importMemoryDir(
       continue;
     }
 
-    const { frontmatter } = parseNote(content);
+    const { frontmatter, body } = parseNote(content);
     const { anchors, dropped } = extractAnchors(content);
-    const stamp = noteTimestamp(frontmatter, nowIso());
+    // The body fallback is passed here because this is the ONLY production
+    // caller, and without it `source: "body"` was unreachable outside the tests
+    // and the golden-set tooling — the mechanism shipped dead. Measured
+    // 15 Aug 2026 over ~/.claude/projects/*/memory/*.md: of 83 notes, 56 carry a
+    // frontmatter date, 21 are datable only from the body, 6 not at all. Those
+    // 21 all fell to the import moment, which empties their churn window and
+    // stops anchor-drift from ever firing on them.
+    const stamp = noteTimestamp(frontmatter, nowIso(), { body });
     // Yeni kayıt, eskisinin supersede'i VE bunları açıklayan olaylar TEK işlemde.
     // İki ayrı gerekçe, ikisi de "arada çökme":
     //   - kayıt/supersede ayrı olsaydı aynı dosyanın iki canlı temsili kalırdı

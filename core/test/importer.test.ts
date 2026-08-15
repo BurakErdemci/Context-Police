@@ -22,6 +22,35 @@ function setup() {
   return { dir, store, projectId };
 }
 
+// class: body-date-fallback-dead-in-production
+// noteTimestamp grew a body fallback with a green unit test, but the only
+// production caller never passed `body`, so `source: "body"` was unreachable
+// outside the tests and the golden-set tooling. Measured 15 Aug 2026 over
+// ~/.claude/projects/*/memory/*.md: 21 of 83 notes are datable only from the
+// body and every one of them fell to the import moment, emptying its churn
+// window. The assertion is on the STORED stamp, since that is what the unit
+// test could not see.
+test("frontmatter'ı tarihsiz not: damga gövdeden gelir, import anına düşmez", async () => {
+  const { dir, store, projectId } = setup();
+  writeFileSync(join(dir, "b.md"),
+    `---\nname: b\ndescription: d\n---\n4 Mar 2026 ölçümü: \`scanOnce\` core/src/scan.ts içinde`);
+  await importMemoryDir(store, projectId, dir);
+  const [f] = listActive(store, projectId);
+  assert.equal(f!.createdAt, "2026-03-04T00:00:00.000Z");
+});
+
+// The body is untrusted text, so widening the stamp's source widens what a note
+// can assert about its own audit window. Only the FUTURE is clamped: a past
+// stamp tightens the window, a future one would close it.
+test("gövde tarihi GELECEKTE ise kelepçelenir: not kendi denetim penceresini kapatamaz", async () => {
+  const { dir, store, projectId } = setup();
+  writeFileSync(join(dir, "c.md"),
+    `---\nname: c\ndescription: d\n---\n2099-01-01 tarihli \`scanOnce\` core/src/scan.ts notu`);
+  await importMemoryDir(store, projectId, dir);
+  const [f] = listActive(store, projectId);
+  assert.ok(f!.createdAt < "2099-01-01", `gelecek damga kelepçelenmedi: ${f!.createdAt}`);
+});
+
 test("ilk import: not eklenir, çapaları çıkar, MEMORY.md atlanır, tarih frontmatter'dan", async () => {
   const { dir, store, projectId } = setup();
   writeFileSync(join(dir, "MEMORY.md"), "- [x](a.md) — indeks");
