@@ -201,7 +201,27 @@ const ymd = (y: number, m: number, d: number): string =>
  * 2000–2100 aralığı sürüm numarası ve anlamsız yılı eler (`v1.2.3`, `13 Ağu 1899`);
  * sessizce sınır uydurmak, sınıra bağlı hükmü yanlışlıkla AÇAR.
  */
-function newestBodyDate(body: string): string | null {
+/**
+ * Removes fenced blocks and inline code spans before the date scan.
+ *
+ * A date inside an example is not evidence about when the note was written —
+ * it is part of the thing the note is describing. Measured by the verification
+ * round: a note whose only date was `const releaseDate = '2001-01-01'` in a
+ * fenced TypeScript example was stored with `created_at` in 2001, moving its
+ * churn window back about 25 years. The direction is conservative (an older
+ * bound widens the audit rather than closing it), so this costs git budget
+ * rather than correctness — but the stamp was still an artefact of quoted code.
+ *
+ * Only code is stripped. Dates in prose, including quoted prose, still count:
+ * narrowing further would need to know which sentences are the author's, which
+ * this cannot tell.
+ */
+const stripCode = (body: string): string =>
+  body.replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[ \t]*$/gm, "\n")
+      .replace(/`[^`\n]*`/g, " ");
+
+function newestBodyDate(raw: string): string | null {
+  const body = stripCode(raw);
   let best: string | null = null;
   const take = (s: string): void => { if (best === null || s > best) best = s; };
   for (const m of body.matchAll(ISO_DATE_RE)) {

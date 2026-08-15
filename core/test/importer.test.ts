@@ -39,6 +39,24 @@ test("frontmatter'ı tarihsiz not: damga gövdeden gelir, import anına düşmez
   assert.equal(f!.createdAt, "2026-03-04T00:00:00.000Z");
 });
 
+// class: body-example-controls-audit-window
+// Found by the verification round over the fix above. A date inside a fenced
+// example is part of what the note DESCRIBES, not evidence of when it was
+// written, but the body scan took it as authoritative: a note whose only date
+// was `const releaseDate = '2001-01-01'` was stamped 2001, moving its churn
+// window back ~25 years and spending git budget on it. Code regions are now
+// stripped before the scan; prose dates, including quoted prose, still count.
+test("kod bloğundaki tarih notun damgası olmaz", async () => {
+  const { dir, store, projectId } = setup();
+  writeFileSync(join(dir, "d.md"),
+    "---\nname: d\ndescription: d\n---\n" +
+    "Örnek:\n\n```ts\nconst releaseDate = '2001-01-01';\n```\n\n" +
+    "`scanOnce` core/src/scan.ts içinde");
+  await importMemoryDir(store, projectId, dir);
+  const [f] = listActive(store, projectId);
+  assert.ok(f!.createdAt > "2020-01-01", `kod örneği damgayı belirledi: ${f!.createdAt}`);
+});
+
 // The body is untrusted text, so widening the stamp's source widens what a note
 // can assert about its own audit window. Only the FUTURE is clamped: a past
 // stamp tightens the window, a future one would close it.
