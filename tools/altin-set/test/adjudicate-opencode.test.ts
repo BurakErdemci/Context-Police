@@ -512,6 +512,45 @@ test("dünkü TAM ham dosya bugünkü EKSİK koşumu gölgeleyemez", () => {
 // deterministik üretmenin yolu yok (SIGKILL kullanıcı alanında engellenemez),
 // o yüzden raporlama dalı bu testte DEĞİL, canlı probe'da ölçüldü.
 
+// KUSUR C6 (15 Ağu 2026 doğrulama turu). `kill_failed: false` "hiçbir şey
+// kaçmadı" diye okunuyordu, oysa ölçümün ERİŞİMİ sınırlı: snapshot'tan ÖNCE
+// `setsid()` çağırıp başka ebeveyne devredilmiş bir süreç ne süreç grubunda ne
+// de PPID ağacında görünür. Satır artık ölçümün erişimini sonucunun YANINDA
+// taşıyor; `kill_accounting` olmadan okuyucu "ölçülen kümede kaçan yok" ile
+// "kaçan yok"u ayıramaz — sabitlerin yaptığı fazla iddianın aynısı.
+
+test("maliyet satırı kesme ölçümünün ERİŞİMİNİ de taşıyor", () => {
+  const sb = makeSandbox(TWO_PASS, { "tarihli-not": NOTE_WITH_DATE });
+  try {
+    const r = runTool(sb, ["tarihli-not"]);
+    assert.equal(r.status, 0, `araç hata verdi: ${r.stderr}`);
+    const row = rowFor(sb, "tarihli-not");
+    assert.equal(row.kill_failed, false, "ön koşul: normal koşumda kaçak yok");
+    assert.equal(row.kill_accounting, "group+ps-snapshot");
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+test("worker_error yolunda kill_failed ÖLÇÜLMEMİŞ: null, false DEĞİL", () => {
+  // İstisna spawn'dan ÖNCE de SONRA da gelebilir (burada not dosyası yok, yani
+  // öncesi), dolayısıyla hiçbir şeyin kaçmadığı hiç ÖLÇÜLMEDİ. `false` onu
+  // ölçülmüş gibi gösterirdi.
+  const sb = makeSandbox(TWO_PASS, { "tarihli-not": NOTE_WITH_DATE });
+  try {
+    const r = runTool(sb, ["olmayan-not"]);
+    assert.equal(r.status, 0, `araç hata verdi: ${r.stderr}`);
+    const row = rowFor(sb, "olmayan-not");
+    assert.ok(row.worker_error, "ön koşul: istisna yolu koşmalı");
+    assert.equal(row.kill_failed, null);
+    assert.notEqual(row.kill_failed, false, "ölçülmemiş bir şey 'kaçmadı' diye yazılamaz");
+    // Erişim de ölçülmedi: ölçüm hiç yapılmadıysa erişimini bildirmek de iddia olurdu.
+    assert.equal(row.kill_accounting, null);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
 /** `kill(pid, 0)` sinyal göndermez, yalnız varlığı sınar. */
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }

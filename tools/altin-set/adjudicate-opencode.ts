@@ -203,6 +203,20 @@ const KILL_GRACE_MS = 5_000;
  * platformda da "tüm süreçler". Ölçüm alınamazsa boş küme dönüyor — o zaman
  * yalnız grup kill'i kalır, yani eski davranış.
  */
+/**
+ * Descendants reachable from ONE `ps` snapshot taken before the kill.
+ *
+ * Known blind spot, measured by the verification round: a helper that already
+ * called setsid() and was reparented away before this snapshot appears in
+ * neither the process group nor this PPID tree, so it survives the kill and is
+ * absent from the accounting. `kill_failed:false` therefore means "nothing in
+ * the measured set survived", not "nothing survived" — the row records
+ * KILL_ACCOUNTING so the number is never read as exhaustive.
+ *
+ * Closing it fully would mean tracking every process the subprocess ever
+ * spawned, which nothing here can do for a third-party binary. Naming the
+ * limit is what keeps the measurement honest.
+ */
 function descendantsOf(pid: number): number[] {
   const r = spawnSync("ps", ["-Ao", "pid=,ppid="], { encoding: "utf8" });
   if (r.status !== 0 || typeof r.stdout !== "string") return [];
@@ -708,6 +722,12 @@ async function one(note: string): Promise<void> {
     kill_failed: kill.failed,
     leaked_pid: kill.pid,
     cleanup_command: kill.cmd,
+    // The REACH of the measurement above, recorded beside its result. A
+    // pre-snapshot setsid escapee is outside both the group and the PPID tree
+    // (see descendantsOf), so `kill_failed:false` means "nothing in the
+    // measured set survived". Without this field a reader cannot tell that
+    // from "nothing survived", which is the same over-claim the constants were.
+    kill_accounting: "group+ps-snapshot",
     stderr_tail: stderrTail === "" ? null : stderrTail,
     input_tokens: u.input_tokens ?? null,
     cached_input_tokens: u.cached_input_tokens ?? null,
@@ -777,8 +797,10 @@ await Promise.all(
           items: 0, turns: 0,
           // Ayrıştırıcı HİÇ koşmadı → 0 yazmak "sıfır kayma ölçtüm" derdi.
           unparsed_lines: null, unknown_events: null,
-          kill_failed: false, leaked_pid: null,
-          cleanup_command: null, stderr_tail: null,
+          // The exception can land before OR after the spawn, so whether
+          // anything survived was never measured. `false` would assert it was.
+          kill_failed: null, leaked_pid: null,
+          cleanup_command: null, kill_accounting: null, stderr_tail: null,
           input_tokens: null, cached_input_tokens: null, cache_write_input_tokens: null,
           output_tokens: null, reasoning_output_tokens: null, claims: 0,
           runner: "opencode", model: MODEL, cost_usd: null,
