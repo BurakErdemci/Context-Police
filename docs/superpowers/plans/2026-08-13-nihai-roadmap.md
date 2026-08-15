@@ -159,9 +159,35 @@ tarafın komutu yanlış kurmasıydı, 14'ü ölçme aletinin yapaylığıydı.
 - Varsayılan **kapalı**; yalnız hakem "kararsız" döndüğünde ya da hüküm bir
   eşiğin üstünde etkiliyse açılır.
 
-**M4 çıkış kapısı:** aynı 28 notluk koşum, maliyet tavanı açık —
-yakalama ≥ %80 · yanlış alarm bugünkünün yarısından az · not başına maliyet
-bugünkünün onda biri. Üçü birlikte raporlanır.
+**M4 çıkış kapısı** (15 Ağu 2026'da yeniden ifade edildi) — aynı 28 notluk
+koşum, maliyet tavanı açık, ölçüm **`golden-v2.jsonl`'e karşı**:
+
+- yakalama **≥ %80**
+- yanlış alarm **< 12**
+- not başına maliyet bugünkünün **onda biri**
+- yanına **KULLANICIYA** sayısı da basılır (aşağıda, kapının kaçağı)
+
+Dördü birlikte raporlanır.
+
+**Neden mutlak sayı, "yarısından az" değil.** Eski ifade tabanı 39 sanıyordu.
+M4.3 ölçtü: o 39'un **15'i altın setin kendi hatasıydı (%38,5)**, gerçek taban
+**24**. Yani aynı cümle bir gecede hedefi <19,5'ten <12'ye taşıdı. Orana bağlı
+bir çıta, ölçme aleti her düzeltildiğinde geçme eşiğini kendiliğinden
+oynatıyor — geçip geçmediğimiz sabit bir cevaba oturmuyor. Sayı çivilendi:
+aletin iyileşmesi çıtayı değiştirmez, yalnız ölçümü doğrular.
+
+**Kapının kaçağı ve kapağı.** `olculemez` skorun paydasından düşüyor (hakem
+kod olduğu sürece o iddialar ulaşılamaz, §2.1). Bu, her şeye "ölçemedim"
+diyen dejenere bir hakeme kusursuz bir yanlış-alarm skoru verirdi. O yüzden
+`score.ts` üç sayının yanında kullanıcıya devredilen iddia sayısını da basıyor;
+üç sayı tek başına okunamaz.
+
+**Payda dışı, M5'e devredildi: `DURUM:` sınıfı.** Depo `b4065f1`'e sabitli
+olduğu sürece bir `DURUM:` satırının bugün yanlış olması **yapısal olarak**
+ölçülemiyor — hakem doğru ölçüyor ama yanlış alarm sayılıyor. Ve bu, ürünün
+asıl hedef sınıfı. M4 bugün ölçebildiğiyle kapanır; sınıfın kendisi M5'in açık
+işidir (karar: Burak, 15 Ağu). Pin sözleşmesini kırmak seçenek değildi: aynı
+koşum farklı günlerde farklı sonuç verirdi.
 
 ---
 
