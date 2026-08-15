@@ -107,8 +107,21 @@ const pct = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(1) : "—");
 
 console.log(`altın set : ${goldenPath}`);
 console.log(`hakem     : ${actualPath}`);
-console.log(`\nkapsanan not: ${covered.size}/${new Set(G.map((g) => g.note)).size}` +
+// Numerator and denominator must live in the SAME universe — the golden set.
+// `covered` also holds judge and cost rows for notes outside it (renamed,
+// misspelled, stale), and counting those produced a line that contradicted
+// itself: `kapsanan not: 1/1 (denetlenmeyen: golden-note)`, full coverage and
+// the sole target unexamined, in one sentence. This is the line an operator
+// reads to decide whether a run was complete.
+const goldenNotes = new Set(G.map((g) => g.note));
+const coveredGolden = [...covered].filter((n) => goldenNotes.has(n));
+const foreign = [...covered].filter((n) => !goldenNotes.has(n)).sort();
+console.log(`\nkapsanan not: ${coveredGolden.length}/${goldenNotes.size}` +
   (skipped.length ? `  (denetlenmeyen: ${skipped.join(", ")})` : ""));
+// Not silent: a note the judge invented or renamed is a real signal about the
+// run, and dropping it from the count without saying so hides that.
+if (foreign.length)
+  console.log(`  altın sette OLMAYAN ${foreign.length} not çıktıda geçiyor (skora girmez): ${foreign.join(", ")}`);
 if (barren.length) {
   console.log(`  bunların ${barren.length}'i DENENDİ ama tek iddia üretemedi (payda İÇİNDE): ` +
     barren.join(", "));
