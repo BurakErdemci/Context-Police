@@ -19,7 +19,7 @@ import {
   type AnchorState, type AnchorVerdict, type GitBudget,
 } from "./signals/anchor-drift.ts";
 import { hasStatusPattern } from "./signals/status-pattern.ts";
-import { findCandidates, type NoteView } from "./signals/contradiction.ts";
+import { findCandidates, type Candidate, type NoteView } from "./signals/contradiction.ts";
 import { findCoverageCandidates } from "./signals/coverage.ts";
 import { classifyCandidates, MAX_CLASSIFY_ITEMS } from "./signals/classify.ts";
 import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect } from "./store/findings.ts";
@@ -423,12 +423,52 @@ export async function auditProject(
      */
     const unmeasuredFindings = new Set<number>();
     /**
+     * Not → o notun çelişki boyutunun NEDEN ölçülemediği. Kullanıcıya açılan
+     * `olculemez` kaydının `sub_reason`ı buradan geliyor: "sınıflandırıcı hiç
+     * koşmadı" ile "koştu ama bu adaya cevap dönmedi" kullanıcı için farklı iki
+     * iş kalemi — ilki bir yapılandırma sorunu, ikincisi bir ölçüm arızası.
+     */
+    const unmeasuredReasons = new Map<number, string>();
+    /**
      * Bir sonraki koşumun aday rotasyon damgaları (+ bu koşumun damga değeri);
      * null = bu koşumda sınıflama hiç çalışmadı, damgalara dokunulmaz.
      */
     let rotation:
       | { stamps: Record<string, number>; seen: Record<string, number>; stamp: number; renumbered: boolean }
       | null = null;
+
+    /**
+     * Çelişki boyutu ölçülemeyen adayları işaretler ve sebebini saklar.
+     *
+     * `answered` = bu koşumda EN AZ BİR adaya hüküm döndü mü. Kapsama adayları
+     * yalnız o zaman korunuyor, ve kural sınıflama arızası ile yürütücüsüz koşum
+     * için AYNI: kapsama yüzeyinde her not aday olduğu için, hiçbir cevap
+     * dönmediğinde "ölçülemedi" kümesi deponun tamamı demek — bu, tek bir not
+     * hakkında bir kanıt değil. Cevap dönmüşse sessizlik NOTA ÖZGÜ bir arıza ve
+     * korunması gereken tam da o. Çelişki yüzeylerinde (cross/intra/frontmatter)
+     * aday olmak notun kendi içeriğinden geliyor, kütüğün tamamından değil —
+     * orada koşul yok.
+     */
+    const markUnmeasured = (cands: Candidate[], answered: boolean, reason: string): void => {
+      for (const c of cands) {
+        if (c.kind === "coverage" && !answered) continue;
+        for (const id of [c.aId, c.bId]) {
+          if (id === null) continue;
+          unmeasuredFindings.add(id);
+          // İlk sebep kalıyor: aynı not iki yüzeyden gelebilir, ve ikisi de
+          // "ölçülemedi" diyor — kullanıcıya iki satır değil bir satır gider.
+          if (!unmeasuredReasons.has(id)) unmeasuredReasons.set(id, reason);
+        }
+      }
+    };
+
+    // Yürütücü YOKSA çelişki boyutu hiç kimse için ölçülmedi. Eskiden bu yol
+    // hiçbir işaret bırakmıyordu: skorlama sıfır skoru ÖLÇÜLMÜŞ sayıp var olan
+    // şüpheyi temizliyordu (probe: classifier-off-clears-suspect.mjs, suspect/0,9
+    // → unanchored/0 ve özet bir AKLAMA raporluyordu). `ctx === null` çapa
+    // yolunda kapatılan deliğin (851246d) çelişki boyutundaki kardeşi.
+    if (candidates.length > 0 && opts.executor === null)
+      markUnmeasured(candidates, false, "classifier-not-run");
 
     if (candidates.length > 0 && opts.executor !== null) {
       const notesById = new Map(views.map((v) => [v.findingId, v]));
@@ -462,11 +502,7 @@ export async function auditProject(
       //
       // Çelişki yüzeylerinde (cross/frontmatter/intra) böyle bir koşul yok:
       // orada aday olmak notun kendi içeriğinden geliyor, kütüğün tamamından değil.
-      const answered = res.measured.length > 0;
-      for (const c of res.undecided) {
-        if (c.kind === "coverage" && !answered) continue;
-        for (const id of [c.aId, c.bId]) if (id !== null) unmeasuredFindings.add(id);
-      }
+      markUnmeasured(res.undecided, res.measured.length > 0, "classify-undecided");
       // Rotasyon imleci kırpma olayının İÇİNDE: "20 aday atıldı" tek başına
       // okunduğunda hep aynı 20'sinin atıldığı sanılabilir — pencerenin
       // ilerlediği ancak burada görünür. (Kırpma görünürlüğü, D dalgası.)
@@ -613,6 +649,38 @@ export async function auditProject(
           });
           sum.suspects++;
           sum.heldUnmeasured++;
+          // DONDURMAK TEK BAŞINA BİR KARAR DEĞİL, kullanıcı adına verilmiş bir
+          // karardır — ve ürünün sözleşmesi (§2.1) araç karar vermez, ÖNERİR.
+          // Eskiden bu dal `continue` ile çıkıyordu, yani `persistVerdict` hiç
+          // koşmuyordu ve donmuş not hiçbir yerde görünmüyordu: onay kuyruğu
+          // `verdicts` tablosundan okunuyor, oraya satır yazılmıyordu. Ne sessiz
+          // aklama ne sessiz dondurma; ikisi de kullanıcıyı devre dışı bırakıyor.
+          //
+          // Hacim kendiliğinden sınırlı: bu dal yalnız ZATEN suspect olan notlar
+          // için işliyor, ve `recordVerdict` aynı sonucu ikinci kez yazmıyor
+          // (`sameConclusion`) — tekrarlayan koşum yeni satır üretmez.
+          //
+          // `olculemez` MECHANICAL_WITHDRAWABLE'da DEĞİL: aksi hâlde bir sonraki
+          // çapa turu bu kaydı, kullanıcı görmeden `anchor-evidence-cleared` ile
+          // sessizce geri çekerdi.
+          // Ama var olan bir hükmü EZMEZ. `recordVerdict` supersede ediyor, ve
+          // canlı bir `curuk`un üstüne "ölçemedim" yazmak o hükmü ölçüm yapmadan
+          // geri çekmek olurdu — MECHANICAL_WITHDRAWABLE'ın ve
+          // `ölçmemek hüküm değildir` muhafızının yasakladığı şeyin ta kendisi.
+          // Zaten hükmü olan not onay kuyruğunda GÖRÜNÜYOR; bu dalın çözdüğü
+          // "kullanıcıya hiç ulaşmıyor" sorunu orada yok.
+          const liveNow = getLiveVerdict(store, f.id);
+          if (liveNow !== undefined && liveNow.verdict !== "olculemez") continue;
+          const r = recordVerdict(store, {
+            projectId: project.id, findingId: f.id, verdict: "olculemez",
+            subReason: unmeasuredFindings.has(f.id)
+              ? unmeasuredReasons.get(f.id) ?? "classify-undecided"
+              : "anchor-unmeasured",
+            evidence: `${missing.join(" + ")} boyutu bu koşumda ölçülemedi; ` +
+              `önceki şüphe (${held}) düşürülmedi`,
+            method: "unmeasured-dimension", source: "mechanical", runId,
+          });
+          if (r.recorded) sum.verdictsRecorded++;
           continue;
         }
         setSuspicion(store, f.id, s.score);

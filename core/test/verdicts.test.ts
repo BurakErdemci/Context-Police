@@ -492,5 +492,51 @@ test("git yokken var olan suspect TEMİZLENMEZ: iki tablo çelişmez", async () 
   assert.equal(sum.gitAvailable, false);
   assert.equal(sum.cleared, 0, "ölçüm yapılamayan koşum aklama üretemez");
   assert.equal(getFinding(store, finding.id)!.status, "suspect");
+  // Ve hükmü EZİLMEDİ: canlı `curuk` yerinde. "Ölçemedim" kaydı yalnız hükümsüz
+  // notlar için açılıyor — zaten hükmü olan not kuyrukta görünüyor demektir.
+  assert.equal(getLiveVerdict(store, finding.id)!.verdict, "curuk");
+  store.close();
+});
+
+// class: unmeasured-never-reaches-the-user
+// Dondurmak tek başına bir karar değil, KULLANICI ADINA verilmiş bir karardır.
+// Ölçüldü (15 Ağu denetimi): donan not `continue` ile `persistVerdict`ı atlıyordu,
+// onay kuyruğu `verdicts` tablosundan okunduğu için kullanıcı donmuş nottan hiç
+// haberdar olmuyordu — ne aklama ne dondurma görünüyordu.
+test("çelişki boyutu ölçülemeyen donmuş not ONAY KUYRUĞUNA girer", async () => {
+  const memoryDir = tmpDir("cp-unmeasured-mem-");
+  // Çapasız ama description'lı: çapa yolu hiç hüküm üretmiyor (yani ortada
+  // ezilecek bir `curuk` yok), buna karşılık özet ↔ gövde yüzeyi gerçek bir
+  // çelişki adayı üretiyor — kapsama yüzeyinin aksine bu, notun KENDİ içeriğinden.
+  writeFileSync(join(memoryDir, "n.md"),
+    "---\nname: n\ndescription: Seam A tarafında duruyor\n---\nKarar: seam B tarafında.\n");
+  const store = openStore(":memory:");
+  const id = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir, memory_dir) VALUES (?,?,?,?)",
+    repo, "claude-code", "/t", memoryDir,
+  ).lastInsertRowid);
+  const project = { id, path: repo, memoryDir };
+
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const finding = listActive(store, project.id)[0]!;
+  assert.equal(getLiveVerdict(store, finding.id), undefined, "önkoşul: ortada hüküm yok");
+  setSuspicion(store, finding.id, 0.9);
+  markSuspect(store, finding.id);
+
+  // Sınıflandırıcı KAPALI: çelişki boyutu hiç kimse için ölçülmedi.
+  const sum = await auditProject(store, project, { executor: null, fetch: false });
+
+  assert.equal(sum.heldUnmeasured, 1, "şüphe korunmadı");
+  assert.equal(getFinding(store, finding.id)!.status, "suspect");
+  const pending = listPendingVerdicts(store, project.id);
+  assert.equal(pending.length, 1, "donmuş not kullanıcıya hiç ulaşmadı");
+  assert.equal(pending[0]!.verdict, "olculemez");
+  assert.equal(pending[0]!.subReason, "classifier-not-run");
+  assert.match(pending[0]!.evidence!, /çelişki/, "hangi boyutun ölçülemediği kanıtta yok");
+
+  // Tekrarlayan koşum İKİNCİ satır yazmaz (`sameConclusion`): kuyruk seli yok.
+  const sum2 = await auditProject(store, project, { executor: null, fetch: false });
+  assert.equal(sum2.verdictsRecorded, 0);
+  assert.equal(listPendingVerdicts(store, project.id).length, 1);
   store.close();
 });
