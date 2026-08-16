@@ -59,7 +59,7 @@ import { evidenceFor } from "./evidence-block.ts";
 import {
   type Usage, addUsage, totalTokens,
   decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
-  buildPrompt, adjudicatorSchema, authorshipBound,
+  buildPrompt, adjudicatorSchema, authorshipBound, purgeStaleArtifacts,
 } from "./adjudicate-lib.ts";
 
 // --evidence: mekanik katmanın ZATEN ölçtüğü çapa kanıtını isteme koyar.
@@ -538,10 +538,18 @@ const schemaPaths = {
 writeFileSync(schemaPaths.open, JSON.stringify(adjudicatorSchema({ bornWrongAvailable: true })));
 writeFileSync(schemaPaths.gated, JSON.stringify(adjudicatorSchema({ bornWrongAvailable: false })));
 
-writeFileSync(outPath, "");
 // Eksik hamların yeri: çıktı dosyasının dizini altında `incomplete/`.
 const incompleteDir = join(dirname(outPath), "incomplete");
 mkdirSync(incompleteDir, { recursive: true });
+// ÇIKTIYI SIFIRLAMAK ARTEFAKTLARI SİLMEZ, ve bu araç kapı ölçümünü yapan araç:
+// bayat ham dosyalar kalırsa 28 notluk koşum iki koşumu karıştırır. Kardeş
+// koşucuda (`adjudicate-opencode.ts`) 15 Ağu'da düzeltilmişti, burada açık
+// kalmıştı — aynı sınıfın iki dosyada ayrışması, fonksiyonun artık `lib`de
+// tek nüsha durmasının sebebi. Temizlik sıfırlamayla AYNI adımda (CLAUDE.md §3).
+const purged = purgeStaleArtifacts([dirname(outPath), incompleteDir], `${basename(outPath)}.`);
+writeFileSync(outPath, "");
+// Sessiz silme bu projede bulgu: kaç dosya gittiği ölçülebilir kalsın.
+console.error(`bayat artefakt silindi: ${purged}`);
 console.log("not".padEnd(36) + "satır  süre(sn)  girdi   önbellek  önb-yaz  çıktı  akıl   iddia");
 console.log("─".repeat(88));
 

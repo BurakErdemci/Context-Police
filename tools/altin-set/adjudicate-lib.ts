@@ -6,7 +6,9 @@
 // zaman test edilemedi; M4.1 denetiminin 6 bulgusunun 6'sı da o dosyadaydı.
 // Buraya YALNIZ o kararlar taşındı; akış (spawn, sinyal, raporlama) CLI'da kaldı.
 
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 // ÜRÜNÜN sınır ilkeli — KOPYALANMIYOR, import ediliyor. Gerekçe: bu denetimin
 // bulduğu kusurun kendisi "araç ile ürünün sınır tanımı ıraksamış" idi; ıraksamış
@@ -456,6 +458,48 @@ export const OLCULEMEZ = "olculemez";
  * SORU KUYRUĞU; birincisi kapanmış bir dosya. Tek etiketle ikisi ayırt
  * edilemediği için kullanıcıya sorulabilecek her şey sessizce kayboluyordu.
  */
+/**
+ * Not-başına ham artefaktların son ekleri. Hakem koşucularının ikisi de
+ * `<cikti>.<not>.raw.jsonl` yazıyor; `.pass1.txt` yalnız iki geçişli
+ * koşucuda (`adjudicate-opencode.ts`) doğuyor. Liste ORTAK tutuluyor: bir
+ * koşucu yeni bir artefakt tipi eklerse öbürünün temizliği sessizce eksik
+ * kalmasın — bu dosyanın var olma sebebiyle aynı sebep.
+ */
+const RUN_ARTIFACT_SUFFIXES = [".raw.jsonl", ".pass1.txt"];
+
+/**
+ * Önceki koşumun not-başına artefaktlarını siler ve KAÇ TANE sildiğini döner.
+ *
+ * NEDEN GEREKLİ (ölçüldü 15 Ağu 2026, `stale-raw` probe'u): yalnız
+ * `writeFileSync(outPath, "")` yapılınca önceki koşumun ham dosyaları yerinde
+ * kalıyor ve `flatten.ts` DİZİNDEKİ TÜM ham dosyaları topladığı için, 2 notluk
+ * bir koşumun ardından 1 notla yapılan yeniden koşum düz dosyada yine 2 not
+ * puanlıyor. Daha kötü varyantı: bugün EKSİK çıkan bir not `incomplete/`e
+ * giderken dünkü TAM ham dosyası üst dizinde kalıyor ve ESKİ hükümler
+ * puanlanıyor — yani iki koşum tek ölçüm gibi okunuyor.
+ *
+ * Kabuk glob'u KULLANILMIYOR: zsh'de eşleşmeyen bir glob komutun tamamını iptal
+ * ediyor (hafıza: kabuk-tuzaklari-macos), yani ilk temiz koşumda temizlik hiç
+ * çalışmazdı. Liste `readdirSync` + filtreden çıkıyor.
+ *
+ * Çağrısı çıktı dosyasının sıfırlanmasıyla AYNI adımda durmalı: ayrı bırakılan
+ * temizlik yapılmıyor (CLAUDE.md §3).
+ */
+export function purgeStaleArtifacts(dirs: string[], prefix: string): number {
+  let removed = 0;
+  for (const dir of dirs) {
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const f of entries) {
+      if (!f.startsWith(prefix)) continue;
+      if (!RUN_ARTIFACT_SUFFIXES.some((s) => f.endsWith(s))) continue;
+      rmSync(join(dir, f), { force: true });
+      removed++;
+    }
+  }
+  return removed;
+}
+
 /** UI dalı: `verdict === OLCULEMEZ && unmeasurable_reason === USER_RESOLVABLE` → soru kuyruğu. */
 export const USER_RESOLVABLE = "user_resolvable";
 /** Ölçümle kapanmış hâl; alanın YOKLUĞU da bunu demektir (eski çıktılarla uyum). */

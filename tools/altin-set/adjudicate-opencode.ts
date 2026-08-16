@@ -81,7 +81,7 @@ import { evidenceFor } from "./evidence-block.ts";
 import {
   type Usage, addUsage,
   appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
-  buildPrompt, adjudicatorSchema, authorshipBound, extractGatedClaims,
+  buildPrompt, adjudicatorSchema, authorshipBound, extractGatedClaims, purgeStaleArtifacts,
 } from "./adjudicate-lib.ts";
 
 const argvAll = process.argv.slice(2);
@@ -568,28 +568,6 @@ if (WITH_EVIDENCE && !gitCtx) { console.error("git bağlamı açılamadı"); pro
 
 const RAW_SUFFIX = ".raw.jsonl";
 const PASS1_SUFFIX = ".pass1.txt";
-
-/**
- * Önceki koşumun not-başına artefaktlarını siler ve KAÇ TANE sildiğini döner.
- *
- * Kabuk glob'u KULLANILMIYOR: zsh'de eşleşmeyen bir glob komutun tamamını iptal
- * ediyor (hafıza: kabuk-tuzaklari-macos), yani ilk temiz koşumda temizlik hiç
- * çalışmazdı. Liste `readdirSync` + filtreden çıkıyor.
- */
-function purgeStaleArtifacts(dirs: string[], prefix: string): number {
-  let removed = 0;
-  for (const dir of dirs) {
-    let entries: string[];
-    try { entries = readdirSync(dir); } catch { continue; }
-    for (const f of entries) {
-      if (!f.startsWith(prefix)) continue;
-      if (!f.endsWith(RAW_SUFFIX) && !f.endsWith(PASS1_SUFFIX)) continue;
-      rmSync(join(dir, f), { force: true });
-      removed++;
-    }
-  }
-  return removed;
-}
 
 const incompleteDir = join(dirname(outPath), "incomplete");
 mkdirSync(incompleteDir, { recursive: true });

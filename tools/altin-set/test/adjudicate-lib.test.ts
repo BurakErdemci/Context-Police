@@ -5,16 +5,52 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addUsage, totalTokens, firstBalancedBlock, parseClaimsCount, decideCompleteness,
   appendTail, STDERR_TAIL, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
-  buildPrompt,
+  buildPrompt, purgeStaleArtifacts,
 } from "../adjudicate-lib.ts";
 import { DATA_FENCE_OPEN, DATA_FENCE_CLOSE } from "../../../core/src/prompt-fence.ts";
+
+// --- BULGU: stale-raw (bayat artefakt iki koşumu tek ölçüm gibi okutuyor) ---
+// 15 Ağu'da `adjudicate-opencode.ts`te düzeltildi, `adjudicate-cost.ts`te AÇIK
+// kaldı — ve kapı ölçümünü yapan araç ikincisi. Fonksiyon ortak modüle taşındı;
+// kanıtı bugüne kadar yalnız bir probe'du, buradan itibaren test.
+
+test("stale-raw: önceki koşumun ham artefaktları silinir, yabancı dosyalar durur", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-purge-"));
+  const inc = join(dir, "incomplete");
+  mkdirSync(inc);
+  const prefix = "cikti.jsonl.";
+  const yaz = (d: string, ad: string) => writeFileSync(join(d, ad), "x");
+
+  yaz(dir, `${prefix}not-a.raw.jsonl`);
+  yaz(dir, `${prefix}not-b.raw.jsonl`);
+  yaz(inc, `${prefix}not-c.raw.jsonl`);
+  yaz(dir, `${prefix}not-d.pass1.txt`);          // iki geçişli koşucunun artefaktı
+  yaz(dir, "cikti.jsonl");                        // çıktının KENDİSİ: önek eşleşmiyor
+  yaz(dir, `${prefix}not-e.txt`);                 // tanınmayan son ek
+  yaz(dir, "baska-kosum.not-f.raw.jsonl");        // başka bir çıktının artefaktı
+
+  const removed = purgeStaleArtifacts([dir, inc], prefix);
+  assert.equal(removed, 4, "silinen sayısı raporlanmıyor: sessiz silme bu projede bulgu");
+
+  const kalan = [...readdirSync(dir), ...readdirSync(inc)].filter((f) => f !== "incomplete").sort();
+  assert.deepEqual(kalan, ["baska-kosum.not-f.raw.jsonl", "cikti.jsonl", `${prefix}not-e.txt`],
+    "temizlik ya eksik kaldı ya ilgisiz dosyaya uzandı");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stale-raw: olmayan dizin sessizce atlanır, çağıran ilk temiz koşumda patlamaz", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-purge-yok-"));
+  // `incomplete/` ilk koşumda henüz yaratılmamış olabilir; atmak yerine atlanır.
+  assert.equal(purgeStaleArtifacts([dir, join(dir, "hic-yok")], "x."), 0);
+  rmSync(dir, { recursive: true, force: true });
+});
 
 // --- BULGU: geçerli boş iddia kümesi reddediliyor -------------------------
 
