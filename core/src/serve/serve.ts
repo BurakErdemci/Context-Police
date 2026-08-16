@@ -6,7 +6,7 @@ import { openStoreReadonly } from "../store/db.ts";
 import type { ReadStore } from "../store/db.ts";
 import {
   getSummary, listVerdicts, getFindingDetail, listRuns, listOtherEvents,
-  getVersion, SchemaOutdated,
+  getVersion, listProjectCards, SchemaOutdated,
 } from "./api.ts";
 import type { VerdictFilters } from "./api.ts";
 
@@ -64,6 +64,7 @@ function route(
     const store = getStore();
     if (store === null) { json(res, 200, { storeMissing: true, path: storePath }); return; }
     if (path === "/api/summary") { json(res, 200, getSummary(store)); return; }
+    if (path === "/api/projects") { json(res, 200, listProjectCards(store)); return; }
     if (path === "/api/verdicts") {
       const filters: VerdictFilters = {};
       for (const key of ["verdict", "subReason", "source", "review"] as const) {

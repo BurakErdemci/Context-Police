@@ -10,7 +10,7 @@ import { recordVerdict } from "../src/store/verdicts.ts";
 import { logEvent } from "../src/store/events.ts";
 import { tmpStorePath } from "./helpers.ts";
 import {
-  getSummary, listVerdicts, getFindingDetail, listRuns, getVersion, SchemaOutdated,
+  getSummary, listVerdicts, getFindingDetail, listRuns, getVersion, listProjectCards, SchemaOutdated,
 } from "../src/serve/api.ts";
 
 // Fixture: 2 finding; f1 has a superseded chain (curuk -> gecerli), f2 olculemez.
@@ -106,6 +106,49 @@ test("version max id'leri döner", () => {
   const v = getVersion(ro);
   assert.equal(v.maxVerdictId, 3);
   assert.ok(v.maxEventId >= 1);
+  ro.close();
+});
+
+test("listVerdicts satırları teşhis cümlesi taşır", () => {
+  const { ro, f1 } = fixture();
+  const rows = listVerdicts(ro);
+  const row = rows.find((r) => r.findingId === f1);
+  assert.ok(row);
+  assert.equal(typeof row!.diagnosis.sentence, "string");
+  assert.ok(row!.diagnosis.sentence.length > 0);
+  ro.close();
+});
+
+test("finding detayı teşhis alanı taşır", () => {
+  const { ro, f1 } = fixture();
+  const d = getFindingDetail(ro, f1);
+  assert.ok(d);
+  assert.equal(typeof d!.diagnosis.sentence, "string");
+  assert.ok(d!.diagnosis.sentence.length > 0);
+  ro.close();
+});
+
+test("listProjectCards proje başına not/şüpheli/bekleyen/çapasız/temiz sayar", () => {
+  const { ro } = fixture();
+  const cards = listProjectCards(ro);
+  assert.equal(cards.length, 1);
+  const card = cards[0]!;
+  assert.equal(card.path, "/p");
+  assert.equal(card.name, "p");
+  assert.equal(card.notes, 2);          // f1 + f2, ikisi de superseded değil
+  assert.equal(card.suspects, 0);       // fixture'da hiçbiri 'suspect' işaretlenmedi
+  assert.equal(card.pending, 2);        // f1'in canlı hükmü + f2'nin canlı hükmü
+  assert.equal(card.anchorless, 1);     // yalnız f2 çapasız
+  assert.equal(card.clean, 2);          // notes - suspects
+  assert.equal(card.healthPct, 100);    // round(100 * 2/2)
+  ro.close();
+});
+
+test("listProjectCards runSeries son audit_completed olaylarını eskiden yeniye verir", () => {
+  const { ro } = fixture();
+  const card = listProjectCards(ro)[0]!;
+  assert.deepEqual(card.runSeries, [3]); // fixture'daki tek olayın verdictsRecorded'ı
+  assert.ok(card.lastRunAt !== null);
   ro.close();
 });
 

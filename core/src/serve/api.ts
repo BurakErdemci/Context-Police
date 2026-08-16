@@ -1,5 +1,9 @@
+import { basename } from "node:path";
 import type { ReadStore } from "../store/db.ts";
 import type { VerdictValue } from "../store/verdicts.ts";
+import { WHOLE_NOTE } from "../store/verdicts.ts";
+import { diagnose } from "./diagnose.ts";
+import type { Diagnosis } from "./diagnose.ts";
 
 export class SchemaOutdated extends Error {
   constructor() { super("store schema is older than this explorer"); }
@@ -40,6 +44,7 @@ export type VerdictRow = {
   suspicion: number;
   findingStatus: string;
   preview: string;
+  diagnosis: Diagnosis;
 };
 
 export type VerdictFilters = {
@@ -84,6 +89,21 @@ export type FindingDetail = {
   supersededBy: number | null;
   anchors: { kind: string; value: string; takenAtCommit: string | null }[];
   claims: ClaimView[];
+  diagnosis: Diagnosis;
+};
+
+export type ProjectCard = {
+  id: number;
+  path: string;
+  name: string;
+  notes: number;
+  suspects: number;
+  pending: number;
+  anchorless: number;
+  clean: number;
+  lastRunAt: string | null;
+  runSeries: number[];
+  healthPct: number;
 };
 
 export type RunView = {
@@ -158,28 +178,43 @@ export function listVerdicts(store: ReadStore, filters: VerdictFilters = {}): Ve
     params.push(filters.limit ?? 200);
     return store
       .all<Record<string, unknown>>(
-        `SELECT v.id, v.finding_id, v.claim_ref, v.verdict, v.sub_reason, v.source,
-              v.review, v.repeat_count, v.created_at,
-              f.suspicion, f.status AS finding_status, substr(f.content, 1, 160) AS preview
+        `SELECT ${VERDICT_COLS}, f.suspicion, f.status AS finding_status, f.content AS finding_content,
+              substr(f.content, 1, 160) AS preview
        FROM verdicts v JOIN findings f ON f.id = v.finding_id
        WHERE ${where.join(" AND ")}
        ORDER BY f.suspicion DESC, v.id DESC LIMIT ?`,
         ...params,
       )
-      .map((r) => ({
-        id: r["id"] as number,
-        findingId: r["finding_id"] as number,
-        claimRef: r["claim_ref"] as string,
-        verdict: r["verdict"] as VerdictValue,
-        subReason: r["sub_reason"] as string | null,
-        source: r["source"] as string,
-        review: r["review"] as string,
-        repeatCount: r["repeat_count"] as number,
-        createdAt: r["created_at"] as string,
-        suspicion: r["suspicion"] as number,
-        findingStatus: r["finding_status"] as string,
-        preview: r["preview"] as string,
-      }));
+      .map((r) => {
+        // Bounded by `limit` (default 200) — one small anchors query per row
+        // is fine at this scale (spec: "fetch anchors per finding, bounded N").
+        const anchors = store.all<{ kind: string; value: string }>(
+          "SELECT kind, value FROM anchors WHERE finding_id = ?",
+          r["finding_id"] as number,
+        );
+        const diagnosis = diagnose({
+          content: r["finding_content"] as string,
+          status: r["finding_status"] as string,
+          suspicion: r["suspicion"] as number,
+          verdict: toDetail(r),
+          anchors,
+        });
+        return {
+          id: r["id"] as number,
+          findingId: r["finding_id"] as number,
+          claimRef: r["claim_ref"] as string,
+          verdict: r["verdict"] as VerdictValue,
+          subReason: r["sub_reason"] as string | null,
+          source: r["source"] as string,
+          review: r["review"] as string,
+          repeatCount: r["repeat_count"] as number,
+          createdAt: r["created_at"] as string,
+          suspicion: r["suspicion"] as number,
+          findingStatus: r["finding_status"] as string,
+          preview: r["preview"] as string,
+          diagnosis,
+        };
+      });
   });
 }
 
@@ -218,17 +253,27 @@ export function getFindingDetail(store: ReadStore, id: number): FindingDetail | 
       live: history.find((v) => v.supersededBy === null) ?? null,
       history,
     }));
+    // The card-level diagnosis speaks about the whole note, not one claim:
+    // prefer the whole-note verdict (claim_ref = WHOLE_NOTE) if it exists,
+    // else fall back to whatever single claim the note carries.
+    const primaryVerdict = claims.find((c) => c.claimRef === WHOLE_NOTE)?.live
+      ?? claims[0]?.live
+      ?? null;
+    const content = f["content"] as string;
+    const status = f["status"] as string;
+    const suspicion = f["suspicion"] as number;
     return {
       id: f["id"] as number,
       projectId: f["project_id"] as number,
-      content: f["content"] as string,
+      content,
       sourceRef: f["source_ref"] as string | null,
       createdAt: f["created_at"] as string,
-      status: f["status"] as string,
-      suspicion: f["suspicion"] as number,
+      status,
+      suspicion,
       supersededBy: f["superseded_by"] as number | null,
       anchors,
       claims,
+      diagnosis: diagnose({ content, status, suspicion, verdict: primaryVerdict, anchors }),
     };
   });
 }
@@ -271,6 +316,64 @@ export function listOtherEvents(store: ReadStore, limit = 100) {
         projectId: r["project_id"] as number | null,
       })),
   );
+}
+
+/** Last N `audit_completed` events for a project, oldest→newest. */
+const RUN_SERIES_LEN = 8;
+
+export function listProjectCards(store: ReadStore): ProjectCard[] {
+  return guard(() => {
+    const projects = store.all<{ id: number; path: string }>(
+      "SELECT id, path FROM projects ORDER BY path",
+    );
+    return projects.map((p) => {
+      const notes = store.get<{ c: number }>(
+        "SELECT COUNT(*) c FROM findings WHERE project_id = ? AND status != 'superseded'",
+        p.id,
+      )?.c ?? 0;
+      const suspects = store.get<{ c: number }>(
+        "SELECT COUNT(*) c FROM findings WHERE project_id = ? AND status = 'suspect'",
+        p.id,
+      )?.c ?? 0;
+      const pending = store.get<{ c: number }>(
+        `SELECT COUNT(*) c FROM verdicts v JOIN findings f ON f.id = v.finding_id
+         WHERE f.project_id = ? AND v.superseded_by IS NULL AND v.review = 'pending'`,
+        p.id,
+      )?.c ?? 0;
+      const anchorless = store.get<{ c: number }>(
+        `SELECT COUNT(*) c FROM findings f
+         WHERE f.project_id = ? AND f.status != 'superseded'
+           AND NOT EXISTS (SELECT 1 FROM anchors a WHERE a.finding_id = f.id)`,
+        p.id,
+      )?.c ?? 0;
+      const clean = Math.max(0, notes - suspects);
+      const lastRunAt = store.get<{ at: string }>(
+        `SELECT at FROM events WHERE project_id = ? AND kind = 'audit_completed'
+         ORDER BY id DESC LIMIT 1`,
+        p.id,
+      )?.at ?? null;
+      const runRows = store.all<{ detail: string | null }>(
+        `SELECT detail FROM events WHERE project_id = ? AND kind = 'audit_completed'
+         ORDER BY id DESC LIMIT ?`,
+        p.id, RUN_SERIES_LEN,
+      );
+      const runSeries = runRows
+        .map((r) => {
+          try {
+            const parsed = JSON.parse(r.detail ?? "null") as { verdictsRecorded?: number } | null;
+            return parsed?.verdictsRecorded ?? 0;
+          } catch {
+            return 0; // a run row with broken JSON must still render (same contract as listRuns)
+          }
+        })
+        .reverse();
+      const healthPct = Math.round((100 * clean) / Math.max(1, notes));
+      return {
+        id: p.id, path: p.path, name: basename(p.path), notes, suspects, pending,
+        anchorless, clean, lastRunAt, runSeries, healthPct,
+      };
+    });
+  });
 }
 
 export function getVersion(store: ReadStore): Version {
