@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { openStore } from "../src/store/db.ts";
 import { appendFinding } from "../src/store/findings.ts";
 import { recordVerdict } from "../src/store/verdicts.ts";
@@ -78,15 +80,40 @@ test("olmayan finding 404", async () => {
 });
 
 test("yol ön eki sınırı: sibling dizin 404", async () => {
-  // Verifies that a normalized path starting with WEB_ROOT as string prefix
-  // but actually outside WEB_ROOT (e.g. core/web2 when WEB_ROOT is core/web)
-  // returns 404. The vulnerability: bare startsWith(WEB_ROOT) would pass.
-  // The fix: target === WEB_ROOT || target.startsWith(WEB_ROOT + sep).
-  await withServer(seed(), async (base) => {
-    // Encoded path that normalizes to a sibling-prefixed path.
-    // If WEB_ROOT is core/web, this attempts core/web2/../x (or similar structure).
-    // After normalization, it would be outside WEB_ROOT.
-    const sibling = await fetch(`${base}/%2e%2e%2fweb2%2fx.js`);
+  // Verifies that the path boundary check requires a separator.
+  // Without the fix (bare startsWith(WEB_ROOT)), a sibling directory
+  // like "root-evil" would pass because "root-evil" starts with "root".
+  // With the fix (target === WEB_ROOT || target.startsWith(WEB_ROOT + sep)),
+  // only subdirectories of WEB_ROOT (with a separator) are allowed.
+  const tmp = tmpDir();
+  const root = join(tmp, "root");
+  const rootEvil = join(tmp, "root-evil");
+  mkdirSync(root, { recursive: true });
+  mkdirSync(rootEvil, { recursive: true });
+  writeFileSync(join(root, "index.html"), "<html>root</html>");
+  writeFileSync(join(rootEvil, "x.js"), "console.log('evil');");
+
+  const p = nextPort();
+  const server = await startServer({ storePath: seed(), port: p, webRoot: root });
+  try {
+    const base = `http://127.0.0.1:${p}`;
+
+    // Valid: /index.html exists in root
+    const valid = await fetch(`${base}/index.html`);
+    assert.equal(valid.status, 200);
+    assert.match(valid.headers.get("content-type") ?? "", /text\/html/);
+
+    // Invalid: /x.js does not exist in root
+    const missing = await fetch(`${base}/x.js`);
+    assert.equal(missing.status, 404);
+
+    // Invalid: traversal to sibling directory
+    // /..%2froot-evil%2fx.js decodes to /../root-evil/x.js
+    // which normalizes to /root-evil/x.js (sibling of /root)
+    // Even though root-evil/x.js exists, it's outside the webRoot boundary.
+    const sibling = await fetch(`${base}/..%2froot-evil%2fx.js`);
     assert.equal(sibling.status, 404);
-  });
+  } finally {
+    await new Promise((res) => server.close(res));
+  }
 });

@@ -17,7 +17,7 @@ const MIME: Record<string, string> = {
 };
 
 export function startServer(
-  opts: { storePath: string; port: number; host?: string },
+  opts: { storePath: string; port: number; host?: string; webRoot?: string },
 ): Promise<Server> {
   // Lazy handle: the server must come up before the store exists (spec §7) and
   // start serving data the moment the first audit run creates the file.
@@ -29,8 +29,9 @@ export function startServer(
     return store;
   };
 
+  const webRoot = opts.webRoot ?? WEB_ROOT;
   const server = createHttpServer((req, res) => {
-    try { route(req, res, getStore, opts.storePath); }
+    try { route(req, res, getStore, opts.storePath, webRoot); }
     catch (err) {
       if (err instanceof SchemaOutdated) json(res, 200, { schemaOutdated: true });
       else json(res, 500, { error: "internal" });
@@ -54,7 +55,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 function route(
   req: IncomingMessage, res: ServerResponse,
-  getStore: () => ReadStore | null, storePath: string,
+  getStore: () => ReadStore | null, storePath: string, webRoot: string,
 ): void {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -85,13 +86,13 @@ function route(
     if (path === "/api/version") { json(res, 200, getVersion(store)); return; }
     json(res, 404, { error: "not found" }); return;
   }
-  serveStatic(path === "/" ? "/index.html" : path, res);
+  serveStatic(path === "/" ? "/index.html" : path, res, webRoot);
 }
 
-function serveStatic(path: string, res: ServerResponse): void {
-  const target = normalize(join(WEB_ROOT, decodeURIComponent(path)));
+function serveStatic(path: string, res: ServerResponse, webRoot: string): void {
+  const target = normalize(join(webRoot, decodeURIComponent(path)));
   const type = MIME[extname(target)];
-  if (!(target === WEB_ROOT || target.startsWith(WEB_ROOT + sep)) || type === undefined || !existsSync(target)) {
+  if (!(target === webRoot || target.startsWith(webRoot + sep)) || type === undefined || !existsSync(target)) {
     res.writeHead(404, { "content-type": "text/plain" }); res.end("not found"); return;
   }
   res.writeHead(200, { "content-type": type });
