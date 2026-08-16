@@ -27,6 +27,7 @@ import {
 } from "./cli-exit.ts";
 import { dropThroughWatermark, type DeliveryRange } from "./observer/batch.ts";
 import { basename, dirname } from "node:path";
+import { startServer } from "./serve/serve.ts";
 
 register(claudeCodeAdapter);
 
@@ -95,6 +96,7 @@ const COMMANDS: Record<string, OptionSpec> = {
     flags: ["no-fetch", "fetch", "json", "yes"],
   },
   status: { values: ["store"], flags: [] },
+  serve: { values: ["store", "port"], flags: [] },
 };
 
 let parsedOptions = new Map<string, string | true>();
@@ -636,6 +638,30 @@ function cmdStatus(): void {
   }
 }
 
+async function cmdServe(): Promise<void> {
+  const storePath = arg("store") ?? defaultStorePath();
+  const rawPort = arg("port");
+  const port = rawPort === undefined ? 4870 : Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new UsageError(`gecersiz port: ${safe(rawPort ?? "")}`);
+  }
+  let server;
+  try {
+    server = await startServer({ storePath, port });
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "EADDRINUSE") {
+      console.error(`port ${port} dolu; --port <n> ile baska port verin`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+  console.log(`kesif gezgini: http://127.0.0.1:${port} (depo: ${safe(storePath, 200)})`);
+  onInterrupt(() => { server.close(); });
+  // Keep the process alive until a signal arrives; the interrupt hook exits.
+  await new Promise(() => {});
+}
+
 const cmd = process.argv[2];
 try {
   const spec = cmd === undefined ? undefined : COMMANDS[cmd];
@@ -647,6 +673,7 @@ try {
     if (cmd === "scan") await cmdScan();
     else if (cmd === "observe") await cmdObserve();
     else if (cmd === "audit") await cmdAudit();
+    else if (cmd === "serve") await cmdServe();
     else cmdStatus();
   }
 } catch (err) {
@@ -681,6 +708,7 @@ kullanım:
   context-police audit   [--project <yol>] [--path <repo> [--memory-dir <dizin>]]
                          [--origin-ref <ref>] [--fetch] [--json] [--yes] [--store <db>]
   context-police status  [--store <db yolu>]
+  context-police serve   [--store <db yolu>] [--port <n>]
 
 audit: hafıza notlarını içeri alır, çapa kayması ve çelişki sinyallerini koşar,
   şüphelileri DEPODA işaretler. Hiçbir memory dosyasına yazmaz (K9).
