@@ -472,11 +472,24 @@ const RUN_ARTIFACT_SUFFIXES = [".raw.jsonl", ".pass1.txt"];
  *
  * NEDEN GEREKLİ (ölçüldü 15 Ağu 2026, `stale-raw` probe'u): yalnız
  * `writeFileSync(outPath, "")` yapılınca önceki koşumun ham dosyaları yerinde
- * kalıyor ve `flatten.ts` DİZİNDEKİ TÜM ham dosyaları topladığı için, 2 notluk
- * bir koşumun ardından 1 notla yapılan yeniden koşum düz dosyada yine 2 not
- * puanlıyor. Daha kötü varyantı: bugün EKSİK çıkan bir not `incomplete/`e
- * giderken dünkü TAM ham dosyası üst dizinde kalıyor ve ESKİ hükümler
- * puanlanıyor — yani iki koşum tek ölçüm gibi okunuyor.
+ * kalıyor. `flatten.ts` onları AYNI ÖNEKLE topluyor (`flatten.ts:47`,
+ * `startsWith(rawPrefix)`) — yani çakışan şey "dizindeki her ham dosya" değil,
+ * AYNI çıktı adıyla koşulan iki farklı koşum. Sonuç: 2 notluk bir koşumun
+ * ardından 1 notla yapılan yeniden koşum düz dosyada yine 2 not puanlıyor.
+ * Daha kötü varyantı: bugün EKSİK çıkan bir not `incomplete/`e giderken dünkü
+ * TAM ham dosyası üst dizinde kalıyor ve ESKİ hükümler puanlanıyor — yani iki
+ * koşum tek ölçüm gibi okunuyor.
+ *
+ * BİLİNEN SINIR (16 Ağu denetimi, düzeltilmedi — gerekçesi ölçüm): önek eşleşmesi
+ * düz `startsWith`, o yüzden İÇ İÇE geçen çıktı adları birbirinin ad alanına
+ * giriyor: `--output x.jsonl` koşumu `x.jsonl.v2.note1.raw.jsonl` dosyasını da
+ * siler. Bu bir tutarsızlık DEĞİL — `flatten.ts` aynı dosyayı zaten bu koşumun
+ * `v2.note1` notu sayıyor, yani silme tüketicinin gördüğü ad alanıyla birebir
+ * aynı. Keskin kenarı EŞZAMANLI koşum: iç içe adlı iki koşucu aynı dizinde
+ * çalışırsa kısa adlı olan uzun adlının kanıtını uçurur. Bugünkü canlı etki
+ * SIFIR (kullanılan çıktı adlarının hiçbiri diğerinin öneki değil:
+ * `hakem-full28-ciktisi` / `hakem-opencode-28`), ve doğru çözüm iç içe ad alanını
+ * `validateOutPath`ta reddetmek — ölçülmüş bir ihtiyaç doğmadan yapılmadı.
  *
  * Kabuk glob'u KULLANILMIYOR: zsh'de eşleşmeyen bir glob komutun tamamını iptal
  * ediyor (hafıza: kabuk-tuzaklari-macos), yani ilk temiz koşumda temizlik hiç
