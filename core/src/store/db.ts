@@ -666,3 +666,29 @@ export function openStore(path: string): Store {
 export function nowIso(): string {
   return new Date().toISOString();
 }
+
+/**
+ * Read-only view for the explorer (spec §4). Deliberately NOT openStore:
+ * no schema apply, no migrate, no WAL switch, no chmod — the explorer reads
+ * the store exactly as it is, and a write is physically impossible because
+ * the connection itself is read-only. Lives here because of K12: this file
+ * is the only importer of node:sqlite.
+ */
+export interface ReadStore {
+  get<T = Row>(sql: string, ...params: SqlValue[]): T | undefined;
+  all<T = Row>(sql: string, ...params: SqlValue[]): T[];
+  close(): void;
+}
+
+export function openStoreReadonly(path: string): ReadStore {
+  const db = new DatabaseSync(path, { readOnly: true });
+  return {
+    get<T = Row>(sql: string, ...params: SqlValue[]): T | undefined {
+      return db.prepare(sql).get(...params) as T | undefined;
+    },
+    all<T = Row>(sql: string, ...params: SqlValue[]): T[] {
+      return db.prepare(sql).all(...params) as T[];
+    },
+    close(): void { db.close(); },
+  };
+}
