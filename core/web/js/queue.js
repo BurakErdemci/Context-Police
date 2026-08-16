@@ -3,7 +3,7 @@ const SOURCES = ["mechanical", "adjudicator"];
 const REVIEWS = ["pending", "approved", "rejected"];
 
 export function mount(root, ctx) {
-  const state = { verdict: "", subReason: "", source: "", review: "" };
+  const state = { verdict: "", subReason: "", source: "", review: "", loadSeq: 0 };
 
   root.textContent = "";
   const wrap = document.createElement("div");
@@ -218,11 +218,16 @@ export function mount(root, ctx) {
   }
 
   async function load() {
+    // Rapid filter changes fire overlapping requests; a slow older response
+    // must not clobber a faster newer one. Only the request whose seq still
+    // matches state.loadSeq at completion is allowed to render.
+    const seq = ++state.loadSeq;
     try {
       const [summary, rows] = await Promise.all([
         ctx.apiGet("/api/summary"),
         ctx.apiGet(`/api/verdicts${buildQuery()}`),
       ]);
+      if (seq !== state.loadSeq) return;
       if (summary.storeMissing === true) {
         showMessage(
           `Depo bulunamadı: ${summary.path} — \`context-police audit\` bir koşum sonra burayı doldurur.`,
@@ -241,6 +246,7 @@ export function mount(root, ctx) {
       renderCounts(summary.counts);
       renderTable(rows);
     } catch (err) {
+      if (seq !== state.loadSeq) return;
       showMessage(`Yükleme hatası: ${err instanceof Error ? err.message : String(err)}`);
     }
   }

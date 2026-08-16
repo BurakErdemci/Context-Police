@@ -32,6 +32,7 @@ const ctx = { apiGet, navigate };
 
 let activeScreen = null;
 let lastVersion = null;
+let pollInFlight = false;
 
 function navigate(hash) {
   if (location.hash !== hash) {
@@ -66,6 +67,10 @@ function render() {
 window.addEventListener("hashchange", render);
 
 async function pollVersion() {
+  // A slow fetch must not let ticks stack: skip this tick while one is
+  // still outstanding rather than piling up concurrent /api/version calls.
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
     const v = await apiGet("/api/version");
     if (v.storeMissing === true || v.schemaOutdated === true) return;
@@ -76,6 +81,8 @@ async function pollVersion() {
     lastVersion = key;
   } catch {
     // A transient poll failure is not worth surfacing: the next tick retries.
+  } finally {
+    pollInFlight = false;
   }
 }
 
