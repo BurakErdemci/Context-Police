@@ -127,6 +127,50 @@ test("§1 varyant B: çelişkiye HİÇ girmemiş not, sınıflama çökse de nor
   store.close();
 });
 
+// --- §1 devamı: "sırası gelmedi" ile "cevap dönmedi" ayrımı -----------------
+// Eskiden ikisi tek listede (`unmeasured`) birleşikti ve kapsama adayları
+// topluca korumadan çıkarılıyordu. Sonuç: hüküm dönmeyen bir kapsama adayı
+// sessizce AKLANIYORDU. Aşağıdaki üç test ayrımın üç kolunu da sabitler.
+
+test("§1 kapsama adayı: cevap dönen bir koşumda sessiz kalan not KORUNUR", async () => {
+  const notes = new Map([[1, note(1, "A notu")], [2, note(2, "B notu")]]);
+  const r = await classifyCandidates(
+    // İki kapsama adayı gösteriliyor, yalnız birine hüküm dönüyor.
+    fakeExecutor([{ output: '{"verdicts":[{"index":0,"verdict":"uyumlu","evidence":"tutuyor"}]}' }]),
+    [cand(1, null, "coverage"), cand(2, null, "coverage")], notes,
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.undecided.map((c) => c.aId), [2], "cevapsız kalan aday undecided değil");
+  assert.equal(r.measured.length, 1, "en az bir hüküm döndü — koruma koşulu bu");
+  assert.deepEqual(r.starved, [], "bütçe yetiyordu");
+});
+
+test("§1 bütçeye girmeyen aday `starved`, `undecided` DEĞİL", async () => {
+  const notes = new Map([[1, note(1, "A")], [2, note(2, "B")], [3, note(3, "C")]]);
+  const r = await classifyCandidates(
+    fakeExecutor([{ output: '{"verdicts":[{"index":0,"verdict":"uyumlu","evidence":"x"}]}' }]),
+    [cand(1, null, "coverage"), cand(2, null, "coverage"), cand(3, null, "coverage")],
+    notes, { maxItems: 1 },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.starved.length, 2, "bütçe dışı adaylar starved'e düşmedi");
+  assert.deepEqual(r.undecided, [], "sırası gelmemiş aday cevapsız sayıldı — aşırı-koruma");
+});
+
+test("§1 yürütücü çökerse gösterilenler undecided, bütçe dışındakiler yine starved", async () => {
+  const notes = new Map([[1, note(1, "A")], [2, note(2, "B")]]);
+  const r = await classifyCandidates(
+    fakeExecutor([{ ok: false, error: "offline" }, { ok: false, error: "offline" }]),
+    [cand(1, null, "coverage"), cand(2, null, "coverage")], notes, { maxItems: 1 },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.undecided.length, 1);
+  assert.equal(r.starved.length, 1);
+  // Ve `measured` boş: audit.ts'in kapsama koruma koşulu tam da bunu okuyor,
+  // yani bu koşumda hiçbir kapsama adayı dondurulmuyor.
+  assert.equal(r.measured.length, 0);
+});
+
 // --- §2 correlated-signal-double-count -------------------------------------
 // Tek olgu iki "bağımsız" sinyal sınıfı üretemez (4fa874d'nin tavan gerekçesi).
 
@@ -169,7 +213,8 @@ test("§3 hüküm dönmeyen aday 'temiz' sayılmaz, unclassified olarak görün�
   );
   assert.equal(r.ok, true);
   assert.equal(r.unclassified, 1, "eksik hüküm sessizce yutuldu");
-  assert.deepEqual(r.unmeasured.map((c) => c.aId), [3]);
+  assert.deepEqual(r.undecided.map((c) => c.aId), [3]);
+  assert.deepEqual(r.starved, [], "bütçe yetiyordu, kimse sırada kalmadı");
 });
 
 test("§3 varyant A: prompt'ta GÖSTERİLMEMİŞ index reddedilir", async () => {

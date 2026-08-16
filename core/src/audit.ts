@@ -448,14 +448,23 @@ export async function auditProject(
       sum.classifyCalls = res.calls;
       sum.classifyDropped = res.dropped;
       sum.classifyUnclassified = res.unclassified;
-      for (const c of res.unmeasured) {
-        // KAPSAMA adayının ölçülmemesi bir hüküm koruma sebebi DEĞİL: rotasyon
-        // bir sinyal değil bir SIRA, ve sırası gelmemiş olmak notların NORMAL
-        // hâli. Aksi hâlde her not her koşum aday olduğu için tek bir sınıflama
-        // arızası projedeki TÜM suspect kayıtlarını dondururdu — `unmeasuredFindings`
-        // yorumunda yazılı "aşırı-koruma da bir yanlış karardır" kuralının
-        // tam ihlali (ölçüldü: audit-decision-integrity §1 varyant B).
-        if (c.kind === "coverage") continue;
+      // YALNIZ `undecided` korur — sırası gelmemiş aday (`starved`) classify.ts'te
+      // ayrıldı ve buraya hiç gelmiyor.
+      //
+      // Kapsama adayı için EK koşul: bu koşumda en az bir adaya hüküm dönmüş
+      // olmalı. Sebep ölçüldü — üç muhafız testi birden devriliyordu. Kapsama
+      // yüzeyinde HER not aday olduğu için, yürütücü hiç cevap vermediğinde
+      // (çöktü, ya da şema-geçerli BOŞ bir dizi döndürdü) "cevapsız kaldı"
+      // kümesi depodaki tüm notlar demek; onları korumak tek bir arızada tüm
+      // suspect kayıtlarını dondururdu. En az bir hüküm dönmüşse durum başka:
+      // sınıflandırıcı cevap veriyordu ve TAM BU nota dair sessiz kaldı — bu
+      // not-başına bir ölçüm arızası, ve korunması gereken tam da o.
+      //
+      // Çelişki yüzeylerinde (cross/frontmatter/intra) böyle bir koşul yok:
+      // orada aday olmak notun kendi içeriğinden geliyor, kütüğün tamamından değil.
+      const answered = res.measured.length > 0;
+      for (const c of res.undecided) {
+        if (c.kind === "coverage" && !answered) continue;
         for (const id of [c.aId, c.bId]) if (id !== null) unmeasuredFindings.add(id);
       }
       // Rotasyon imleci kırpma olayının İÇİNDE: "20 aday atıldı" tek başına

@@ -445,6 +445,15 @@ const EXCERPT_CHARS = 1500;
  */
 const REASON_CHARS = 200;
 
+/**
+ * Kaç TAM rotasyon turu beklemiş bir aday "aç" sayılır. Bir tam tur
+ * `ceil(aday / bütçe)` koşum sürüyor, yani eşik depo büyüklüğüyle birlikte
+ * ölçekleniyor — sabit bir koşum sayısı 30 adaylı bir depoda hiç ateşlenmez,
+ * 3.000 adaylıda her koşum ateşlenirdi. 3 tur: bir turluk gecikme rotasyonun
+ * normal işleyişi, üç tur ise sıranın o adaya uğramadığı anlamına geliyor.
+ */
+const STARVATION_ROTATIONS = 3;
+
 export interface ClassifyItem {
   index: number;
   kind: Candidate["kind"];
@@ -470,11 +479,32 @@ export interface ClassifyResult {
    */
   unclassified: number;
   /**
-   * Çelişki boyutu bu adaylar için ÖLÇÜLMEDİ: bütçeye girmeyenler (dropped) +
-   * hüküm dönmeyenler. `audit.ts` bunu, ilgili notların önceki hükmünü
-   * korumak için kullanır.
+   * Prompt'a GİRDİ, hüküm dönmedi (ya da ölçüm hiç yapılamadı). Gerçek bir ölçüm
+   * arızası: `audit.ts` bununla notun önceki hükmünü KORUR ve kullanıcıya bir
+   * `olculemez` kaydı açar.
+   *
+   * Eskiden bu alan `unmeasured` adıyla `starved` ile BİRLEŞİKTİ, ve birleşiklik
+   * bir buga mal oldu: kapsama yüzeyinde her not her koşum aday olduğu için
+   * "sırası gelmedi" korumaya girseydi tek bir sınıflama arızası projedeki tüm
+   * suspect kayıtlarını dondururdu. Kaçınmak için kapsama adayları topluca
+   * korumadan çıkarılmıştı — bu sefer de gerçekten cevapsız kalan kapsama
+   * adayları sessizce aklanıyordu (ölçüldü: probe `coverage-clear-1.sh`,
+   * `run1: suspect/0.7` → `run2: active/0`). Ayrım ikisini de çözüyor.
    */
-  unmeasured: Candidate[];
+  undecided: Candidate[];
+  /**
+   * Bütçeye hiç girmedi: rotasyonda sırası gelmedi. Bir ölçüm arızası DEĞİL —
+   * rotasyon bir sinyal değil bir SIRA, ve sırası gelmemiş olmak notların normal
+   * hâli. Hükmü korumaz, kuyruğa girmez. Yalnız AÇLIK ölçümünün girdisi.
+   */
+  starved: Candidate[];
+  /**
+   * `starved`in, beklemesi bir tam rotasyon turunun katlarını aşmış alt kümesi —
+   * yani rotasyonun kendisinin adil olmadığı adaylar. Eşik aday sayısına göre
+   * türetiliyor (bkz. STARVATION_ROTATIONS), sabit bir sayı değil: sabit eşik
+   * küçük bir depoda hiç ateşlenmez, büyüğünde sürekli ateşlenirdi.
+   */
+  starvedLong: Candidate[];
   /**
    * Çelişki boyutu bu adaylar için GERÇEKTEN ölçüldü (gösterildi ve hüküm
    * döndü). `unmeasured`ın tümleyeni; `audit.ts` bununla rotasyon damgasını
@@ -645,12 +675,29 @@ export async function classifyCandidates(
   } = selectCandidates(candidates, max, opts.stamps, opts.seen);
   const dropped = candidates.length - taken.length;
   const takenSet = new Set(taken);
-  /** Bütçeye hiç girmemiş aday da ölçülmemiş bir adaydır. */
-  const droppedCandidates = candidates.filter((c) => !takenSet.has(c));
+  /** Bütçeye hiç girmemiş aday: ölçülmedi, ama ölçülmesi de SIRADA değildi. */
+  const starved = candidates.filter((c) => !takenSet.has(c));
+
+  // Beklemesi bir tam turun STARVATION_ROTATIONS katını aşanlar. Damgalar
+  // sıkıştırıldıysa (`renumbered`) ölçüm ATLANIYOR: eldeki `opts.stamps`
+  // sıkıştırma ÖNCESİ ölçekte, `rotationStamp` sonrasında, ve iki ölçeği
+  // çıkarmak anlamsız bir sayı üretir. Sıkıştırma sayaç taşmasında olur, yani
+  // pratikte hiç; bir koşumluk kör nokta, yanlış bir açlık alarmından ucuz.
+  const stampsIn = opts.stamps ?? {};
+  const seenIn = opts.seen ?? {};
+  const threshold = Math.max(1, Math.ceil(candidates.length / max)) * STARVATION_ROTATIONS;
+  const starvedLong = renumbered ? [] : starved.filter((c) => {
+    const key = candidateIdentity(c);
+    // Hiç seçilmemişse sıraya giriş damgası, o da yoksa bu koşumda girdi (0 bekleme).
+    const last = normalizeStamp(stampsIn[key]) || normalizeStamp(seenIn[key]) || rotationStamp;
+    return rotationStamp - last >= threshold;
+  });
+
   if (taken.length === 0)
     return {
       ok: true, confirmed: [], kararsiz: 0, unclassified: 0,
-      unmeasured: droppedCandidates, measured: [], nextStamps, nextSeen, renumbered, rotationStamp, calls: 0, dropped,
+      undecided: [], starved, starvedLong,
+      measured: [], nextStamps, nextSeen, renumbered, rotationStamp, calls: 0, dropped,
     };
 
   // item.index = adayın taken içindeki konumu (renderItems entries() index'i
@@ -667,10 +714,14 @@ export async function classifyCandidates(
     return executor.run({ prompt: p, outputSchema: CLASSIFY_OUTPUT_SCHEMA, cwd: opts.cwd });
   };
 
-  // Ölçüm HİÇ yapılamadı: adayların TAMAMI (bütçeye girmeyenler dahil) ölçülmemiş.
+  // Ölçüm HİÇ yapılamadı. Gösterilenlerin tamamı cevapsız (`undecided`);
+  // bütçeye girmeyenler yine yalnız `starved` — arıza onların sırasını
+  // değiştirmedi, ve onları da korumaya almak tek bir yürütücü çökmesinde
+  // projedeki tüm suspect kayıtlarını dondurmak demekti.
   const failed = (error: string): ClassifyResult => ({
     ok: false, confirmed: [], kararsiz: 0, unclassified: taken.length,
-    unmeasured: candidates, measured: [], nextStamps, nextSeen, renumbered, rotationStamp, calls, dropped, error,
+    undecided: taken, starved, starvedLong,
+    measured: [], nextStamps, nextSeen, renumbered, rotationStamp, calls, dropped, error,
   });
 
   let res = await runOnce(prompt);
@@ -702,7 +753,7 @@ export async function classifyCandidates(
   return {
     ok: true, confirmed, kararsiz,
     unclassified: undecided.length,
-    unmeasured: [...droppedCandidates, ...undecided],
+    undecided, starved, starvedLong,
     measured: taken.filter((_, i) => decided.has(i)),
     nextStamps, nextSeen, renumbered, rotationStamp, calls, dropped,
   };
