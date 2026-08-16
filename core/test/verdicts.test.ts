@@ -315,6 +315,46 @@ test("göç: tabloyu ZATEN taşıyan depo yeniden açılınca satırlar ve super
   store.close();
 });
 
+test("göç: tekrar sayacı VAR OLAN depoya geliyor, eski satırlar 1'den başlıyor", () => {
+  // CLAUDE.md §7: taze depoda çalışması KANIT DEĞİL. Dosya önce yaratılıp hüküm
+  // yazılıyor, sonra sütun sökülerek depo sayaç ÖNCESİ şekline geri alınıyor.
+  const path = tmpStorePath();
+  const ilk = openStore(path);
+  const projectId = Number(ilk.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(ilk, {
+    projectId, source: "imported", content: "not", sourceRef: "n.md",
+    anchors: [{ kind: "file_path", value: "src/a.ts" }],
+  });
+  const id = recordVerdict(ilk, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "e1", source: "mechanical", runId: "r1",
+  }).id;
+  ilk.close();
+
+  const eski = new DatabaseSync(path);
+  eski.exec("ALTER TABLE verdicts DROP COLUMN repeat_count");
+  eski.close();
+
+  const yeni = openStore(path); // göç yolu: var olan dosya üzerinde
+  const cols = yeni.all<{ name: string }>("SELECT name FROM pragma_table_info('verdicts')").map((c) => c.name);
+  assert.ok(cols.includes("repeat_count"), "sütun gelmedi: her tekrar ölçümü 'no such column' ile patlar");
+  assert.equal(getVerdict(yeni, id)!.repeatCount, 1, "eski satır hiç ölçülmemiş gibi okunuyor");
+
+  // Ve tekrar yolu VAR OLAN dosyada gerçekten işliyor: aynı sonuç yeni satır
+  // yazmaz, yalnız sayacı artırır.
+  const again = recordVerdict(yeni, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "e1", source: "mechanical", runId: "r2",
+  });
+  assert.equal(again.recorded, false);
+  assert.equal(again.id, id);
+  assert.equal(getVerdict(yeni, id)!.repeatCount, 2, "tekrar hiçbir iz bırakmadı");
+  assert.equal(listVerdictHistory(yeni, findingId).length, 1, "tekrar için satır yazıldı: tablo şişer");
+  yeni.close();
+});
+
 test("göç: GERÇEK deponun kopyası açılır, hüküm tablosu belirir, var olan satırlar durur", (t) => {
   const real = join(homedir(), ".context-police", "store.db");
   if (!existsSync(real)) return t.skip("gerçek depo yok — bu makinede ölçülemez");

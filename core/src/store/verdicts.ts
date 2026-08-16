@@ -59,6 +59,14 @@ export interface VerdictRecord {
   review: VerdictReview;
   reviewedAt: string | null;
   supersededBy: number | null;
+  /**
+   * Kaç koşum aynı sonuca vardı. 1 = bir kez ölçüldü. Tekrar için yeni satır
+   * yazılmadığından (aşağıda `sameConclusion`) tekrarın başka hiçbir izi yok —
+   * ve `olculemez` kayıtlarında taşıdığı sinyal gerçek: bir kez ölçülememek
+   * gürültü, on iki koşum üst üste ölçülememek kullanıcının müdahale
+   * edebileceği kalıcı bir arıza.
+   */
+  repeatCount: number;
 }
 
 export interface RecordedVerdict {
@@ -86,11 +94,12 @@ interface VerdictRow {
   review: VerdictReview;
   reviewed_at: string | null;
   superseded_by: number | null;
+  repeat_count: number;
 }
 
 const COLUMNS =
   "id, project_id, finding_id, claim_ref, verdict, sub_reason, decay_type, evidence, method, " +
-  "correction, source, run_id, created_at, review, reviewed_at, superseded_by";
+  "correction, source, run_id, created_at, review, reviewed_at, superseded_by, repeat_count";
 
 function toRecord(r: VerdictRow): VerdictRecord {
   return {
@@ -99,6 +108,7 @@ function toRecord(r: VerdictRow): VerdictRecord {
     evidence: r.evidence, method: r.method, correction: r.correction,
     source: r.source, runId: r.run_id, createdAt: r.created_at,
     review: r.review, reviewedAt: r.reviewed_at, supersededBy: r.superseded_by,
+    repeatCount: r.repeat_count,
   };
 }
 
@@ -131,6 +141,10 @@ export function recordVerdict(store: Store, input: VerdictInput): RecordedVerdic
   return store.tx(() => {
     const live = getLiveVerdict(store, input.findingId, claimRef);
     if (live !== undefined && sameConclusion(live, input)) {
+      // Satır yazılmıyor ama ölçüm YAPILDI: sayaç o ölçümün tek izi. Olay da
+      // düşmüyor — bir kere ölçülüp yüz kere teyit edilen bir hüküm, günlüğü
+      // yüz satırla doldurmadan sayıdan okunabilmeli.
+      store.run("UPDATE verdicts SET repeat_count = repeat_count + 1 WHERE id = ?", live.id);
       return { id: live.id, recorded: false, supersededId: null };
     }
 

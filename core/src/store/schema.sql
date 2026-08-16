@@ -232,6 +232,18 @@ CREATE TABLE IF NOT EXISTS verdicts (
   created_at    TEXT NOT NULL,
   review        TEXT NOT NULL DEFAULT 'pending' CHECK (review IN ('pending','approved','rejected')),
   reviewed_at   TEXT,
+  -- How many runs reached this same conclusion. Starts at 1 and rises when a
+  -- later run measures the identical thing; no new row is written for a repeat
+  -- (recordVerdict/sameConclusion), so without this the repetition left no trace
+  -- at all. It carries real signal for the `olculemez` records the audit opens
+  -- when a dimension could not be measured: once is noise, twelve runs in a row
+  -- is a standing measurement fault the user can act on.
+  --
+  -- Deliberately OUTSIDE verdicts_measurement_immutable's column list. The
+  -- trigger protects the measurement; this is bookkeeping about the measurement,
+  -- and it is the one field that must be writable in place — a counter that can
+  -- only grow by superseding rows is not a counter.
+  repeat_count  INTEGER NOT NULL DEFAULT 1,
   -- DEFERRED, and the reason is the unique index below: it is checked per
   -- statement, so the old row must stop being live BEFORE the new row is
   -- inserted — which means pointing it at an id that does not exist yet.

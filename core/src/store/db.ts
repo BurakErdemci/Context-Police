@@ -104,6 +104,29 @@ function migrate(db: DatabaseSync): void {
   migrateWatermarks(db);
   migrateScanLock(db);
   migrateClassifyStamps(db);
+  migrateVerdictRepeatCount(db);
+}
+
+/**
+ * `verdicts.repeat_count` eklendi (schema.sql'de gerekçe). ALTER şart: sütunsuz
+ * bir depoda `recordVerdict`in tekrar dalı "no such column" ile patlar — ve o
+ * dal AYNI SONUCU ölçen her koşumda işliyor, yani denetim ikinci koşumda tümden
+ * durur.
+ *
+ * `DEFAULT 1` doğru varsayılan: var olan her satır en az bir kez ölçülmüş
+ * demektir. Geriye dönük gerçek sayı bilinmiyor (tekrar hiçbir yerde
+ * yazılmıyordu) ve 0 yazmak, hiç ölçülmemiş gibi okunurdu.
+ *
+ * SCHEMA_GENERATION bilerek ARTIRILMADI, `first_seen_seq` ile aynı gerekçe:
+ * sütun `NOT NULL DEFAULT 1` ve onu hiç anmayan eski kod bu depoya yazmaya
+ * devam edebiliyor, dolayısıyla ileri yönlü bir kırılma yok.
+ */
+function migrateVerdictRepeatCount(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(verdicts)").all() as { name: string }[];
+  if (cols.length === 0) return; // tablo yok: schema.sql onu güncel hâliyle yarattı
+  if (!cols.some((c) => c.name === "repeat_count")) {
+    db.exec("ALTER TABLE verdicts ADD COLUMN repeat_count INTEGER NOT NULL DEFAULT 1");
+  }
 }
 
 /**
