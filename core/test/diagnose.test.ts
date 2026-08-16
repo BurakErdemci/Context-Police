@@ -29,6 +29,23 @@ test("kural 1b: DURUM: satırı içeren içerik status'tan bağımsız tetikler,
   assert.match(d.sentence, /16 Ağu akşam/);
 });
 
+test("kural 1: DURUM alıntısındaki markdown işaretleri sökülür (**, backtick, [[ ]])", () => {
+  const d = diagnose({
+    ...BASE,
+    content: "DURUM: **16 Ağu** `pushlandı` — [[m4-plani]] kapandı",
+  });
+  assert.match(d.sentence, /"16 Ağu pushlandı — m4-plani kapandı"/);
+  assert.doesNotMatch(d.sentence, /\*\*|`|\[\[/);
+});
+
+test("kural 1: çift altçizgi emphasis sökülür, snake_case kimlik korunur", () => {
+  const d = diagnose({
+    ...BASE,
+    content: "DURUM: __askıda__ ve _bekliyor_ — run_id sabit",
+  });
+  assert.match(d.sentence, /"askıda ve bekliyor — run_id sabit"/);
+});
+
 test("kural 1 öncelik: DURUM satırı, curuk/anchor-drift hükmünden önce gelir", () => {
   const d = diagnose({
     ...BASE,

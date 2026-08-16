@@ -8,7 +8,7 @@
 import {
   el, ring, band, bandKey, sparkline, meter, renderSentence, anchorChip,
   anchorlessChip, verdictLabel, relTime, daysSince, possessive, projectStatus, clickable,
-  handleStoreStates, driftedValues, shortPath, COLORS,
+  handleStoreStates, driftedValues, shortPath, COLORS, reviewControls, mockReviewGet,
 } from "./ui.js";
 
 // Sub-reasons that mean "still a candidate for the next classify rotation".
@@ -47,7 +47,8 @@ function verdictSentence(card) {
   return p;
 }
 
-function caseCard(row, detail, extraPending, i, navigate) {
+function caseCard(rows, detail, i, navigate, onDecision) {
+  const row = rows[0]; // highest-suspicion pending row speaks for the finding
   const node = el("article", `case-card case-card--${row.verdict}`);
   node.style.setProperty("--i", String(i)); // entrance stagger index
   clickable(node, () => navigate(`#/finding/${row.findingId}`));
@@ -58,10 +59,11 @@ function caseCard(row, detail, extraPending, i, navigate) {
     : `Not #${row.findingId}`;
   top.appendChild(el("span", "case-title", title));
   top.appendChild(el("span", `badge badge--${row.verdict}`, verdictLabel(row.verdict)));
-  if (extraPending > 0) {
-    top.appendChild(el("span", "badge badge--repeat", `+${extraPending} iddia daha`));
+  if (rows.length > 1) {
+    top.appendChild(el("span", "badge badge--repeat", `+${rows.length - 1} iddia daha`));
   }
-  top.appendChild(el("span", "status status--wait", "ONAY BEKLİYOR"));
+  // Mock review preview: deciding the case decides all its grouped verdicts.
+  top.appendChild(reviewControls(rows.map((r) => r.id), onDecision));
   node.appendChild(top);
 
   const sentence = el("p", "case-sentence");
@@ -95,13 +97,15 @@ export function mount(root, ctx, projectId) {
   back.href = "#/";
   root.append(back, wrap);
   let loadSeq = 0;
+  // Set by renderHero when a progress bar exists; case-card decisions call it.
+  let updateProgress = () => {};
 
   function showMessage(text) {
     wrap.textContent = "";
     wrap.appendChild(el("div", "screen-message", text));
   }
 
-  function renderHero(card) {
+  function renderHero(card, pendingIds) {
     const hero = el("div", "report-hero");
     const status = projectStatus(card);
 
@@ -146,6 +150,31 @@ export function mount(root, ctx, projectId) {
     spark.appendChild(since);
     main.appendChild(spark);
 
+    // Mock review progress: green = decided, amber remainder = still waiting.
+    // Display-only preview — the hint states that nothing is persisted.
+    if (pendingIds.length > 0) {
+      const prog = el("div", "progress");
+      const label = el("span", "progress-label");
+      const track = el("div", "progress-track");
+      const fill = el("i");
+      track.appendChild(fill);
+      const hint = el("span", "progress-hint", "önizleme — kararlar henüz kaydedilmiyor");
+      updateProgress = () => {
+        const done = pendingIds.filter((id) => mockReviewGet(id) !== null).length;
+        label.textContent = done === 0
+          ? (pendingIds.length === 1
+            ? "1 hüküm karar bekliyor"
+            : `${pendingIds.length} hüküm karar bekliyor`)
+          : `${pendingIds.length} hükümden ${possessive(done)} işlendi`;
+        fill.style.width = `${Math.round((100 * done) / pendingIds.length)}%`;
+      };
+      updateProgress();
+      prog.append(label, track, hint);
+      main.appendChild(prog);
+    } else {
+      updateProgress = () => {};
+    }
+
     hero.appendChild(main);
     return hero;
   }
@@ -173,8 +202,7 @@ export function mount(root, ctx, projectId) {
 
     const list = el("div", "case-list");
     groups.forEach((rows, i) => {
-      const primary = rows[0];
-      list.appendChild(caseCard(primary, details.get(primary.findingId), rows.length - 1, i, ctx.navigate));
+      list.appendChild(caseCard(rows, details.get(rows[0].findingId), i, ctx.navigate, () => updateProgress()));
     });
     frag.appendChild(list);
     return frag;
@@ -246,7 +274,7 @@ export function mount(root, ctx, projectId) {
       ).size;
 
       wrap.textContent = "";
-      wrap.appendChild(renderHero(card));
+      wrap.appendChild(renderHero(card, myPending.map((r) => r.id)));
       wrap.appendChild(renderCases(myPending, details));
       wrap.appendChild(renderQuiet(card, candidateCount));
     } catch (err) {

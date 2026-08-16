@@ -1,4 +1,13 @@
-import { verdictLabel, renderSentence, driftedValues, anchorChip } from "./ui.js";
+// Not sicili: the note tells its story. Frontmatter is never shown raw — the
+// title comes from `name:`, the description becomes a subtitle, and the full
+// raw text hides behind "ham not". The body renders as serif prose with the
+// lines the measurement points at highlighted; the right column carries the
+// diagnosis lede, the enriched verdict ledger, and the tool's advice.
+//
+// All highlighting is built by splitting text into createElement/textContent
+// nodes — API-derived strings never pass through innerHTML.
+
+import { verdictLabel, renderSentence, driftedValues, anchorChip, el, reviewControls } from "./ui.js";
 
 function shortSha(sha) {
   if (typeof sha !== "string" || sha === "") return "—";
@@ -12,67 +21,155 @@ function localDate(iso) {
   return d.toLocaleString("tr-TR", { dateStyle: "medium", timeStyle: "short" });
 }
 
+// Minimal client-side frontmatter split — same shape as importer/parse.ts's
+// top level, but only for display (name/description); the store keeps truth.
+const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+function splitNote(content) {
+  const m = FM_RE.exec(content);
+  if (m === null) return { fm: {}, body: content };
+  const fm = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z_][\w-]*):\s*(.+)$/.exec(line);
+    if (kv !== null) fm[kv[1]] = kv[2].replace(/^["']|["']$/g, "");
+  }
+  return { fm, body: content.slice(m[0].length) };
+}
+
+// Plain-Turkish explainers for known measurement methods (matched by
+// substring: the stored method may carry a suffix like "anchor-drift (git)").
+// An unknown method gets no explainer — it is shown as-is, never guessed at.
+const METHOD_EXPLAINERS = [
+  ["anchor-drift", "çapalanan dosyalar git geçmişine karşı ölçüldü"],
+  ["unmeasured-dimension", "bu boyut o koşumda ölçülemedi"],
+  ["classify-rotation", "sınıflama bütçesi rotasyonu"],
+  ["adjudicate", "araçlı hakem ölçümü"],
+];
+
+function methodExplainer(method) {
+  for (const [key, text] of METHOD_EXPLAINERS) {
+    if (method.includes(key)) return text;
+  }
+  return null;
+}
+
+// Honest generic advice when the verdict carries no correction text. Only the
+// verdicts the tool actually understands get a line; anything else gets none.
+const ADVICE_BY_VERDICT = {
+  "dogustan-yanlis": "Bu notu gözden geçir: ölçüm, yazıldığı gün de yanlış olduğunu söylüyor.",
+  curuk: "Not güncel durumu yansıtmıyor — güncelle ya da tarihsel işaretle.",
+  olculemez: "Henüz tavsiye yok: boyut ölçülemedi.",
+};
+
+/**
+ * Evidence fragments worth hunting for in the body: quoted "..." / «...»
+ * pieces first, then the whole evidence line. Short fragments are dropped —
+ * a 3-char substring match highlights noise, not evidence.
+ */
+function evidenceFragments(claims) {
+  const out = [];
+  const push = (s) => {
+    const t = String(s).trim();
+    if (t.length >= 4 && !out.includes(t)) out.push(t);
+  };
+  for (const claim of claims) {
+    const v = claim.live;
+    if (v === null || v.evidence === null || v.evidence === "") continue;
+    for (const m of v.evidence.matchAll(/"([^"]+)"/g)) push(m[1]);
+    for (const m of v.evidence.matchAll(/«([^»]+)»/g)) push(m[1]);
+    push(v.evidence);
+  }
+  return out;
+}
+
+/**
+ * Appends `text` to `target`, wrapping every fragment occurrence in a
+ * <mark>. Case-sensitive match first; only when a fragment has no sensitive
+ * hit in the remaining text does the insensitive pass run. No match → the
+ * text passes through untouched (silent skip).
+ */
+function appendHighlighted(target, text, fragments) {
+  let rest = text;
+  while (rest.length > 0) {
+    let best = null;
+    for (const f of fragments) {
+      let idx = rest.indexOf(f);
+      if (idx === -1) idx = rest.toLowerCase().indexOf(f.toLowerCase());
+      if (idx !== -1 && (best === null || idx < best.idx)) best = { idx, len: f.length };
+    }
+    if (best === null) break;
+    if (best.idx > 0) target.appendChild(document.createTextNode(rest.slice(0, best.idx)));
+    const mark = el("mark", "hl-ev", rest.slice(best.idx, best.idx + best.len));
+    target.appendChild(mark);
+    rest = rest.slice(best.idx + best.len);
+  }
+  if (rest.length > 0) target.appendChild(document.createTextNode(rest));
+}
+
+const DURUM_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?DURUM(?:\*\*)?\s*:/i;
+
+function renderBody(body, fragments) {
+  const node = el("div", "note-body");
+  for (const line of body.split(/\r?\n/)) {
+    const row = el("div", "note-line");
+    if (DURUM_RE.test(line)) row.classList.add("note-line--durum");
+    appendHighlighted(row, line, fragments);
+    node.appendChild(row);
+  }
+  return node;
+}
+
 export function mount(root, ctx, findingId) {
   root.textContent = "";
-  const wrap = document.createElement("div");
-  wrap.className = "detail";
+  const wrap = el("div", "detail");
   root.appendChild(wrap);
 
   function renderMessage(text, showQueueLink) {
     wrap.textContent = "";
     wrap.classList.add("detail--message"); // single column: no ledger to lay out
     if (showQueueLink === true) {
-      const link = document.createElement("a");
+      const link = el("a", "back-link", "← projelere dön");
       link.href = "#/";
-      link.textContent = "← projelere dön";
-      link.className = "back-link";
       wrap.appendChild(link);
     }
-    const msg = document.createElement("div");
-    msg.className = "screen-message";
-    msg.textContent = text;
-    wrap.appendChild(msg);
+    wrap.appendChild(el("div", "screen-message", text));
   }
 
   function renderHeader(d) {
-    const header = document.createElement("div");
-    header.className = "panel detail-header";
+    const header = el("div", "panel detail-header");
+    const { fm, body } = splitNote(d.content);
 
-    const eyebrow = document.createElement("p");
-    eyebrow.className = "eyebrow";
-    eyebrow.textContent = `not sicili · #${d.id}`;
-    header.appendChild(eyebrow);
+    header.appendChild(el("p", "eyebrow", `not sicili · #${d.id}`));
 
-    // Humanized title + one serif diagnosis lede (tasarim-notu: never lead
-    // with the raw frontmatter dump — the record itself follows below).
+    // Title from frontmatter name (diagnosis already humanizes it); the raw
+    // frontmatter block itself never renders — it hides behind "ham not".
     const title = d.diagnosis?.title !== "" && d.diagnosis?.title !== undefined
       ? d.diagnosis.title
       : `Not #${d.id}`;
-    const h = document.createElement("h1");
-    h.className = "detail-title";
-    h.textContent = title;
-    header.appendChild(h);
+    header.appendChild(el("h1", "detail-title", title));
 
-    if (d.diagnosis?.sentence !== undefined && d.diagnosis.sentence !== "") {
-      const lede = document.createElement("p");
-      lede.className = "detail-lede";
-      renderSentence(lede, d.diagnosis.sentence);
-      header.appendChild(lede);
+    if (typeof fm["description"] === "string" && fm["description"] !== "") {
+      header.appendChild(el("p", "detail-sub", fm["description"]));
     }
 
-    const content = document.createElement("pre");
-    content.className = "detail-content";
-    content.textContent = d.content;
-    header.appendChild(content);
+    header.appendChild(renderBody(body, evidenceFragments(d.claims)));
+
+    const raw = document.createElement("details");
+    raw.className = "tech-dump";
+    const summary = document.createElement("summary");
+    summary.textContent = "ham not";
+    const pre = document.createElement("pre");
+    pre.className = "detail-content";
+    pre.textContent = d.content;
+    raw.append(summary, pre);
+    header.appendChild(raw);
 
     const meta = document.createElement("dl");
     meta.className = "detail-meta";
     const addMeta = (term, value) => {
-      const dt = document.createElement("dt");
-      dt.textContent = term;
-      const dd = document.createElement("dd");
+      const dt = el("dt", "", term);
+      const dd = el("dd", "", value);
       dd.dataset.mono = "";
-      dd.textContent = value;
       meta.append(dt, dd);
     };
     addMeta("kaynak", d.sourceRef ?? "—");
@@ -87,34 +184,34 @@ export function mount(root, ctx, findingId) {
     return header;
   }
 
-  // Anchors as mono chips with health dots (tasarim-notu visual dictionary);
-  // the table form overflowed the panel and spoke the old UI's language.
-  function renderAnchors(anchors, drifted) {
-    const section = document.createElement("div");
-    section.className = "panel";
+  // The diagnosis sentence as the right column's serif lede: the reason this
+  // record is open, stated before the ledger's evidence.
+  function renderDiagnosis(d) {
+    if (d.diagnosis?.sentence === undefined || d.diagnosis.sentence === "") return null;
+    const panel = el("div", "panel");
+    panel.appendChild(el("p", "eyebrow", "tanı"));
+    const lede = el("p", "detail-lede");
+    renderSentence(lede, d.diagnosis.sentence);
+    panel.appendChild(lede);
+    return panel;
+  }
 
-    const eyebrow = document.createElement("p");
-    eyebrow.className = "eyebrow";
-    eyebrow.textContent = "çapalar";
-    section.appendChild(eyebrow);
+  // Anchors as mono chips with health dots (tasarim-notu visual dictionary).
+  function renderAnchors(anchors, drifted) {
+    const section = el("div", "panel");
+    section.appendChild(el("p", "eyebrow", "çapalar"));
 
     if (anchors.length === 0) {
-      const p = document.createElement("p");
-      p.className = "empty-note";
-      p.textContent = "Çapa yok — bu not sürüklenme sinyali üretemez.";
-      section.appendChild(p);
+      section.appendChild(el("p", "empty-note", "Çapa yok — bu not sürüklenme sinyali üretemez."));
       return section;
     }
 
-    const list = document.createElement("div");
-    list.className = "anchor-list";
+    const list = el("div", "anchor-list");
     list.style.marginTop = "12px";
     for (const a of anchors) {
       const chip = anchorChip(a.value, drifted.has(a.value) ? "drift" : "ok");
       chip.title = `${a.kind} · alındığı commit ${shortSha(a.takenAtCommit)}`;
-      const sha = document.createElement("span");
-      sha.className = "anchor-sha";
-      sha.textContent = shortSha(a.takenAtCommit);
+      const sha = el("span", "anchor-sha", shortSha(a.takenAtCommit));
       chip.appendChild(sha);
       list.appendChild(chip);
     }
@@ -124,21 +221,15 @@ export function mount(root, ctx, findingId) {
 
   // key/value ledger line; prose=true sets the value in the editorial serif.
   function ledgerField(key, value, prose) {
-    const p = document.createElement("p");
-    p.className = "ledger-field";
-    const k = document.createElement("span");
-    k.className = "ledger-field__k";
-    k.textContent = key;
-    const v = document.createElement("span");
-    v.className = prose === true ? "ledger-field__v ledger-field__v--prose" : "ledger-field__v";
-    v.textContent = value;
+    const p = el("p", "ledger-field");
+    const k = el("span", "ledger-field__k", key);
+    const v = el("span", prose === true ? "ledger-field__v ledger-field__v--prose" : "ledger-field__v", value);
     p.append(k, v);
     return p;
   }
 
   function renderVerdictBody(record) {
-    const body = document.createElement("div");
-    body.className = "ledger-body";
+    const body = el("div", "ledger-body");
 
     if (record.subReason !== null && record.subReason !== "") {
       body.appendChild(ledgerField("alt sebep", record.subReason, false));
@@ -151,58 +242,54 @@ export function mount(root, ctx, findingId) {
     }
     if (record.method !== null && record.method !== "") {
       body.appendChild(ledgerField("yöntem", record.method, false));
+      const explainer = methodExplainer(record.method);
+      if (explainer !== null) body.appendChild(el("p", "ledger-note", explainer));
     }
     return body;
   }
 
-  function renderLiveRecord(record) {
-    const live = document.createElement("div");
-    live.className = "ledger-live";
+  // ALETİN TAVSİYESİ: the correction when the tool has one, else one honest
+  // generic line per verdict — and nothing at all when it has neither.
+  function renderAdvice(record) {
+    const text = record.correction !== null && record.correction !== ""
+      ? record.correction
+      : ADVICE_BY_VERDICT[record.verdict];
+    if (text === undefined) return null;
+    const box = el("div", "advice");
+    box.appendChild(el("p", "eyebrow", "aletin tavsiyesi"));
+    box.appendChild(el("p", "", text));
+    return box;
+  }
 
-    const head = document.createElement("div");
-    head.className = "ledger-live-head";
-    const badge = document.createElement("span");
-    badge.className = `badge badge--${record.verdict}`;
-    badge.textContent = verdictLabel(record.verdict);
-    head.appendChild(badge);
+  function renderLiveRecord(record) {
+    const live = el("div", "ledger-live");
+
+    const head = el("div", "ledger-live-head");
+    head.appendChild(el("span", `badge badge--${record.verdict}`, verdictLabel(record.verdict)));
     if (record.repeatCount > 1) {
-      const repeat = document.createElement("span");
-      repeat.className = "ledger-repeat";
+      const repeat = el("span", "ledger-repeat", `×${record.repeatCount} koşum aynı sonucu ölçtü`);
       repeat.dataset.mono = "";
-      repeat.textContent = `×${record.repeatCount} koşum aynı sonucu ölçtü`;
       head.appendChild(repeat);
+    }
+    if (record.review === "pending") {
+      head.appendChild(reviewControls(record.id));
     }
     live.appendChild(head);
     live.appendChild(renderVerdictBody(record));
 
-    if (record.correction !== null && record.correction !== "") {
-      const corr = document.createElement("div");
-      corr.className = "correction";
-      const label = document.createElement("p");
-      label.className = "eyebrow";
-      label.textContent = "önerilen düzeltme";
-      const text = document.createElement("p");
-      text.textContent = record.correction;
-      corr.append(label, text);
-      live.appendChild(corr);
-    }
+    const advice = renderAdvice(record);
+    if (advice !== null) live.appendChild(advice);
 
     return live;
   }
 
   function renderHistoryRecord(record) {
-    const item = document.createElement("div");
-    item.className = "ledger-old";
+    const item = el("div", "ledger-old");
 
-    const head = document.createElement("div");
-    head.className = "ledger-old-head";
-    const label = document.createElement("span");
-    label.className = `badge badge--${record.verdict} ledger-old-label`;
-    label.textContent = verdictLabel(record.verdict);
-    head.appendChild(label);
+    const head = el("div", "ledger-old-head");
+    head.appendChild(el("span", `badge badge--${record.verdict} ledger-old-label`, verdictLabel(record.verdict)));
 
-    const supersededNote = document.createElement("span");
-    supersededNote.className = "ledger-old-note";
+    const supersededNote = el("span", "ledger-old-note");
     supersededNote.dataset.mono = "";
     const supersededBy = record.supersededBy !== null ? `#${record.supersededBy}` : "bilinmiyor";
     supersededNote.textContent = `#${record.id} — ${supersededBy} ile değiştirildi — ${localDate(record.createdAt)}`;
@@ -214,29 +301,21 @@ export function mount(root, ctx, findingId) {
   }
 
   function renderClaim(claim) {
-    const card = document.createElement("div");
-    card.className = "panel ledger";
+    const card = el("div", "panel ledger");
 
-    const title = document.createElement("p");
-    title.className = "eyebrow";
-    title.textContent = claim.claimRef === "" ? "iddia: not geneli" : `iddia: ${claim.claimRef}`;
+    const title = el("p", "eyebrow",
+      claim.claimRef === "" ? "iddia: not geneli" : `iddia: ${claim.claimRef}`);
     card.appendChild(title);
 
     if (claim.live !== null) {
       card.appendChild(renderLiveRecord(claim.live));
     } else {
-      const none = document.createElement("p");
-      none.className = "empty-note";
-      none.textContent = "Bu iddia için canlı hüküm yok.";
-      card.appendChild(none);
+      card.appendChild(el("p", "empty-note", "Bu iddia için canlı hüküm yok."));
     }
 
     const historical = claim.history.filter((v) => claim.live === null || v.id !== claim.live.id);
     if (historical.length > 0) {
-      const histTitle = document.createElement("p");
-      histTitle.className = "eyebrow ledger-hist-title";
-      histTitle.textContent = "tarihsel kayıtlar";
-      card.appendChild(histTitle);
+      card.appendChild(el("p", "eyebrow ledger-hist-title", "tarihsel kayıtlar"));
       for (const record of historical) {
         card.appendChild(renderHistoryRecord(record));
       }
@@ -261,24 +340,20 @@ export function mount(root, ctx, findingId) {
       }
       wrap.textContent = "";
       wrap.classList.remove("detail--message");
-      const back = document.createElement("a");
+      const back = el("a", "back-link detail-back", "← rapora dön");
       back.href = `#/proje/${d.projectId}`;
-      back.textContent = "← rapora dön";
-      back.className = "back-link detail-back";
       wrap.appendChild(back);
-      // Two-column ledger: note + anchors on the left, verdict claims on the right.
-      const noteCol = document.createElement("div");
-      noteCol.className = "detail-col detail-col--note";
-      const claimsCol = document.createElement("div");
-      claimsCol.className = "detail-col detail-col--claims";
+      // Two-column ledger: note + anchors on the left; diagnosis, verdict
+      // claims and advice on the right.
+      const noteCol = el("div", "detail-col detail-col--note");
+      const claimsCol = el("div", "detail-col detail-col--claims");
 
       noteCol.appendChild(renderHeader(d));
       noteCol.appendChild(renderAnchors(d.anchors, driftedValues(d.claims)));
+      const diagnosisPanel = renderDiagnosis(d);
+      if (diagnosisPanel !== null) claimsCol.appendChild(diagnosisPanel);
       if (d.claims.length === 0) {
-        const none = document.createElement("p");
-        none.className = "empty-note";
-        none.textContent = "Bu not için hüküm kaydı yok.";
-        claimsCol.appendChild(none);
+        claimsCol.appendChild(el("p", "empty-note", "Bu not için hüküm kaydı yok."));
       } else {
         for (const claim of d.claims) {
           claimsCol.appendChild(renderClaim(claim));

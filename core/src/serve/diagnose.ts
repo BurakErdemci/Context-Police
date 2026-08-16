@@ -39,6 +39,22 @@ function truncate(s: string, max: number): string {
   return `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
+/**
+ * Strips inline markdown markers from a snippet before it is quoted into a
+ * serif sentence: `**bold**`/`__bold__`, `*em*`, `_em_`, backticks, and
+ * `[[wiki-link]]` wrappers. The quote renders as prose in the UI, so raw
+ * markers read as noise there. Underscores are only stripped as paired
+ * emphasis — snake_case identifiers must survive.
+ */
+function stripInlineMarkdown(s: string): string {
+  return s
+    .replace(/\[\[([^\]]*)\]\]/g, "$1")
+    .replace(/\*\*|__/g, "")
+    .replace(/`+/g, "")
+    .replace(/\*/g, "")
+    .replace(/(?<![\w])_([^_\s](?:[^_]*[^_\s])?)_(?![\w])/g, "$1");
+}
+
 /** Pulls the «accented» phrase out of a sentence built with guillemets in-band. */
 function withAccent(sentence: string): { sentence: string; accent: string | null } {
   const m = /«([^»]+)»/.exec(sentence);
@@ -94,7 +110,7 @@ export function diagnose(input: DiagnoseInput): Diagnosis {
   // körlüğü" family), regardless of what the live verdict says about it.
   const durumMatch = DURUM_LINE_RE.exec(input.content);
   if (input.status === "born_invalid" || durumMatch !== null) {
-    const excerpt = truncate(durumMatch ? durumMatch[1]! : firstBodyLine(body), 60);
+    const excerpt = truncate(stripInlineMarkdown(durumMatch ? durumMatch[1]! : firstBodyLine(body)), 60);
     const quoted = excerpt.length > 0 ? `"${excerpt}"` : "bu not";
     return {
       title,

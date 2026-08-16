@@ -252,6 +252,84 @@ export function handleStoreStates(payload, showMessage) {
   return false;
 }
 
+/* --- mock review (display-only preview) -------------------------------------
+   State lives ONLY in sessionStorage: it survives the 3s poll re-render but
+   resets with the browser, and nothing is ever sent to the server. The hint
+   text next to the progress bar states this boundary to the user. */
+
+const MOCK_REVIEW_KEY = "cp-mock-review";
+
+function readMockMap() {
+  try {
+    const m = JSON.parse(sessionStorage.getItem(MOCK_REVIEW_KEY) ?? "{}");
+    return m !== null && typeof m === "object" ? m : {};
+  } catch {
+    return {};
+  }
+}
+
+/** "approved" | "rejected" | null for a verdict id. */
+export function mockReviewGet(verdictId) {
+  const v = readMockMap()[String(verdictId)];
+  return v === "approved" || v === "rejected" ? v : null;
+}
+
+export function mockReviewSet(verdictId, decision) {
+  const m = readMockMap();
+  if (decision === null) delete m[String(verdictId)];
+  else m[String(verdictId)] = decision;
+  try {
+    sessionStorage.setItem(MOCK_REVIEW_KEY, JSON.stringify(m));
+  } catch {
+    /* storage full/blocked: the preview degrades to stateless buttons */
+  }
+}
+
+/**
+ * Chip + Onayla/Reddet buttons for one or more verdict ids (a case card can
+ * speak for several grouped verdicts; the sicil card passes one). Amber lives
+ * only on the undecided state — once decided, the chip goes green/gray and the
+ * amber affordance disappears. `onChange` fires after every state flip.
+ */
+export function reviewControls(verdictIds, onChange) {
+  const ids = Array.isArray(verdictIds) ? verdictIds : [verdictIds];
+  const box = el("span", "review-box");
+  // Clicks and Enter/Space inside the box must not reach a clickable card.
+  for (const type of ["click", "keydown"]) {
+    box.addEventListener(type, (e) => e.stopPropagation());
+  }
+
+  const btn = (className, label, go) => {
+    const b = el("button", className, label);
+    b.type = "button";
+    b.addEventListener("click", go);
+    return b;
+  };
+
+  function render() {
+    box.textContent = "";
+    const state = mockReviewGet(ids[0]);
+    if (state === null) {
+      box.appendChild(el("span", "status status--wait", "ONAY BEKLİYOR"));
+      box.appendChild(btn("btn btn--approve", "Onayla", () => decide("approved")));
+      box.appendChild(btn("btn btn--reject", "Reddet", () => decide("rejected")));
+    } else {
+      const cls = state === "approved" ? "status status--approved" : "status status--rejected";
+      box.appendChild(el("span", cls, state === "approved" ? "ONAYLANDI" : "REDDEDİLDİ"));
+      box.appendChild(btn("btn btn--undo", "geri al", () => decide(null)));
+    }
+  }
+
+  function decide(decision) {
+    for (const id of ids) mockReviewSet(id, decision);
+    render();
+    if (onChange !== undefined) onChange();
+  }
+
+  render();
+  return box;
+}
+
 export const COLORS = {
   green: "#58C08A",
   greenDim: "#2E5C42",
