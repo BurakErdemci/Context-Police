@@ -315,6 +315,47 @@ test("göç: tabloyu ZATEN taşıyan depo yeniden açılınca satırlar ve super
   store.close();
 });
 
+// class: coverage-exclusion-clears-suspect-on-dead-run
+// 16 Ağu denetiminin (opencode/glm-5.3) bulgusu, probe ile doğrulandı:
+// `classifier-off-clears-suspect` düzeltmesi sınıfın yalnız YARISINI kapatmıştı.
+// İçeriğinden çelişki adayı doğan not (description ↔ gövde) korunuyordu, ama
+// notların TİPİK hâli — description'sız, iç çelişkisiz — yalnız kapsama adayı
+// üretir, o da kapsama kuralıyla atlanınca korumasız kalıp aklanıyordu.
+// Ölçülen: aynı `executor: null` koşumunda A `suspect/0,9 → unanchored/0`,
+// B `suspect/0,9` — tek koşum, iki not, zıt sonuç.
+test("sınıflandırıcı kapalıyken KAPSAMA-ONLY not da korunur (aday türü fark etmez)", async () => {
+  const memoryDir = tmpDir("cp-coverage-only-mem-");
+  // A: yalnız kapsama adayı. B: frontmatter adayı da var.
+  writeFileSync(join(memoryDir, "a.md"), "---\nname: a\n---\nKarar: seam bir tarafta.\n");
+  writeFileSync(join(memoryDir, "b.md"),
+    "---\nname: b\ndescription: Seam A tarafında duruyor\n---\nKarar: seam B tarafında.\n");
+  const store = openStore(":memory:");
+  const projectId = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir, memory_dir) VALUES (?,?,?,?)",
+    repo, "claude-code", "/t", memoryDir,
+  ).lastInsertRowid);
+  const project = { id: projectId, path: repo, memoryDir };
+
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const notes = listActive(store, projectId);
+  const A = notes.find((f) => f.content.includes("seam bir tarafta"))!;
+  const B = notes.find((f) => f.content.includes("seam B tarafında"))!;
+  for (const f of [A, B]) { setSuspicion(store, f.id, 0.9); markSuspect(store, f.id); }
+
+  const sum = await auditProject(store, project, { executor: null, fetch: false });
+
+  assert.equal(getFinding(store, A.id)!.status, "suspect", "kapsama-only not aklandı");
+  assert.equal(getFinding(store, B.id)!.status, "suspect");
+  assert.equal(sum.cleared, 0, "ölçülmemiş boyut aklama üretti");
+  assert.equal(sum.heldUnmeasured, 2, "yalnız bir not korundu: aday türü hâlâ ayrım yapıyor");
+  // İkisi de kuyrukta: dondurma sessiz kalamaz.
+  assert.deepEqual(
+    listPendingVerdicts(store, projectId).map((v) => v.subReason).sort(),
+    ["classifier-not-run", "classifier-not-run"],
+  );
+  store.close();
+});
+
 test("göç: tekrar sayacı VAR OLAN depoya geliyor, eski satırlar 1'den başlıyor", () => {
   // CLAUDE.md §7: taze depoda çalışması KANIT DEĞİL. Dosya önce yaratılıp hüküm
   // yazılıyor, sonra sütun sökülerek depo sayaç ÖNCESİ şekline geri alınıyor.

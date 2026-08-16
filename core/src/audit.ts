@@ -475,8 +475,25 @@ export async function auditProject(
     // şüpheyi temizliyordu (probe: classifier-off-clears-suspect.mjs, suspect/0,9
     // → unanchored/0 ve özet bir AKLAMA raporluyordu). `ctx === null` çapa
     // yolunda kapatılan deliğin (851246d) çelişki boyutundaki kardeşi.
+    // `answered: true` GEÇİLİYOR, ve bu kasıtlı: yürütücünün YOKLUĞU bir arıza
+    // değil bir YAPILANDIRMA. Çağıran çelişki boyutunu bilerek kapattı, yani
+    // "hiç kimse için ölçülmedi" bu koşum hakkında kesin bir olgu — geçici bir
+    // sinyal değil. Kapsama adaylarını burada dışarıda bırakmak, sınıfın
+    // ÇOĞUNLUK vakasını açık bırakıyordu: içeriğinden çelişki adayı doğmayan
+    // bir not (description'sız, iç çelişkisiz — notların tipik hâli) yalnız
+    // kapsama adayı üretir, o da atlanınca korumasız kalır ve şüphesi
+    // temizlenir. Ölçüldü (probe `coverage-only-clears.ts`, 16 Ağu, denetim
+    // bulgusu): aynı `executor: null` koşumunda kapsama-only not
+    // `suspect/0,9 → unanchored/0` aklanırken frontmatter adayı olan not
+    // korunuyordu — tek koşum, iki not, zıt sonuç.
+    //
+    // Sınıflandırıcı KOŞUP cevap vermediğinde (`ok:false` ya da sıfır hüküm)
+    // aynı şey yapılmıyor; oradaki koşul duruyor. Fark, kaza ile seçim arasında:
+    // geçici bir yürütücü çökmesinin tüm depoyu dondurması aşırı-korumadır,
+    // kullanıcının kapattığı bir boyutun dondurması ise doğru cevaptır — ve
+    // artık onay kuyruğunda görünüyor.
     if (candidates.length > 0 && opts.executor === null)
-      markUnmeasured(candidates, false, "classifier-not-run");
+      markUnmeasured(candidates, true, "classifier-not-run");
 
     if (candidates.length > 0 && opts.executor !== null) {
       const notesById = new Map(views.map((v) => [v.findingId, v]));

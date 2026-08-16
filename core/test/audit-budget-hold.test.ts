@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { openStore } from "../src/store/db.ts";
 import { appendFinding, getFinding } from "../src/store/findings.ts";
 import { auditProject } from "../src/audit.ts";
-import { tmpDir } from "./helpers.ts";
+import { fakeExecutor, tmpDir } from "./helpers.ts";
 
 // --- 1) git bütçesi tükenmesi var olan hükmü AKLAYAMAZ -------------------------
 
@@ -32,6 +32,15 @@ interface BudgetCase {
   suspicion?: number;
   maxGitCalls?: number;
   anchors?: { kind: "file_path"; value: string }[];
+  /**
+   * Varsayılan `null` — bu dosyanın konusu ÇAPA boyutu, sınıflandırıcı sadece
+   * iskele. Ama yürütücüsüz koşum artık çelişki boyutunu "hiç kimse için
+   * ölçülmedi" sayıp şüpheyi donduruyor (16 Ağu denetim bulgusu), yani
+   * TEMİZLEMEYİ sınayan vaka iskele yüzünden ikinci bir boyuta takılıyordu.
+   * O vaka gerçek bir yürütücü veriyor; iddiası değişmiyor, yalnız ölçtüğü
+   * boyut tek kalıyor.
+   */
+  executor?: Parameters<typeof auditProject>[2]["executor"];
 }
 
 async function budgetRun(repo: string, c: BudgetCase) {
@@ -50,7 +59,7 @@ async function budgetRun(repo: string, c: BudgetCase) {
   });
   store.run("UPDATE findings SET suspicion = ? WHERE id = ?", c.suspicion ?? 0.9, findingId);
   const summary = await auditProject(store, { id: projectId, path: repo, memoryDir: null }, {
-    executor: null, fetch: false, originRef: "HEAD",
+    executor: c.executor ?? null, fetch: false, originRef: "HEAD",
     ...(c.maxGitCalls === undefined ? {} : { maxGitCalls: c.maxGitCalls }),
   });
   const after = getFinding(store, findingId)!;
@@ -87,7 +96,12 @@ test("varyant: bütçe tükenmedi — normal temizleme HÂLÂ çalışıyor", as
   writeFileSync(join(repo, "duran.ts"), "export const a = 1;\n");
   execFileSync("git", ["-C", repo, "add", "-A"], { stdio: "ignore" });
   execFileSync("git", ["-C", repo, "commit", "-qm", "duran"], { stdio: "ignore" });
-  const r = await budgetRun(repo, { anchors: [{ kind: "file_path", value: "duran.ts" }] });
+  const r = await budgetRun(repo, {
+    anchors: [{ kind: "file_path", value: "duran.ts" }],
+    // Sınıflandırıcı KOŞSUN: yoksa çelişki boyutu ölçülmemiş sayılır ve
+    // şüphe donar — bu testin ölçtüğü çapa temizlemesine hiç sıra gelmez.
+    executor: fakeExecutor([{ output: '{"verdicts":[]}' }]),
+  });
   assert.equal(r.summary.budgetExhaustedAnchors, 0);
   assert.equal(r.after.status, "active", "ölçüm yapıldı ve temiz çıktı: temizleme koşmalı");
   assert.equal(r.summary.cleared, 1);
