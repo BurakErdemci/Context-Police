@@ -171,6 +171,27 @@ test("§1 yürütücü çökerse gösterilenler undecided, bütçe dışındakil
   assert.equal(r.measured.length, 0);
 });
 
+test("§1 açlık: uzun süredir bekleyen aday `starvedLong`e düşer, tazeler düşmez", async () => {
+  const notes = new Map([[1, note(1, "A")], [2, note(2, "B")], [3, note(3, "C")]]);
+  const cands = [cand(1, null, "coverage"), cand(2, null, "coverage"), cand(3, null, "coverage")];
+  const exec = () => fakeExecutor([{ output: '{"verdicts":[{"index":0,"verdict":"uyumlu","evidence":"x"}]}' }]);
+
+  // Damga durumu ELLE kuruluyor: üç aday da 1. koşumdan beri sırada, ve koşum
+  // sayacı 50'ye gelmiş (ilgisiz bir anahtar sayacı yukarı taşıyor). Sağlıklı
+  // rotasyonda bu durum oluşamaz — dedektörün ölçtüğü şey tam olarak "oluştu".
+  const eski = { "coverage:1:-1": 1, "coverage:2:-1": 1, "coverage:3:-1": 1 };
+  const r = await classifyCandidates(exec(), cands, notes, {
+    maxItems: 1, stamps: { "cross:9:9": 50 }, seen: eski,
+  });
+  assert.equal(r.starved.length, 2, "bütçe 1, üç aday");
+  assert.equal(r.starvedLong.length, 2, "50 koşumdur bekleyen aday aç sayılmadı");
+
+  // Aynı bütçe, TAZE adaylar: sırası gelmemek normaldir, açlık değil.
+  const taze = await classifyCandidates(exec(), cands, notes, { maxItems: 1, stamps: {}, seen: {} });
+  assert.equal(taze.starved.length, 2);
+  assert.deepEqual(taze.starvedLong, [], "yeni giren aday aç ilan edildi — dedektör gürültü üretir");
+});
+
 // --- §2 correlated-signal-double-count -------------------------------------
 // Tek olgu iki "bağımsız" sinyal sınıfı üretemez (4fa874d'nin tavan gerekçesi).
 

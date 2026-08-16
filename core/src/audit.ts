@@ -123,6 +123,12 @@ export interface AuditSummary {
    * arızası/kırpması) ve çapa (git bütçesi tükendi ya da git söyleyemedi).
    */
   heldUnmeasured: number;
+  /**
+   * Rotasyon açlığı yüzünden bu koşumda kaydı açılan not sayısı. Sıfırdan farklı
+   * olması notlar hakkında değil BÜTÇE/ROTASYON hakkında bir sinyal: aday üretimi
+   * bütçenin dönebileceğinden hızlı büyüyor demek.
+   */
+  starvedFindings: number;
   /** Git bütçesi dolduğu için HİÇ ölçülmemiş çapa sayısı (arıza değil, maliyet sınırı). */
   budgetExhaustedAnchors: number;
   /**
@@ -231,7 +237,7 @@ export async function auditProject(
     runId, import: null, gitAvailable: false, checked: 0, suspects: 0, cleared: 0,
     candidates: 0, coverageCandidates: 0, classified: false, contradictions: 0,
     classifyDropped: 0, classifyCalls: 0,
-    classifyUnclassified: 0, heldUnmeasured: 0, budgetExhaustedAnchors: 0,
+    classifyUnclassified: 0, heldUnmeasured: 0, starvedFindings: 0, budgetExhaustedAnchors: 0,
     anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
     verdictsRecorded: 0,
   };
@@ -429,6 +435,8 @@ export async function auditProject(
      * iş kalemi — ilki bir yapılandırma sorunu, ikincisi bir ölçüm arızası.
      */
     const unmeasuredReasons = new Map<number, string>();
+    /** Rotasyonda üç tam tur boyunca sırası gelmemiş adayların notları. */
+    const starvedFindings = new Set<number>();
     /**
      * Bir sonraki koşumun aday rotasyon damgaları (+ bu koşumun damga değeri);
      * null = bu koşumda sınıflama hiç çalışmadı, damgalara dokunulmaz.
@@ -488,21 +496,12 @@ export async function auditProject(
       sum.classifyCalls = res.calls;
       sum.classifyDropped = res.dropped;
       sum.classifyUnclassified = res.unclassified;
-      // YALNIZ `undecided` korur — sırası gelmemiş aday (`starved`) classify.ts'te
-      // ayrıldı ve buraya hiç gelmiyor.
-      //
-      // Kapsama adayı için EK koşul: bu koşumda en az bir adaya hüküm dönmüş
-      // olmalı. Sebep ölçüldü — üç muhafız testi birden devriliyordu. Kapsama
-      // yüzeyinde HER not aday olduğu için, yürütücü hiç cevap vermediğinde
-      // (çöktü, ya da şema-geçerli BOŞ bir dizi döndürdü) "cevapsız kaldı"
-      // kümesi depodaki tüm notlar demek; onları korumak tek bir arızada tüm
-      // suspect kayıtlarını dondururdu. En az bir hüküm dönmüşse durum başka:
-      // sınıflandırıcı cevap veriyordu ve TAM BU nota dair sessiz kaldı — bu
-      // not-başına bir ölçüm arızası, ve korunması gereken tam da o.
-      //
-      // Çelişki yüzeylerinde (cross/frontmatter/intra) böyle bir koşul yok:
-      // orada aday olmak notun kendi içeriğinden geliyor, kütüğün tamamından değil.
       markUnmeasured(res.undecided, res.measured.length > 0, "classify-undecided");
+      // Açlık şüpheyi DONDURMAZ (sırası gelmemek notların normal hâli) ama sessiz
+      // de kalamaz: bir aday üç tam rotasyon turu boyunca seçilmediyse ölçülmeyen
+      // şey notun kendisi değil ROTASYONUN ADALETİ, ve onu ancak kullanıcı
+      // düzeltebilir (bütçe, aday seli, yüzey kotası).
+      for (const c of res.starvedLong) for (const id of [c.aId, c.bId]) if (id !== null) starvedFindings.add(id);
       // Rotasyon imleci kırpma olayının İÇİNDE: "20 aday atıldı" tek başına
       // okunduğunda hep aynı 20'sinin atıldığı sanılabilir — pencerenin
       // ilerlediği ancak burada görünür. (Kırpma görünürlüğü, D dalgası.)
@@ -696,6 +695,23 @@ export async function auditProject(
           ev("finding_cleared", { findingId: f.id, score: s.score });
         } else if (s.score >= SUSPICION_THRESHOLD) sum.suspects++;
       }
+
+      // Açlık kaydı skor döngüsünün DIŞINDA: aç bir not `active`/0 olabilir,
+      // yani o döngünün hiçbir dalı ona uğramaz. Yine de ölçülemeyen bir şey var
+      // ve kullanıcıya ulaşması gereken de bu.
+      for (const id of starvedFindings) {
+        // Hükmü olan nota dokunulmaz — ne ezilir (ölçüm yapılmadı) ne tekrar
+        // yazılır (zaten kuyrukta).
+        if (getLiveVerdict(store, id) !== undefined) continue;
+        const r = recordVerdict(store, {
+          projectId: project.id, findingId: id, verdict: "olculemez",
+          subReason: "rotation-starved",
+          evidence: "aday üç tam rotasyon turudur sınıflama bütçesine giremedi — " +
+            "ölçülemeyen şey notun içeriği değil rotasyonun kendisi",
+          method: "classify-rotation", source: "mechanical", runId,
+        });
+        if (r.recorded) { sum.verdictsRecorded++; sum.starvedFindings++; }
+      }
     });
 
     // Bitiş kaydı YAZIMDAN SONRA: daha erken yazılırsa "tamamlandı" yarım bir
@@ -707,6 +723,7 @@ export async function auditProject(
       contradictions: sum.contradictions,
       classifyCalls: sum.classifyCalls, measurementFailures: sum.measurementFailures,
       classifyUnclassified: sum.classifyUnclassified, heldUnmeasured: sum.heldUnmeasured,
+      starvedFindings: sum.starvedFindings,
       budgetExhaustedAnchors: sum.budgetExhaustedAnchors,
       fetchFailed: sum.fetchFailed, verdictsRecorded: sum.verdictsRecorded,
       importErrors: sum.import?.errors ?? 0, importRejected: sum.import?.rejected ?? 0,

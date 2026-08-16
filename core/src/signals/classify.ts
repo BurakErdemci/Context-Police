@@ -451,6 +451,15 @@ const REASON_CHARS = 200;
  * ölçekleniyor — sabit bir koşum sayısı 30 adaylı bir depoda hiç ateşlenmez,
  * 3.000 adaylıda her koşum ateşlenirdi. 3 tur: bir turluk gecikme rotasyonun
  * normal işleyişi, üç tur ise sıranın o adaya uğramadığı anlamına geliyor.
+ *
+ * NE OLDUĞU KONUSUNDA DÜRÜST OLMAK GEREKİR: bu bir GERİLEME DEDEKTÖRÜ, canlı bir
+ * sinyal değil. Açlığın bilinen altı biçiminin sonuncusu (yüzey içi sel) M4.5'te
+ * `seen` haritasıyla kapandı ve öncelik artık salt yaşa dayanıyor — sağlıklı bir
+ * rotasyonda hiçbir aday bir tam turdan fazla bekleyemez, yani bu sayaç 0
+ * kalmalı. Sıfırdan farklı bir değer notlar hakkında değil ROTASYON hakkında bir
+ * iddiadır: kapanmış bir sınıf geri gelmiş ya da yenisi doğmuş. Sınanması da bu
+ * yüzden damga durumunu doğrudan kurarak yapılıyor; gerçek bir akışta üretmek
+ * mümkün olsaydı zaten kapanmamış bir bug olurdu.
  */
 const STARVATION_ROTATIONS = 3;
 
