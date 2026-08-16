@@ -367,7 +367,9 @@ export function listProjectCards(store: ReadStore): ProjectCard[] {
           }
         })
         .reverse();
-      const healthPct = Math.round((100 * clean) / Math.max(1, notes));
+      // A project with nothing to decay is healthy, not 0% — "unused ≠ decayed"
+      // (tasarım-notu.md). Math.max(1, notes) would otherwise divide 0/1 → 0%.
+      const healthPct = notes === 0 ? 100 : Math.round((100 * clean) / notes);
       return {
         id: p.id, path: p.path, name: basename(p.path), notes, suspects, pending,
         anchorless, clean, lastRunAt, runSeries, healthPct,

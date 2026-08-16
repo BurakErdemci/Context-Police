@@ -152,6 +152,57 @@ test("listProjectCards runSeries son audit_completed olaylarını eskiden yeniye
   ro.close();
 });
 
+test("listProjectCards: hiç bulgusu olmayan proje %100 sağlıklı sayılır", () => {
+  const path = tmpStorePath();
+  const store = openStore(path);
+  store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)",
+    "/empty", "claude-code", "/t",
+  );
+  store.close();
+  const ro = openStoreReadonly(path);
+  const card = listProjectCards(ro)[0]!;
+  assert.equal(card.notes, 0);
+  assert.equal(card.healthPct, 100); // "kullanılmıyor" çürümüş demek değil
+  assert.deepEqual(card.runSeries, []);
+  assert.equal(card.lastRunAt, null);
+  ro.close();
+});
+
+test("listProjectCards: iki proje bağımsız sayılır, yol sırasına göre listelenir", () => {
+  const path = tmpStorePath();
+  const store = openStore(path);
+  const projectB = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)",
+    "/z-proje", "claude-code", "/t",
+  ).lastInsertRowid);
+  const projectA = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)",
+    "/a-proje", "claude-code", "/t",
+  ).lastInsertRowid);
+  appendFinding(store, {
+    projectId: projectA, source: "imported", content: "a notu", sourceRef: "a.md", anchors: [],
+  });
+  const bF1 = appendFinding(store, {
+    projectId: projectB, source: "imported", content: "b notu bir", sourceRef: "b1.md", anchors: [],
+  });
+  appendFinding(store, {
+    projectId: projectB, source: "imported", content: "b notu iki", sourceRef: "b2.md", anchors: [],
+  });
+  store.run("UPDATE findings SET status = 'suspect' WHERE id = ?", bF1);
+  store.close();
+  const ro = openStoreReadonly(path);
+  const cards = listProjectCards(ro);
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0]!.path, "/a-proje"); // "/a-proje" < "/z-proje" alfabetik
+  assert.equal(cards[0]!.notes, 1);
+  assert.equal(cards[0]!.suspects, 0);
+  assert.equal(cards[1]!.path, "/z-proje");
+  assert.equal(cards[1]!.notes, 2);
+  assert.equal(cards[1]!.suspects, 1);
+  ro.close();
+});
+
 test("eski şemalı depo SchemaOutdated fırlatır", () => {
   const path = tmpStorePath();
   const store = openStore(path);
