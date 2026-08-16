@@ -2,7 +2,7 @@ function localDate(iso) {
   if (typeof iso !== "string") return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+  return d.toLocaleString("tr-TR", { dateStyle: "medium", timeStyle: "short" });
 }
 
 function formatValue(v) {

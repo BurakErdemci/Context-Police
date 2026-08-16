@@ -1,14 +1,4 @@
-const VERDICT_LABELS = {
-  gecerli: "geçerli",
-  curuk: "çürük",
-  "dogustan-yanlis": "doğuştan yanlış",
-  olculemez: "ölçülemez",
-  tarihsel: "tarihsel",
-};
-
-function verdictLabel(v) {
-  return VERDICT_LABELS[v] ?? v;
-}
+import { verdictLabel, renderSentence, driftedValues, anchorChip } from "./ui.js";
 
 function shortSha(sha) {
   if (typeof sha !== "string" || sha === "") return "—";
@@ -19,7 +9,7 @@ function localDate(iso) {
   if (typeof iso !== "string") return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+  return d.toLocaleString("tr-TR", { dateStyle: "medium", timeStyle: "short" });
 }
 
 export function mount(root, ctx, findingId) {
@@ -30,17 +20,18 @@ export function mount(root, ctx, findingId) {
 
   function renderMessage(text, showQueueLink) {
     wrap.textContent = "";
+    wrap.classList.add("detail--message"); // single column: no ledger to lay out
+    if (showQueueLink === true) {
+      const link = document.createElement("a");
+      link.href = "#/";
+      link.textContent = "← projelere dön";
+      link.className = "back-link";
+      wrap.appendChild(link);
+    }
     const msg = document.createElement("div");
     msg.className = "screen-message";
     msg.textContent = text;
     wrap.appendChild(msg);
-    if (showQueueLink === true) {
-      const link = document.createElement("a");
-      link.href = "#/";
-      link.textContent = "Kuyruğa dön";
-      link.className = "queue-link";
-      wrap.appendChild(link);
-    }
   }
 
   function renderHeader(d) {
@@ -49,8 +40,25 @@ export function mount(root, ctx, findingId) {
 
     const eyebrow = document.createElement("p");
     eyebrow.className = "eyebrow";
-    eyebrow.textContent = `not #${d.id}`;
+    eyebrow.textContent = `not sicili · #${d.id}`;
     header.appendChild(eyebrow);
+
+    // Humanized title + one serif diagnosis lede (tasarim-notu: never lead
+    // with the raw frontmatter dump — the record itself follows below).
+    const title = d.diagnosis?.title !== "" && d.diagnosis?.title !== undefined
+      ? d.diagnosis.title
+      : `Not #${d.id}`;
+    const h = document.createElement("h1");
+    h.className = "detail-title";
+    h.textContent = title;
+    header.appendChild(h);
+
+    if (d.diagnosis?.sentence !== undefined && d.diagnosis.sentence !== "") {
+      const lede = document.createElement("p");
+      lede.className = "detail-lede";
+      renderSentence(lede, d.diagnosis.sentence);
+      header.appendChild(lede);
+    }
 
     const content = document.createElement("pre");
     content.className = "detail-content";
@@ -79,7 +87,9 @@ export function mount(root, ctx, findingId) {
     return header;
   }
 
-  function renderAnchors(anchors) {
+  // Anchors as mono chips with health dots (tasarim-notu visual dictionary);
+  // the table form overflowed the panel and spoke the old UI's language.
+  function renderAnchors(anchors, drifted) {
     const section = document.createElement("div");
     section.className = "panel";
 
@@ -96,35 +106,19 @@ export function mount(root, ctx, findingId) {
       return section;
     }
 
-    const table = document.createElement("table");
-    table.className = "queue-table";
-    const thead = document.createElement("thead");
-    const headRow = document.createElement("tr");
-    for (const h of ["tür", "değer", "alındığı commit"]) {
-      const th = document.createElement("th");
-      th.textContent = h;
-      headRow.appendChild(th);
-    }
-    thead.appendChild(headRow);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
+    const list = document.createElement("div");
+    list.className = "anchor-list";
+    list.style.marginTop = "12px";
     for (const a of anchors) {
-      const tr = document.createElement("tr");
-      const kind = document.createElement("td");
-      kind.dataset.mono = "";
-      kind.textContent = a.kind;
-      const value = document.createElement("td");
-      value.dataset.mono = "";
-      value.textContent = a.value;
-      const commit = document.createElement("td");
-      commit.dataset.mono = "";
-      commit.textContent = shortSha(a.takenAtCommit);
-      tr.append(kind, value, commit);
-      tbody.appendChild(tr);
+      const chip = anchorChip(a.value, drifted.has(a.value) ? "drift" : "ok");
+      chip.title = `${a.kind} · alındığı commit ${shortSha(a.takenAtCommit)}`;
+      const sha = document.createElement("span");
+      sha.className = "anchor-sha";
+      sha.textContent = shortSha(a.takenAtCommit);
+      chip.appendChild(sha);
+      list.appendChild(chip);
     }
-    table.appendChild(tbody);
-    section.appendChild(table);
+    section.appendChild(list);
     return section;
   }
 
@@ -266,6 +260,12 @@ export function mount(root, ctx, findingId) {
         return;
       }
       wrap.textContent = "";
+      wrap.classList.remove("detail--message");
+      const back = document.createElement("a");
+      back.href = `#/proje/${d.projectId}`;
+      back.textContent = "← rapora dön";
+      back.className = "back-link detail-back";
+      wrap.appendChild(back);
       // Two-column ledger: note + anchors on the left, verdict claims on the right.
       const noteCol = document.createElement("div");
       noteCol.className = "detail-col detail-col--note";
@@ -273,7 +273,7 @@ export function mount(root, ctx, findingId) {
       claimsCol.className = "detail-col detail-col--claims";
 
       noteCol.appendChild(renderHeader(d));
-      noteCol.appendChild(renderAnchors(d.anchors));
+      noteCol.appendChild(renderAnchors(d.anchors, driftedValues(d.claims)));
       if (d.claims.length === 0) {
         const none = document.createElement("p");
         none.className = "empty-note";

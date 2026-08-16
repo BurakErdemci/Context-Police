@@ -1,18 +1,19 @@
 import { apiGet } from "./api.js";
-import { mount as mountQueue } from "./queue.js";
+import { mount as mountFleet } from "./fleet.js";
+import { mount as mountProject } from "./project.js";
 import { mount as mountDetail } from "./detail.js";
 import { mount as mountRuns } from "./runs.js";
 
 // Route table: each entry's `mount(root, ctx, ...params)` is called with the
 // route's regex capture groups after (root, ctx).
 const ROUTES = [
-  { pattern: /^#\/$/, mount: mountQueue },
+  { pattern: /^#\/$/, mount: mountFleet },
+  { pattern: /^#\/proje\/(\d+)$/, mount: (root, ctx, id) => mountProject(root, ctx, Number(id)) },
   { pattern: /^#\/finding\/(\d+)$/, mount: (root, ctx, id) => mountDetail(root, ctx, Number(id)) },
   { pattern: /^#\/runs$/, mount: mountRuns },
 ];
 
 const root = document.getElementById("root");
-const storePathEl = document.getElementById("store-path");
 const ctx = { apiGet, navigate };
 
 let activeScreen = null;
@@ -36,12 +37,14 @@ function currentRoute() {
   return null;
 }
 
-// Presentational only: mark the nav tab matching the current hash.
+// Presentational only: mark the nav tab matching the current hash. The project
+// and finding screens live under "Projeler".
 function syncTabs() {
   const hash = location.hash || "#/";
   for (const a of document.querySelectorAll(".tabs a")) {
     const target = a.getAttribute("href");
-    const active = target === hash || (target === "#/" && hash.startsWith("#/finding/"));
+    const active = target === hash
+      || (target === "#/" && (hash.startsWith("#/proje/") || hash.startsWith("#/finding/")));
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
@@ -82,7 +85,6 @@ async function pollVersion() {
         : `${v.maxVerdictId}:${v.maxEventId}`;
     if (lastVersion !== null && lastVersion !== key) {
       activeScreen?.refresh();
-      loadSummaryForHeader();
     }
     lastVersion = key;
   } catch {
@@ -92,24 +94,5 @@ async function pollVersion() {
   }
 }
 
-async function loadSummaryForHeader() {
-  try {
-    const s = await apiGet("/api/summary");
-    if (s.storeMissing === true) {
-      storePathEl.textContent = `depo bulunamadı: ${s.path}`;
-      return;
-    }
-    if (s.schemaOutdated === true) {
-      storePathEl.textContent = "depo şeması eski";
-      return;
-    }
-    const proj = s.projects?.[0]?.path;
-    storePathEl.textContent = proj ?? "";
-  } catch {
-    storePathEl.textContent = "";
-  }
-}
-
 render();
-loadSummaryForHeader();
 setInterval(pollVersion, 3000);
