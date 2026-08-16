@@ -69,6 +69,17 @@ test("listVerdicts skor azalan sıralar ve filtreler", () => {
   ro.close();
 });
 
+test("listVerdicts subReason alt dize eşleşir, tam eşleşme değil", () => {
+  const { ro, f2 } = fixture();
+  const bySubstring = listVerdicts(ro, { subReason: "classify" });
+  assert.equal(bySubstring.length, 1);
+  assert.equal(bySubstring[0]!.findingId, f2);
+  const combined = listVerdicts(ro, { verdict: "olculemez", subReason: "classify" });
+  assert.equal(combined.length, 1);
+  assert.equal(combined[0]!.findingId, f2);
+  ro.close();
+});
+
 test("finding detayı supersession zincirini eskiden yeniye verir", () => {
   const { ro, f1 } = fixture();
   const d = getFindingDetail(ro, f1);

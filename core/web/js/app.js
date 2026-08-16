@@ -58,10 +58,19 @@ async function pollVersion() {
   pollInFlight = true;
   try {
     const v = await apiGet("/api/version");
-    if (v.storeMissing === true || v.schemaOutdated === true) return;
-    const key = `${v.maxVerdictId}:${v.maxEventId}`;
+    // Fold storeMissing/schemaOutdated into the key itself so a transition
+    // between those states and a real version (or vice versa) is visible as
+    // a key change too — an early return here used to skip the key update
+    // entirely, so the first real version after "store appeared" only primed
+    // the key and never triggered a refresh.
+    const key = v.storeMissing === true
+      ? "missing"
+      : v.schemaOutdated === true
+        ? "outdated"
+        : `${v.maxVerdictId}:${v.maxEventId}`;
     if (lastVersion !== null && lastVersion !== key) {
       activeScreen?.refresh();
+      loadSummaryForHeader();
     }
     lastVersion = key;
   } catch {

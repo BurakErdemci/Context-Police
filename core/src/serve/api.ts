@@ -140,7 +140,6 @@ export function listVerdicts(store: ReadStore, filters: VerdictFilters = {}): Ve
     const params: (string | number)[] = [];
     for (const [key, col] of [
       ["verdict", "v.verdict"],
-      ["subReason", "v.sub_reason"],
       ["source", "v.source"],
       ["review", "v.review"],
     ] as const) {
@@ -149,6 +148,12 @@ export function listVerdicts(store: ReadStore, filters: VerdictFilters = {}): Ve
         where.push(`${col} = ?`);
         params.push(val);
       }
+    }
+    // subReason is a substring match (queue.js's placeholder says "alt sebep içerir…"),
+    // not exact — value stays a bound parameter, only the wildcards are concatenated.
+    if (filters.subReason !== undefined) {
+      where.push("v.sub_reason LIKE '%' || ? || '%'");
+      params.push(filters.subReason);
     }
     params.push(filters.limit ?? 200);
     return store
