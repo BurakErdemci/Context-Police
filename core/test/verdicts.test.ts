@@ -403,12 +403,15 @@ test("göç: GERÇEK deponun kopyası açılır, hüküm tablosu belirir, var ol
   const copy = join(tmpDir("cp-realstore-"), "store.db");
   copyFileSync(real, copy); // ASLA orijinal açılmaz: kopya açılır.
 
-  const before = new DatabaseSync(copy, { readOnly: true });
+  const before = new DatabaseSync(copy);
   const findingCount = (before.prepare("SELECT COUNT(*) n FROM findings").get() as { n: number }).n;
-  const hasVerdicts = (before.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name = 'verdicts'")
-    .get() as { n: number }).n;
+  // The live store crossed this migration on 16 Aug 2026 (first real audit), so
+  // "a real store without the table" no longer exists on this machine. Rebuild
+  // that pre-migration state on the COPY: dropping the table (triggers and
+  // indexes go with it) leaves every other real table untouched, and the
+  // measurement below is still "migrate() on a real store file".
+  before.exec("DROP TABLE IF EXISTS verdicts");
   before.close();
-  assert.equal(hasVerdicts, 0, "kopya zaten tabloyu taşıyorsa bu test göçü değil kendini ölçer");
 
   const store = openStore(copy);
   assert.equal(store.get<{ n: number }>("SELECT COUNT(*) n FROM findings")?.n, findingCount, "gerçek depo göçte veri kaybetti");
