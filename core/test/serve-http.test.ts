@@ -76,3 +76,17 @@ test("olmayan finding 404", async () => {
     assert.equal(r.status, 404);
   });
 });
+
+test("yol ön eki sınırı: sibling dizin 404", async () => {
+  // Verifies that a normalized path starting with WEB_ROOT as string prefix
+  // but actually outside WEB_ROOT (e.g. core/web2 when WEB_ROOT is core/web)
+  // returns 404. The vulnerability: bare startsWith(WEB_ROOT) would pass.
+  // The fix: target === WEB_ROOT || target.startsWith(WEB_ROOT + sep).
+  await withServer(seed(), async (base) => {
+    // Encoded path that normalizes to a sibling-prefixed path.
+    // If WEB_ROOT is core/web, this attempts core/web2/../x (or similar structure).
+    // After normalization, it would be outside WEB_ROOT.
+    const sibling = await fetch(`${base}/%2e%2e%2fweb2%2fx.js`);
+    assert.equal(sibling.status, 404);
+  });
+});

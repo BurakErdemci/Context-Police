@@ -1,7 +1,7 @@
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
-import { join, normalize, extname } from "node:path";
+import { join, normalize, extname, sep } from "node:path";
 import { openStoreReadonly } from "../store/db.ts";
 import type { ReadStore } from "../store/db.ts";
 import {
@@ -91,7 +91,7 @@ function route(
 function serveStatic(path: string, res: ServerResponse): void {
   const target = normalize(join(WEB_ROOT, decodeURIComponent(path)));
   const type = MIME[extname(target)];
-  if (!target.startsWith(WEB_ROOT) || type === undefined || !existsSync(target)) {
+  if (!(target === WEB_ROOT || target.startsWith(WEB_ROOT + sep)) || type === undefined || !existsSync(target)) {
     res.writeHead(404, { "content-type": "text/plain" }); res.end("not found"); return;
   }
   res.writeHead(200, { "content-type": type });
