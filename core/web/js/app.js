@@ -1,30 +1,15 @@
 import { apiGet } from "./api.js";
 import { mount as mountQueue } from "./queue.js";
+import { mount as mountDetail } from "./detail.js";
+import { mount as mountRuns } from "./runs.js";
 
-// Route table: adding detail.js / runs.js later is a one-line entry here.
-// Each entry's `mount(root, ctx, ...params)` is called with the route's
-// regex capture groups after (root, ctx).
+// Route table: each entry's `mount(root, ctx, ...params)` is called with the
+// route's regex capture groups after (root, ctx).
 const ROUTES = [
   { pattern: /^#\/$/, mount: mountQueue },
-  { pattern: /^#\/finding\/(\d+)$/, mount: mountPlaceholder("Not detayı") },
-  { pattern: /^#\/runs$/, mount: mountPlaceholder("Koşumlar") },
+  { pattern: /^#\/finding\/(\d+)$/, mount: (root, ctx, id) => mountDetail(root, ctx, Number(id)) },
+  { pattern: /^#\/runs$/, mount: mountRuns },
 ];
-
-function mountPlaceholder(title) {
-  return (root) => {
-    root.textContent = "";
-    const p = document.createElement("div");
-    p.className = "panel placeholder";
-    const h = document.createElement("p");
-    h.className = "eyebrow";
-    h.textContent = title;
-    const body = document.createElement("p");
-    body.textContent = "Bu ekran henüz yapılmadı.";
-    p.append(h, body);
-    root.appendChild(p);
-    return { refresh() {} };
-  };
-}
 
 const root = document.getElementById("root");
 const storePathEl = document.getElementById("store-path");
