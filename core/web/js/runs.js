@@ -73,9 +73,10 @@ export function mount(root, ctx) {
       runsSection.appendChild(p);
       return;
     }
-    for (const run of runs) {
+    runs.forEach((run, i) => {
       const card = document.createElement("div");
       card.className = "panel run-card";
+      card.style.setProperty("--i", String(i)); // entrance stagger index
 
       const at = document.createElement("p");
       at.className = "eyebrow";
@@ -115,7 +116,7 @@ export function mount(root, ctx) {
       }
 
       runsSection.appendChild(card);
-    }
+    });
   }
 
   function renderEvents(events) {

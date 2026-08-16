@@ -2,6 +2,22 @@ const VERDICTS = ["gecerli", "curuk", "dogustan-yanlis", "olculemez", "tarihsel"
 const SOURCES = ["mechanical", "adjudicator"];
 const REVIEWS = ["pending", "approved", "rejected"];
 
+// Display labels only — filter values sent to the API stay the raw slugs.
+const VERDICT_LABELS = {
+  gecerli: "geçerli",
+  curuk: "çürük",
+  "dogustan-yanlis": "doğuştan yanlış",
+  olculemez: "ölçülemez",
+  tarihsel: "tarihsel",
+};
+
+function verdictLabel(v) {
+  return VERDICT_LABELS[v] ?? v;
+}
+
+const SOURCE_LABELS = { mechanical: "mekanik", adjudicator: "hakem" };
+const REVIEW_LABELS = { pending: "bekliyor", approved: "onaylandı", rejected: "reddedildi" };
+
 export function mount(root, ctx) {
   const state = { verdict: "", subReason: "", source: "", review: "", loadSeq: 0 };
 
@@ -15,15 +31,16 @@ export function mount(root, ctx) {
   for (const v of VERDICTS) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `verdict-count verdict-count--${v}`;
+    btn.className = `verdict-seg verdict-seg--${v}`;
+    const tick = document.createElement("span");
+    tick.className = "verdict-seg__tick";
     const count = document.createElement("span");
-    count.className = "verdict-count__n";
-    count.dataset.mono = "";
+    count.className = "verdict-seg__n";
     count.textContent = "–";
     const label = document.createElement("span");
-    label.className = "verdict-count__label";
-    label.textContent = v;
-    btn.append(count, label);
+    label.className = "verdict-seg__label";
+    label.textContent = verdictLabel(v);
+    btn.append(tick, count, label);
     btn.addEventListener("click", () => {
       state.verdict = state.verdict === v ? "" : v;
       verdictSelect.value = state.verdict;
@@ -47,15 +64,15 @@ export function mount(root, ctx) {
     state.verdict = val;
     syncStripActive();
     load();
-  });
+  }, verdictLabel);
   const sourceSelect = makeSelect("kaynak", ["", ...SOURCES], (val) => {
     state.source = val;
     load();
-  });
+  }, (v) => SOURCE_LABELS[v] ?? v);
   const reviewSelect = makeSelect("gözden geçirme", ["", ...REVIEWS], (val) => {
     state.review = val;
     load();
-  });
+  }, (v) => REVIEW_LABELS[v] ?? v);
 
   const subReasonLabel = document.createElement("label");
   subReasonLabel.className = "filter-field";
@@ -87,7 +104,7 @@ export function mount(root, ctx) {
   wrap.append(strip, filters, message, tableWrap);
   root.appendChild(wrap);
 
-  function makeSelect(labelText, options, onChange) {
+  function makeSelect(labelText, options, onChange, labelFor) {
     const label = document.createElement("label");
     label.className = "filter-field";
     const eyebrow = document.createElement("span");
@@ -97,7 +114,7 @@ export function mount(root, ctx) {
     for (const opt of options) {
       const o = document.createElement("option");
       o.value = opt;
-      o.textContent = opt === "" ? "hepsi" : opt;
+      o.textContent = opt === "" ? "hepsi" : (labelFor ? labelFor(opt) : opt);
       select.appendChild(o);
     }
     select.addEventListener("change", () => onChange(select.value));
@@ -148,13 +165,15 @@ export function mount(root, ctx) {
     table.appendChild(thead);
 
     const tbody = document.createElement("tbody");
-    for (const row of rows) {
+    rows.forEach((row, i) => {
       const tr = document.createElement("tr");
       tr.tabIndex = 0;
       tr.className = "queue-row";
+      tr.style.setProperty("--i", String(i)); // entrance stagger index
 
       const score = document.createElement("td");
       score.dataset.mono = "";
+      score.className = "cell-score";
       score.textContent = Number(row.suspicion).toFixed(2);
 
       const preview = document.createElement("td");
@@ -168,7 +187,7 @@ export function mount(root, ctx) {
       const verdict = document.createElement("td");
       const badge = document.createElement("span");
       badge.className = `badge badge--${row.verdict}`;
-      badge.textContent = row.verdict;
+      badge.textContent = verdictLabel(row.verdict);
       verdict.appendChild(badge);
 
       const subReason = document.createElement("td");
@@ -184,7 +203,7 @@ export function mount(root, ctx) {
       }
 
       const source = document.createElement("td");
-      source.textContent = row.source;
+      source.textContent = SOURCE_LABELS[row.source] ?? row.source;
 
       const date = document.createElement("td");
       date.dataset.mono = "";
@@ -202,7 +221,7 @@ export function mount(root, ctx) {
       });
 
       tbody.appendChild(tr);
-    }
+    });
     table.appendChild(tbody);
     tableWrap.appendChild(table);
   }

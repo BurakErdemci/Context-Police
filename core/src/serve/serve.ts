@@ -14,6 +14,7 @@ const WEB_ROOT = join(import.meta.dirname, "..", "..", "web");
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
+  ".woff2": "font/woff2",
 };
 
 export function startServer(

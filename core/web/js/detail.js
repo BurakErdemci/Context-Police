@@ -54,7 +54,6 @@ export function mount(root, ctx, findingId) {
 
     const content = document.createElement("pre");
     content.className = "detail-content";
-    content.dataset.mono = "";
     content.textContent = d.content;
     header.appendChild(content);
 
@@ -129,33 +128,35 @@ export function mount(root, ctx, findingId) {
     return section;
   }
 
+  // key/value ledger line; prose=true sets the value in the editorial serif.
+  function ledgerField(key, value, prose) {
+    const p = document.createElement("p");
+    p.className = "ledger-field";
+    const k = document.createElement("span");
+    k.className = "ledger-field__k";
+    k.textContent = key;
+    const v = document.createElement("span");
+    v.className = prose === true ? "ledger-field__v ledger-field__v--prose" : "ledger-field__v";
+    v.textContent = value;
+    p.append(k, v);
+    return p;
+  }
+
   function renderVerdictBody(record) {
     const body = document.createElement("div");
     body.className = "ledger-body";
 
     if (record.subReason !== null && record.subReason !== "") {
-      const sub = document.createElement("p");
-      sub.className = "ledger-field";
-      sub.textContent = `alt sebep: ${record.subReason}`;
-      body.appendChild(sub);
+      body.appendChild(ledgerField("alt sebep", record.subReason, false));
     }
     if (record.decayType !== null && record.decayType !== "") {
-      const decay = document.createElement("p");
-      decay.className = "ledger-field";
-      decay.textContent = `çürüme türü: ${record.decayType}`;
-      body.appendChild(decay);
+      body.appendChild(ledgerField("çürüme türü", record.decayType, false));
     }
     if (record.evidence !== null && record.evidence !== "") {
-      const evidence = document.createElement("p");
-      evidence.className = "ledger-field";
-      evidence.textContent = `kanıt: ${record.evidence}`;
-      body.appendChild(evidence);
+      body.appendChild(ledgerField("kanıt", record.evidence, true));
     }
     if (record.method !== null && record.method !== "") {
-      const method = document.createElement("p");
-      method.className = "ledger-field";
-      method.textContent = `yöntem: ${record.method}`;
-      body.appendChild(method);
+      body.appendChild(ledgerField("yöntem", record.method, false));
     }
     return body;
   }
@@ -187,7 +188,6 @@ export function mount(root, ctx, findingId) {
       label.className = "eyebrow";
       label.textContent = "önerilen düzeltme";
       const text = document.createElement("p");
-      text.dataset.mono = "";
       text.textContent = record.correction;
       corr.append(label, text);
       live.appendChild(corr);
@@ -266,11 +266,33 @@ export function mount(root, ctx, findingId) {
         return;
       }
       wrap.textContent = "";
-      wrap.appendChild(renderHeader(d));
-      wrap.appendChild(renderAnchors(d.anchors));
-      for (const claim of d.claims) {
-        wrap.appendChild(renderClaim(claim));
+      // Two-column ledger: note + anchors on the left, verdict claims on the right.
+      const noteCol = document.createElement("div");
+      noteCol.className = "detail-col detail-col--note";
+      const claimsCol = document.createElement("div");
+      claimsCol.className = "detail-col detail-col--claims";
+
+      noteCol.appendChild(renderHeader(d));
+      noteCol.appendChild(renderAnchors(d.anchors));
+      if (d.claims.length === 0) {
+        const none = document.createElement("p");
+        none.className = "empty-note";
+        none.textContent = "Bu not için hüküm kaydı yok.";
+        claimsCol.appendChild(none);
+      } else {
+        for (const claim of d.claims) {
+          claimsCol.appendChild(renderClaim(claim));
+        }
       }
+      // entrance stagger indices, left column first then claims
+      let seq = 0;
+      for (const col of [noteCol, claimsCol]) {
+        for (const panel of col.children) {
+          panel.style.setProperty("--i", String(seq));
+          seq += 1;
+        }
+      }
+      wrap.append(noteCol, claimsCol);
     } catch (err) {
       if (err instanceof Error && /HTTP 404/.test(err.message)) {
         renderMessage("Bulgu bulunamadı.", true);

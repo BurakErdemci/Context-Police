@@ -36,7 +36,19 @@ function currentRoute() {
   return null;
 }
 
+// Presentational only: mark the nav tab matching the current hash.
+function syncTabs() {
+  const hash = location.hash || "#/";
+  for (const a of document.querySelectorAll(".tabs a")) {
+    const target = a.getAttribute("href");
+    const active = target === hash || (target === "#/" && hash.startsWith("#/finding/"));
+    if (active) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+}
+
 function render() {
+  syncTabs();
   const route = currentRoute();
   if (route === null) {
     root.textContent = "";
