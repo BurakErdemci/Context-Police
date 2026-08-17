@@ -275,7 +275,7 @@ export function reviewBadge(decision) {
 // UI decision and must stay identical whichever shell (web, Tauri) is talking.
 function reviewErrorText(err) {
   switch (err?.status) {
-    case 409: return "bu hüküm zaten kararlı ya da geçersiz kılınmış";
+    case 409: return "bu hüküm daha yeni bir ölçümle geçersiz kılınmış";
     case 404: return "bu hüküm artık bulunamıyor";
     case 403: return "istek reddedildi — sayfayı yenile";
     case 400: return "istek geçersiz";
@@ -290,11 +290,14 @@ function reviewErrorText(err) {
  * only on the undecided state — once decided, the chip goes green/gray and the
  * amber affordance disappears.
  *
- * The decision is written to the store here and now. There is no undo button:
- * the server has no un-review, and a button whose click can only ever 409 is a
- * lie. `onChange(ids, decision)` fires only after the write actually landed.
+ * The decision is written to the store here and now, and it is REVERSIBLE
+ * (design §7b): a decided verdict keeps a "Geri al" button that posts
+ * `pending`, and a live row can be flipped straight from one decision to the
+ * other. `initialDecision` seeds the state for a record that was already
+ * decided before this render. `onChange(ids, decision)` fires only after the
+ * write actually landed.
  */
-export function reviewControls(verdictIds, onChange) {
+export function reviewControls(verdictIds, onChange, initialDecision) {
   const ids = Array.isArray(verdictIds) ? verdictIds : [verdictIds];
   const box = el("span", "review-box");
   // Clicks and Enter/Space inside the box must not reach a clickable card.
@@ -303,6 +306,9 @@ export function reviewControls(verdictIds, onChange) {
   }
 
   let busy = false;
+  let decided = initialDecision === "approved" || initialDecision === "rejected"
+    ? initialDecision
+    : null;
 
   const btn = (className, label, go) => {
     const b = el("button", className, label);
@@ -312,11 +318,16 @@ export function reviewControls(verdictIds, onChange) {
     return b;
   };
 
-  function renderPending(errorText) {
+  function render(errorText) {
     box.textContent = "";
-    box.appendChild(el("span", "status status--wait", "ONAY BEKLİYOR"));
-    box.appendChild(btn("btn btn--approve", "Onayla", () => decide("approved")));
-    box.appendChild(btn("btn btn--reject", "Reddet", () => decide("rejected")));
+    if (decided === null) {
+      box.appendChild(el("span", "status status--wait", "ONAY BEKLİYOR"));
+      box.appendChild(btn("btn btn--approve", "Onayla", () => decide("approved")));
+      box.appendChild(btn("btn btn--reject", "Reddet", () => decide("rejected")));
+    } else {
+      box.appendChild(reviewBadge(decided));
+      box.appendChild(btn("btn btn--undo", "Geri al", () => decide("pending")));
+    }
     if (errorText !== undefined) {
       const line = el("span", "review-error", errorText);
       line.setAttribute("role", "status");
@@ -324,32 +335,28 @@ export function reviewControls(verdictIds, onChange) {
     }
   }
 
-  function renderDecided(decision) {
-    box.textContent = "";
-    box.appendChild(reviewBadge(decision));
-  }
-
   async function decide(decision) {
     if (busy) return;
     busy = true;
-    renderPending(); // clears any previous error and disables both buttons
+    render(); // clears any previous error and disables the buttons
     try {
       // Sequential on purpose: the first refusal stops the rest, so a grouped
       // card cannot half-decide beyond the one request already in flight.
       for (const id of ids) await postReview(id, decision);
       busy = false;
-      renderDecided(decision);
+      decided = decision === "pending" ? null : decision;
+      render();
       if (onChange !== undefined) onChange(ids, decision);
     } catch (err) {
-      // Nothing sticks in the UI: back to the undecided controls plus one line.
-      // Any ids written before the failure drop out of the queue on the next
-      // poll refresh, which is the same reconciliation every screen already does.
+      // Nothing sticks in the UI: back to the previous state plus one line.
+      // Any ids written before the failure reconcile on the next poll refresh,
+      // which is the same reconciliation every screen already does.
       busy = false;
-      renderPending(reviewErrorText(err));
+      render(reviewErrorText(err));
     }
   }
 
-  renderPending();
+  render();
   return box;
 }
 

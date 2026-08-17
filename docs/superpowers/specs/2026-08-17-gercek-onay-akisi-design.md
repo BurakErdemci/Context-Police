@@ -95,6 +95,20 @@ Reddedilen `(finding, sebep)` çifti, kanıtı değişmedikçe kuyruğa dönmez:
   kolonu) `migrate()` aynı commit'te ve VAR OLAN depo kopyasına karşı test
   edilir (CLAUDE.md §7).
 
+## 7b. Kararın geri alınabilirliği (Burak, 17 Ağu — sözlü ek)
+
+> "Bir yere asıl notun yedeği alınıp, ileride yanlış varsayım yapıldıysa ya da
+> kullanıcı yanlışlıkla bastıysa buradan düzeltilmeli."
+
+- **Depo katmanı (V1'e eklendi):** Onay/Red mutlak değil. Karar `pending`'e
+  geri döndürülebilir ve yeniden verilebilir; `review` kolonu SON durumu tutar,
+  tam geçmiş `verdict_reviewed` event'lerinde (append-only bozulmaz). Geri
+  alınan red, bastırma dayanağını da düşürür (bastırma yalnız güncel `rejected`
+  satıra bakar). UI'da kararlı hüküm rozetinin yanında "geri al".
+- **Dosya katmanı (V2 ŞARTI):** hafıza dosyasına her yazımdan önce orijinal
+  not ürünün kendi alanına yedeklenir (nota+tarihe anahtarlı); UI'da tek tık
+  geri yükleme. Yedeksiz dosya yazımı V2'de kabul edilmez.
+
 ## 8. Riskler / açık uçlar
 
 - Parmak izinin girdi kümesi yanlış seçilirse bastırma ya hiç ısırmaz ya

@@ -132,14 +132,12 @@ const MAX_REVIEW_BODY = 8 * 1024;
 
 const REVIEW_STATUS: Record<ReviewFailure, number> = {
   not_found: 404,
-  already_decided: 409,
   superseded: 409,
   store_missing: 409,
 };
 
 const REVIEW_MESSAGE: Record<ReviewFailure, string> = {
   not_found: "Bu hüküm bulunamadı.",
-  already_decided: "Bu hüküm zaten kararlı.",
   superseded: "Bu hüküm daha yeni bir ölçümle geçersiz kılınmış.",
   store_missing: "Depo dosyası bulunamadı; henüz hiç denetim koşmamış olabilir.",
 };
@@ -186,8 +184,9 @@ function handleReview(
       answer(400, { error: "bad_request", message: "Gövde geçerli JSON değil." });
       return;
     }
-    if (decision !== "approved" && decision !== "rejected") {
-      answer(400, { error: "bad_request", message: "Karar 'approved' ya da 'rejected' olmalı." });
+    // `pending` is the undo (design §7b), so it is a legal decision here.
+    if (decision !== "approved" && decision !== "rejected" && decision !== "pending") {
+      answer(400, { error: "bad_request", message: "Karar 'approved', 'rejected' ya da 'pending' olmalı." });
       return;
     }
     try {

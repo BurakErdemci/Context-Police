@@ -49,13 +49,24 @@ test("applyReview olmayan id için not_found döner", () => {
   assert.deepEqual(r, { ok: false, code: "not_found" });
 });
 
-test("applyReview zaten kararlı hükmü already_decided ile reddeder", () => {
+test("applyReview kararlı hükmü yeniden karara bağlar ve geri alır", () => {
   const { path, verdictId } = seed();
   assert.equal(applyReview(path, verdictId, "rejected").ok, true);
-  const again = applyReview(path, verdictId, "approved");
-  assert.deepEqual(again, { ok: false, code: "already_decided" });
+
+  const flipped = applyReview(path, verdictId, "approved");
+  assert.equal(flipped.ok, true, "yanlış basılan red düzeltilemiyor");
+  assert.ok(flipped.ok && flipped.row.review === "approved");
+
+  const reverted = applyReview(path, verdictId, "pending");
+  assert.ok(reverted.ok && reverted.row.review === "pending");
+  assert.ok(reverted.ok && reverted.row.reviewedAt === null);
+
   const store = openStore(path);
-  assert.equal(getVerdict(store, verdictId)!.review, "rejected");
+  assert.equal(getVerdict(store, verdictId)!.review, "pending");
+  assert.equal(
+    store.get<{ c: number }>("SELECT COUNT(*) c FROM events WHERE kind = 'verdict_reviewed'")!.c,
+    3, "her karar değişimi sicile düşmedi",
+  );
   store.close();
 });
 
@@ -110,5 +121,6 @@ test("reviewVerdict çekirdeği doğrudan çağrıldığında da aynı sözleşm
   const store = openStore(path);
   assert.equal(reviewVerdict(store, verdictId, "rejected"), true);
   store.close();
-  assert.deepEqual(applyReview(path, verdictId, "approved"), { ok: false, code: "already_decided" });
+  const r = applyReview(path, verdictId, "approved");
+  assert.ok(r.ok && r.row.review === "approved");
 });

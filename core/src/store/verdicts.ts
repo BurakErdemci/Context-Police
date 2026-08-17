@@ -179,6 +179,10 @@ export function computeEvidenceFingerprint(input: {
  * measurement withdrew it), which is exactly why `sameConclusion` — which only
  * looks at the live row — cannot see the re-nag coming.
  *
+ * Only the CURRENT review counts: the column is mutable (design §7b), so a
+ * rejection the user took back stops suppressing on the next run — otherwise an
+ * undone misclick would silence the complaint forever.
+ *
  * `claimRef` omitted = any claim on the note.
  */
 export function findLastRejected(
@@ -341,24 +345,41 @@ export function listVerdictHistory(store: Store, findingId: number, claimRef?: s
  * The user's decision. A superseded verdict cannot be reviewed: approving one
  * would hand the next milestone a correction that a later measurement already
  * withdrew. Returns false when nothing was reviewable.
+ *
+ * The decision is NOT final (design §7b). `pending` reverts it, and a decided
+ * row can be re-decided; the column holds the LATEST state while every change
+ * appends a `verdict_reviewed` event carrying from→to, so the full path stays
+ * reconstructable and append-only is not broken. A misclick that could not be
+ * undone would be the one irreversible action in a tool whose whole premise is
+ * that its own errors must cost nothing (spec §3.2).
  */
 export function reviewVerdict(
   store: Store,
   id: number,
-  review: Exclude<VerdictReview, "pending">,
+  review: VerdictReview,
   at: string = nowIso(),
 ): boolean {
   return store.tx(() => {
+    const before = getVerdict(store, id);
+    if (before === undefined || before.supersededBy !== null) return false;
+    // Re-asserting the same decision is a no-op, not an error: a double click
+    // must not spend a ledger line saying nothing changed.
+    if (before.review === review) return true;
     const { changes } = store.run(
+      // Reverting clears the stamp too — a `pending` row carrying a review time
+      // would read as decided to every query that checks the timestamp.
       "UPDATE verdicts SET review = ?, reviewed_at = ? WHERE id = ? AND superseded_by IS NULL",
-      review, at, id,
+      review, review === "pending" ? null : at, id,
     );
     if (changes === 0) return false;
     const v = getVerdict(store, id)!;
     logEvent(store, {
       projectId: v.projectId,
       kind: "verdict_reviewed",
-      detail: { verdictId: id, findingId: v.findingId, claimRef: v.claimRef, verdict: v.verdict, review },
+      detail: {
+        verdictId: id, findingId: v.findingId, claimRef: v.claimRef, verdict: v.verdict,
+        review, from: before.review, to: review,
+      },
     });
     return true;
   });

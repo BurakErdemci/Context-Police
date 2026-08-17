@@ -203,8 +203,13 @@ export function mount(root, ctx, projectId) {
 
     const list = el("div", "case-list");
     groups.forEach((rows, i) => {
-      const onDecision = (ids) => {
-        for (const id of ids) decidedIds.add(id);
+      // An undo puts the case back on the counter; the progress line must not
+      // keep claiming a decision the user just withdrew.
+      const onDecision = (ids, decision) => {
+        for (const id of ids) {
+          if (decision === "pending") decidedIds.delete(id);
+          else decidedIds.add(id);
+        }
         updateProgress();
       };
       list.appendChild(caseCard(rows, details.get(rows[0].findingId), i, ctx.navigate, onDecision));

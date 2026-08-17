@@ -160,6 +160,36 @@ test("canlı hüküm aynı sonucu söylüyorsa tekrar sayacı yolu korunur, bast
   s.store.close();
 });
 
+/**
+ * The rejection that suppresses must be a CURRENT one. `findLastRejected` reads
+ * the `review` column, which is now mutable, so reverting a decision has to drop
+ * the suppression with it — otherwise an accidental Reject would silence the
+ * complaint forever and the undo button would be cosmetic.
+ *
+ * The re-measurement here differs only in `source`: same reason, same evidence,
+ * so the fingerprint matches and the repeat branch does not (design §5).
+ */
+test("red geri alınınca bastırma da düşer: aynı kanıtlı hüküm yeniden üretilir", () => {
+  const s = seed();
+  const first = recordVerdict(s.store, { ...s, ...DECAYED, source: "mechanical", runId: "r1" });
+  assert.equal(reviewVerdict(s.store, first.id, "rejected"), true);
+
+  const suppressed = recordVerdict(s.store, { ...s, ...DECAYED, source: "adjudicator", runId: "r2" });
+  assert.equal(suppressed.suppressed, true, "red bastırmadı: kurulum yanlış");
+  assert.equal(countEvents(s.store, "verdict_suppressed"), 1);
+
+  assert.equal(reviewVerdict(s.store, first.id, "pending"), true);
+  assert.equal(findLastRejected(s.store, s.findingId, "curuk||dosya-silindi"), undefined,
+    "geri alınan red hâlâ red sayılıyor");
+
+  const again = recordVerdict(s.store, { ...s, ...DECAYED, source: "adjudicator", runId: "r3" });
+  assert.equal(again.suppressed, false, "geri alınan red bastırmaya devam ediyor");
+  assert.equal(again.recorded, true);
+  assert.equal(countEvents(s.store, "verdict_suppressed"), 1, "yeni bastırma olayı düştü");
+  assert.equal(getLiveVerdict(s.store, s.findingId)!.source, "adjudicator");
+  s.store.close();
+});
+
 test("findLastRejected en SON reddi verir, reddedilmemiş satırları görmez", () => {
   const { store, projectId, findingId } = rejectedThenWithdrawn();
   const reason = "curuk||dosya-silindi";

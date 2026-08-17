@@ -146,6 +146,51 @@ test("supersede edilmiş hüküm İNCELENEMEZ", () => {
   store.close();
 });
 
+test("karar geri alınabilir: review SON durumu tutar, tam geçmiş olaylarda kalır", () => {
+  const { store, projectId, findingId } = seed();
+  const id = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1",
+    source: "mechanical", runId: "r1",
+  }).id;
+
+  assert.equal(reviewVerdict(store, id, "approved"), true);
+  assert.equal(reviewVerdict(store, id, "pending"), true, "yanlışlıkla basılan onay geri alınamıyor");
+  assert.equal(getVerdict(store, id)!.review, "pending");
+  assert.equal(getVerdict(store, id)!.reviewedAt, null, "geri alınan kararın damgası kaldı");
+  assert.equal(listPendingVerdicts(store, projectId).map((v) => v.id).includes(id), true,
+    "geri alınan hüküm kuyruğa dönmedi");
+
+  assert.equal(reviewVerdict(store, id, "rejected"), true, "geri alındıktan sonra yeniden karar verilemiyor");
+  assert.equal(getVerdict(store, id)!.review, "rejected");
+
+  // Append-only: the column holds the latest state, the events hold the path.
+  const path = listEvents(store, { kind: "verdict_reviewed" })
+    .map((e) => JSON.parse(e.detail!) as { from: string; to: string })
+    .map((d) => `${d.from}>${d.to}`)
+    .reverse(); // listEvents is newest-first
+  assert.deepEqual(path, ["pending>approved", "approved>pending", "pending>rejected"],
+    "geçmiş from→to ile yeniden kurulamıyor");
+  store.close();
+});
+
+test("aynı kararın tekrarı olay üretmez, supersede edilmiş satır geri ALINAMAZ", () => {
+  const { store, projectId, findingId } = seed();
+  const first = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi", evidence: "e1",
+    source: "mechanical", runId: "r1",
+  }).id;
+  assert.equal(reviewVerdict(store, first, "approved"), true);
+  assert.equal(reviewVerdict(store, first, "approved"), true, "aynı karar hata sayıldı");
+  assert.equal(listEvents(store, { kind: "verdict_reviewed" }).length, 1,
+    "değişmeyen karar sicili şişiriyor");
+
+  recordVerdict(store, { projectId, findingId, verdict: "gecerli", evidence: "e2", source: "adjudicator", runId: "r2" });
+  assert.equal(reviewVerdict(store, first, "pending"), false,
+    "geçersiz kılınmış satır geri alma yoluyla yeniden dokunulabilir hale geldi");
+  assert.equal(getVerdict(store, first)!.review, "approved");
+  store.close();
+});
+
 test("iddia başına ayrı hüküm: aynı notun iki iddiası aynı anda canlı olabilir", () => {
   const { store, projectId, findingId } = seed();
   const a = recordVerdict(store, {

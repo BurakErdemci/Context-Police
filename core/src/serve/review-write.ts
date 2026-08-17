@@ -14,9 +14,10 @@ import { closeQuietly, openStore } from "../store/db.ts";
 import { getVerdict, reviewVerdict } from "../store/verdicts.ts";
 import type { VerdictRecord } from "../store/verdicts.ts";
 
-export type ReviewDecision = "approved" | "rejected";
+/** `pending` is the revert (design §7b): a decision is never final. */
+export type ReviewDecision = "approved" | "rejected" | "pending";
 
-export type ReviewFailure = "not_found" | "already_decided" | "superseded" | "store_missing";
+export type ReviewFailure = "not_found" | "superseded" | "store_missing";
 
 export type ReviewResult =
   | { ok: true; row: VerdictRecord }
@@ -37,7 +38,8 @@ export function applyReview(
     const before = getVerdict(store, verdictId);
     if (before === undefined) return { ok: false, code: "not_found" };
     if (before.supersededBy !== null) return { ok: false, code: "superseded" };
-    if (before.review !== "pending") return { ok: false, code: "already_decided" };
+    // An already-decided LIVE row is not an error — it can be flipped or taken
+    // back. Only supersession is a genuine refusal.
     // reviewVerdict re-checks liveness inside its own transaction; a false here
     // means another writer superseded the row between the read and the write.
     if (!reviewVerdict(store, verdictId, decision)) return { ok: false, code: "superseded" };

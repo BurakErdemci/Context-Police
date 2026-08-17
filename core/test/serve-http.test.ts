@@ -180,7 +180,7 @@ test("POST review bozuk gövde ve bozuk karar 400", async () => {
   const { path, verdictId } = seedWithVerdict();
   await withServer(path, async (base) => {
     assert.equal((await postReview(base, verdictId, "{bozuk")).status, 400);
-    assert.equal((await postReview(base, verdictId, { decision: "pending" })).status, 400);
+    assert.equal((await postReview(base, verdictId, { decision: "silindi" })).status, 400);
     assert.equal((await postReview(base, verdictId, {})).status, 400);
   });
 });
@@ -193,14 +193,27 @@ test("POST review olmayan id 404", async () => {
   });
 });
 
-test("POST review zaten kararlı hüküm 409", async () => {
+// Reversibility (design §7b): a misclick must be undoable from the UI, so a
+// live row stays re-decidable. 409 is reserved for the one case the store
+// genuinely refuses — a superseded row.
+test("POST review kararlı hükmü yeniden karara bağlar: red→onay ve geri al 200", async () => {
   const { path, verdictId } = seedWithVerdict();
   await withServer(path, async (base) => {
     assert.equal((await postReview(base, verdictId, { decision: "rejected" })).status, 200);
-    const r = await postReview(base, verdictId, { decision: "approved" });
-    assert.equal(r.status, 409);
-    const body = await r.json() as { code: string };
-    assert.equal(body.code, "already_decided");
+
+    const flip = await postReview(base, verdictId, { decision: "approved" });
+    assert.equal(flip.status, 200, "yanlış basılan karar arayüzden düzeltilemiyor");
+    assert.equal((await flip.json() as { row: { review: string } }).row.review, "approved");
+
+    const undo = await postReview(base, verdictId, { decision: "pending" });
+    assert.equal(undo.status, 200);
+    const row = (await undo.json() as { row: { review: string; reviewedAt: string | null } }).row;
+    assert.equal(row.review, "pending");
+    assert.equal(row.reviewedAt, null);
+
+    const store = openStore(path);
+    assert.equal(store.get<{ review: string }>("SELECT review FROM verdicts WHERE id = ?", verdictId)!.review, "pending");
+    store.close();
   });
 });
 

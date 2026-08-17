@@ -8,7 +8,7 @@
 // nodes — API-derived strings never pass through innerHTML.
 
 import {
-  verdictLabel, renderSentence, driftedValues, anchorChip, el, reviewControls, reviewBadge,
+  verdictLabel, renderSentence, driftedValues, anchorChip, el, reviewControls,
 } from "./ui.js";
 
 function shortSha(sha) {
@@ -278,13 +278,9 @@ export function mount(root, ctx, findingId) {
       repeat.dataset.mono = "";
       head.appendChild(repeat);
     }
-    // The ledger is the place a past decision stays readable, so a decided
-    // record keeps its badge instead of silently losing the review row.
-    if (record.review === "pending") {
-      head.appendChild(reviewControls(record.id));
-    } else if (record.review === "approved" || record.review === "rejected") {
-      head.appendChild(reviewBadge(record.review));
-    }
+    // The ledger is the place a past decision stays readable — and, since a
+    // decision is reversible, the place it can be taken back.
+    head.appendChild(reviewControls(record.id, undefined, record.review));
     live.appendChild(head);
     live.appendChild(renderVerdictBody(record));
 

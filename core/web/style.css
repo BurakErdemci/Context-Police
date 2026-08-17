@@ -917,6 +917,18 @@ mark.hl-ev {
 .btn--reject { background: transparent; border-color: var(--line); color: var(--dim); }
 .btn--reject:hover { border-color: #31344288; color: var(--ink); }
 
+/* Undo sits next to a settled badge: quieter than either decision affordance,
+   present enough that a misclick is visibly recoverable. */
+.btn--undo {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+  padding: 5px 8px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.btn--undo:hover { color: var(--ink); }
+
 .btn:disabled { opacity: 0.5; cursor: default; filter: none; }
 
 /* A refused decision speaks in one line next to the controls, never a dialog. */
