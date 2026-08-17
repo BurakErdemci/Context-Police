@@ -1,0 +1,331 @@
+<title>Vaka Defteri</title>
+<style>
+  /* Single-theme on purpose: a paper world, same on any host ground.
+     All interactions are CSS-only (checkbox/radio state) — no JS required. */
+  :root{
+    --desk:#2A2620; --wood:#4A3826; --wood2:#3A2C1E;
+    --paper:#FAF6EC; --paper2:#F3EDDD; --kapak:#B5432E; --kapak2:#93331F;
+    --rule:#C9D6E2; --margin:#E0897C;
+    --ink:#2B2822; --ink-soft:#57524A; --graphite:#6E685E;
+    --red:#C43C2E; --green:#4E8A5A; --hilite:#FFE45C; --postit:#FFF3A8;
+    --hand:"Bradley Hand","Noteworthy","Chalkboard SE","Segoe Print","Comic Sans MS",cursive;
+    --body:"Iowan Old Style","Palatino",Georgia,serif;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0}
+  body{background:var(--desk);color:var(--ink);font:16px/1.5 var(--body);padding:34px 12px 80px}
+  .wrap{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+  header{color:#E8E1D2}
+  header h1{font:700 30px/1.2 var(--hand)}
+  header p{color:#B8B0A0;max-width:74ch;margin-top:6px;font-size:14.5px}
+  .cap{color:#B8B0A0;font-size:13.5px;max-width:82ch}
+  .cap b{color:#E8E1D2}
+  .rozet{display:inline-block; font:700 11px var(--mono); letter-spacing:.12em; color:#E8E1D2;
+    border:1px solid #5A5346; border-radius:999px; padding:3px 10px; margin-bottom:8px}
+  .gizli{position:absolute; opacity:0; pointer-events:none; width:1px; height:1px}
+
+  /* ================= 1) DEDEKTİF MASASI ================= */
+  .masa{
+    background:
+      repeating-linear-gradient(90deg, rgba(0,0,0,.07) 0 3px, transparent 3px 90px),
+      linear-gradient(165deg, var(--wood), var(--wood2));
+    border-radius:10px; padding:30px 30px 36px; position:relative;
+    box-shadow:0 16px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08); overflow:hidden;
+  }
+  .masa::after{content:""; position:absolute; inset:0; pointer-events:none;
+    background:radial-gradient(ellipse 80% 65% at 38% 8%, rgba(255,236,190,.16), transparent 60%)}
+  .masa-baslik{color:#F2E9D4; font:700 24px/1.35 var(--hand); max-width:34ch; text-wrap:balance}
+  .masa-baslik .warn{color:var(--hilite)}
+  .masa-alt{color:#C8BCA2; font:400 13.5px var(--hand); margin-top:4px}
+  .raf{display:flex; gap:26px; margin-top:26px; flex-wrap:wrap; align-items:flex-end}
+  .mini-defter{width:168px; aspect-ratio:3/4; border-radius:5px 12px 10px 5px; position:relative;
+    cursor:pointer; transition:transform .18s ease; flex:none; display:block;
+    box-shadow:0 10px 22px rgba(0,0,0,.45); text-decoration:none; color:inherit}
+  .mini-defter:hover{transform:translateY(-8px) rotate(-1deg)}
+  .mini-defter .serit{position:absolute; top:0; bottom:0; right:14px; width:5px; background:#3E3A32; opacity:.8; border-radius:3px}
+  .mini-defter .etiket{position:absolute; left:12%; right:12%; top:22%;
+    background:var(--paper); padding:10px 8px 8px; text-align:center;
+    border-radius:8px 120px 10px 110px/110px 10px 120px 10px; box-shadow:0 2px 0 rgba(0,0,0,.25)}
+  .mini-defter .etiket b{font:700 15px/1.2 var(--hand)}
+  .mini-defter .etiket small{display:block; font:400 10.5px var(--mono); color:var(--graphite); margin-top:3px}
+  .d-cp{background:linear-gradient(160deg, var(--kapak), var(--kapak2)); transform:rotate(-2deg)}
+  .d-ga{background:linear-gradient(160deg,#3E6B4C,#2E5039); transform:rotate(1.4deg)}
+  .d-jv{background:linear-gradient(160deg,#5B5F76,#454857); transform:rotate(-.6deg); opacity:.72}
+  .pul{position:absolute; bottom:12px; left:50%; transform:translateX(-50%) rotate(-4deg);
+    font:800 12px var(--hand); padding:3px 10px; border-radius:6px; white-space:nowrap}
+  .pul.acil{background:var(--hilite); color:var(--ink); animation:pulsa 2.2s infinite}
+  @keyframes pulsa{50%{transform:translateX(-50%) rotate(-4deg) scale(1.08)}}
+  .pul.tamam{border:2px solid #BFE8CC; color:#BFE8CC}
+  .pul.uyku{border:2px dashed #B9BCCB; color:#B9BCCB}
+  .postitler{position:absolute; right:26px; top:24px; display:flex; flex-direction:column; gap:12px; width:190px}
+  .postit{background:var(--postit); color:var(--ink); font:700 13px/1.35 var(--hand);
+    padding:10px 12px; border-radius:2px; transform:rotate(2.5deg); box-shadow:0 4px 10px rgba(0,0,0,.35); position:relative}
+  .postit small{display:block; font:400 11px var(--mono); color:var(--graphite); margin-top:4px}
+  .postit:nth-child(2){transform:rotate(-2deg); background:#FFE0DB}
+  .atas{position:absolute; top:-9px; left:12px; font-size:15px}
+  @media (max-width:860px){ .postitler{position:static; width:auto; flex-direction:row; flex-wrap:wrap; margin-top:18px} }
+
+  /* ================= 2) DEFTER ================= */
+  .stage{display:flex; justify-content:center; padding:8px 0 14px}
+  .defter{position:relative; width:min(560px,94vw); aspect-ratio:3/3.9; perspective:1900px}
+  .yaprak{position:absolute; inset:0; transform-style:preserve-3d; transform-origin:left center;
+    transition:transform .95s cubic-bezier(.35,.1,.2,1)}
+  .yuz{position:absolute; inset:0; backface-visibility:hidden; border-radius:6px 16px 14px 6px; overflow:hidden}
+  .yuz.arka{transform:rotateY(180deg); background:var(--paper2); border-radius:16px 6px 6px 14px;
+    box-shadow:inset -14px 0 24px rgba(43,40,34,.12); pointer-events:none}
+
+  /* CSS-only state: inputs are the FIRST children of .defter, leaves follow */
+  #ac-kapak:checked ~ #y-kapak{transform:rotateY(-172deg); pointer-events:none}
+  #ac-vaka:checked ~ #y-icindekiler{transform:rotateY(-172deg); pointer-events:none}
+
+  label.tikla{cursor:pointer}
+  .kapak-yuz{
+    background:
+      radial-gradient(circle at 24% 18%, rgba(255,255,255,.10), transparent 45%),
+      repeating-linear-gradient(35deg, rgba(0,0,0,.05) 0 2px, transparent 2px 7px),
+      linear-gradient(160deg, var(--kapak), var(--kapak2));
+    box-shadow:0 18px 44px rgba(0,0,0,.5);
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    color:#F6EBDD; text-align:center; padding:30px;
+  }
+  .kapak-yuz::after{content:""; position:absolute; top:0; bottom:0; right:22px; width:7px;
+    background:#3E3A32; opacity:.85; border-radius:4px}
+  .kapak-etiket{background:var(--paper); color:var(--ink); padding:16px 22px 14px; max-width:78%;
+    border-radius:10px 255px 12px 225px/225px 12px 255px 12px; transform:rotate(-2deg);
+    box-shadow:0 3px 0 rgba(0,0,0,.25)}
+  .kapak-etiket .ust{font:700 12px var(--mono); letter-spacing:.18em; color:var(--graphite)}
+  .kapak-etiket h2{font:800 30px/1.15 var(--hand); margin-top:6px}
+  .kapak-etiket .alt{font:400 14px var(--hand); color:var(--red); margin-top:6px}
+  .kapak-ipucu{font:700 15px var(--hand); opacity:.9}
+
+  .sayfa-yuz{
+    background:
+      repeating-linear-gradient(to bottom, transparent 0 26px, var(--rule) 26px 27px) 0 12px,
+      var(--paper);
+    box-shadow:0 14px 34px rgba(0,0,0,.4);
+    padding:26px 26px 24px 54px; position:relative; display:flex; flex-direction:column;
+  }
+  .sayfa-yuz::before{content:""; position:absolute; top:0; bottom:0; left:38px; width:2px; background:var(--margin); opacity:.6}
+  .delik{position:absolute; left:12px; width:11px; height:11px; border-radius:50%;
+    background:var(--desk); box-shadow:inset 0 1px 2px rgba(0,0,0,.7)}
+  .vaka-etiket{display:inline-block; font:700 12px var(--mono); letter-spacing:.14em;
+    border:2px solid var(--ink); border-radius:255px 12px 225px 12px/12px 225px 12px 255px;
+    padding:3px 10px; transform:rotate(-1.4deg); background:var(--paper2); align-self:flex-start}
+  .h-hand{font:700 22px/1.3 var(--hand); margin-top:12px; text-wrap:balance}
+  .h-hand .hl{background:linear-gradient(transparent 42%, var(--hilite) 42% 92%, transparent 92%); padding:0 3px}
+  .h-hand .redink{color:var(--red)}
+  .not-kucuk{font:400 13px var(--hand); color:var(--graphite); margin-top:4px}
+
+  .icindekiler{margin-top:16px; display:flex; flex-direction:column; gap:8px}
+  .satir-not{display:flex; align-items:center; gap:10px; font:700 15px var(--hand);
+    padding:6px 10px; border-radius:10px 120px 10px 110px/110px 10px 120px 10px;
+    border:1.6px solid transparent}
+  label.satir-not:hover{border-color:var(--ink); background:#FFFDF4}
+  .satir-not .tik{color:var(--green)} .satir-not .carpi{color:var(--red)}
+  .satir-not small{font:400 12px var(--mono); color:var(--graphite); margin-left:auto}
+  .satir-not.sicak{background:linear-gradient(transparent 20%, var(--hilite) 20% 95%, transparent 95%)}
+
+  .dosya-ust{display:flex; gap:20px; align-items:center; margin-top:14px}
+  .ring{position:relative; width:104px; height:104px; flex:none}
+  .ring svg{display:block; transform:rotate(-96deg)}
+  .ring .p1{stroke-dasharray:302; stroke-dashoffset:302; animation:draw 1.4s .3s ease-out forwards}
+  .ring .p2{stroke-dasharray:302; stroke-dashoffset:302; animation:draw 1.6s .45s ease-out forwards; opacity:.5}
+  .ring .num{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; font:700 21px var(--hand)}
+  .ring .num small{font:400 10.5px var(--mono); color:var(--graphite)}
+  @keyframes draw{to{stroke-dashoffset:60}}
+
+  .kart{background:#FFFDF4; border:2px solid var(--ink);
+    border-radius:12px 255px 12px 225px/255px 12px 225px 12px;
+    padding:16px 16px 14px; position:relative; margin-top:14px;
+    box-shadow:3px 4px 0 rgba(43,40,34,.18); transform:rotate(.4deg)}
+  .kart h3{font:700 16px var(--hand)}
+  .kart .teshis{font:14.5px/1.5 var(--body); font-style:italic; color:var(--ink-soft); margin-top:6px}
+  .kart .teshis b{color:var(--red); font-style:normal}
+  .capalar{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap}
+  .capa{font:11.5px var(--mono); border:1.4px dashed var(--graphite); border-radius:8px; padding:2px 8px; color:var(--ink-soft)}
+  .capa.kayip{border-color:var(--red); color:var(--red); text-decoration:line-through}
+  .karar{display:flex; gap:10px; margin-top:14px; align-items:center; flex-wrap:wrap}
+  .btn{font:700 14px var(--hand); color:var(--ink); background:var(--paper2);
+    border:2px solid var(--ink); border-radius:255px 10px 225px 10px/10px 225px 10px 255px;
+    padding:6px 14px; cursor:pointer; display:inline-block}
+  .btn:hover{background:var(--hilite)}
+
+  /* stamp */
+  .muhur{position:absolute; right:14px; top:8px; font:800 21px var(--hand); color:var(--red);
+    border:3px solid var(--red); border-radius:8px; padding:1px 10px;
+    transform:rotate(-14deg) scale(0); opacity:.88; pointer-events:none; letter-spacing:.08em}
+  #k-onay:checked ~ #y-vaka .muhur{animation:stamp .32s cubic-bezier(.2,1.6,.4,1) forwards}
+  @keyframes stamp{60%{transform:rotate(-14deg) scale(1.25)}100%{transform:rotate(-14deg) scale(1)}}
+
+  /* crumple → basket throw (all keyed off #k-red) */
+  #k-red:checked ~ #y-vaka .kart{animation:burus .5s cubic-bezier(.6,-.1,.8,.3) forwards; pointer-events:none}
+  @keyframes burus{
+    30%{transform:rotate(-2deg) scale(.92,.88); border-radius:60px 180px 80px 160px/180px 70px 170px 80px}
+    65%{transform:rotate(5deg) scale(.55,.5); border-radius:45% 55% 40% 60%/55% 45% 60% 40%}
+    100%{transform:rotate(-8deg) scale(.001); opacity:0}
+  }
+  .top{position:absolute; left:40%; top:46%; width:52px; height:52px; z-index:20; pointer-events:none;
+    visibility:hidden}
+  #k-red:checked ~ #y-vaka .top{visibility:visible}
+  .top .x,.top .y{width:100%; height:100%}
+  #k-red:checked ~ #y-vaka .top .x{animation:topX 1s .45s linear both}
+  #k-red:checked ~ #y-vaka .top .y{animation:topY 1s .45s cubic-bezier(.25,-.55,.6,1) both}
+  #k-red:checked ~ #y-vaka .top .govde{animation:topSpin 1s .45s linear both}
+  .top .govde{width:100%; height:100%; border-radius:50%; background:#F1E9D6;
+    border:2px solid var(--ink);
+    box-shadow:inset -8px 6px 0 rgba(43,40,34,.28), inset 4px -4px 0 rgba(43,40,34,.12);
+    background-image:
+      radial-gradient(circle at 30% 30%, transparent 8px, rgba(43,40,34,.18) 8px 9.5px, transparent 9.5px),
+      radial-gradient(circle at 68% 55%, transparent 10px, rgba(43,40,34,.16) 10px 11.5px, transparent 11.5px)}
+  @keyframes topX{0%{transform:translateX(0); visibility:visible}100%{transform:translateX(200px)}}
+  @keyframes topY{0%{transform:translateY(0)}100%{transform:translateY(300px)}}
+  @keyframes topSpin{to{transform:rotate(660deg)}}
+
+  .sepet{position:absolute; right:18px; bottom:14px; width:74px; text-align:center; z-index:15}
+  .sepet .kova{width:74px; height:60px; border:2.4px solid var(--ink); border-top-width:3.2px;
+    border-radius:6px 6px 26px 26px; background:
+      repeating-linear-gradient(93deg, transparent 0 9px, rgba(43,40,34,.25) 9px 11px),
+      var(--paper2); transform-origin:bottom center}
+  #k-red:checked ~ #y-vaka .sepet .kova{animation:salla .5s 1.45s ease-out}
+  @keyframes salla{30%{transform:rotate(-7deg)}60%{transform:rotate(5deg)}85%{transform:rotate(-2deg)}}
+  .sepet .swish{font:800 16px var(--hand); color:var(--red); opacity:0; transform:rotate(-6deg)}
+  #k-red:checked ~ #y-vaka .sepet .swish{animation:swishGoster 1.2s 1.5s ease-out}
+  @keyframes swishGoster{20%{opacity:1; transform:rotate(-6deg) scale(1.2)}80%{opacity:1}100%{opacity:0}}
+  .cop-notu{font:700 13.5px var(--hand); color:var(--graphite); margin-top:10px; opacity:0; transition:opacity .3s}
+  #k-red:checked ~ #y-vaka .cop-notu{opacity:1; transition-delay:1.9s}
+  .cop-notu label{color:var(--red); cursor:pointer; text-decoration:underline}
+
+  .kose{position:absolute; right:10px; bottom:8px; font:700 13px var(--hand); color:var(--graphite);
+    cursor:pointer; padding:6px; z-index:16}
+  .kose:hover{color:var(--ink)}
+  .geri{left:52px; right:auto}
+
+  @media (prefers-reduced-motion: reduce){
+    .yaprak{transition:none}
+    .ring .p1,.ring .p2{animation:none; stroke-dashoffset:60}
+    #k-onay:checked ~ #y-vaka .muhur{animation:none; transform:rotate(-14deg) scale(1)}
+    #k-red:checked ~ #y-vaka .kart{animation:none; opacity:0}
+    #k-red:checked ~ #y-vaka .top{visibility:hidden}
+    .pul.acil{animation:none}
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Vaka Defteri — v3.1</h1>
+    <p>Etkileşim artık tamamen CSS (script yok — önceki sürümde tıklamaların çalışmamasının sebebi buydu). Akış: masadaki kırmızı deftere tıkla → sayfa deftere iner → <b>kapağa tıkla</b> → içindekilerden fosforlu satıra tıkla → vaka sayfasında <b>damga</b> ya da <b>buruştur-sepete-at</b>.</p>
+  </header>
+
+  <section>
+    <span class="rozet">ANA SAYFA · DEDEKTİF MASASI</span>
+    <div class="masa">
+      <div class="masa-baslik">Masada 3 dosya var. İkisi sakin;<br><span class="warn">Context Police'te 4 onay bekliyor!!</span></div>
+      <div class="masa-alt">son devriye: bugün 17:14 · 68 not izleniyor · 2 hüküm bugün sicile işlendi</div>
+      <div class="raf">
+        <a class="mini-defter d-cp" href="#defter" title="tıkla → defter (aşağıda)">
+          <span class="serit"></span>
+          <div class="etiket"><b>CONTEXT POLICE</b><small>20 not · %80</small></div>
+          <span class="pul acil">4 ONAY BEKLİYOR</span>
+        </a>
+        <div class="mini-defter d-ga"><span class="serit"></span>
+          <div class="etiket"><b>GAMACHINE</b><small>28 not · %95</small></div>
+          <span class="pul tamam">SAĞLIKLI ✓</span></div>
+        <div class="mini-defter d-jv"><span class="serit"></span>
+          <div class="etiket"><b>JARVANVAULT</b><small>20 not · %100</small></div>
+          <span class="pul uyku">uyuyor… zzz</span></div>
+      </div>
+      <div class="postitler">
+        <div class="postit"><span class="atas">📎</span>en şüpheli: «masaüstü güven modeli»<small>doğuştan yanlış · 0.70</small></div>
+        <div class="postit">DURUM satırı bayat: «opencode ölçümü»<small>2 sürüm geride</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="defter">
+    <span class="rozet">DEFTER · CONTEXT POLICE</span>
+    <div class="stage">
+      <div class="defter">
+        <input class="gizli" type="checkbox" id="ac-kapak">
+        <input class="gizli" type="checkbox" id="ac-vaka">
+        <input class="gizli" type="radio" name="karar" id="k-yok" checked>
+        <input class="gizli" type="radio" name="karar" id="k-onay">
+        <input class="gizli" type="radio" name="karar" id="k-red">
+
+        <!-- leaf: vaka (en altta) -->
+        <div class="yaprak" id="y-vaka" style="z-index:1">
+          <div class="yuz sayfa-yuz">
+            <span class="delik" style="top:12%"></span><span class="delik" style="top:50%"></span><span class="delik" style="top:88%"></span>
+            <span class="vaka-etiket">VAKA #003 · SAYFA 7</span>
+            <div class="h-hand">«masaüstü güven modeli» — <span class="redink">bu not bana yalan söylüyor!!</span></div>
+            <div class="not-kucuk">(hem de doğduğu günden beri… en kötü tür)</div>
+
+            <div class="kart">
+              <h3>Suçlama: doğuştan yanlışlık</h3>
+              <p class="teshis">Notun dayandığı <b>write_file</b> bu depoda HİÇ yaşamamış — sonek çözümlemesi sıfır eşleşme, 180 commit tarandı. Çapalarından ikisi hayalet çıktı.</p>
+              <div class="capalar"><span class="capa kayip">write_file</span><span class="capa">docs/guven.md</span><span class="capa kayip">adoptLegacyRoot</span></div>
+              <div class="karar">
+                <label class="btn" for="k-onay">TAMAM damgası bas</label>
+                <label class="btn" for="k-red">buruştur, sepete at 🏀</label>
+              </div>
+              <span class="muhur">TAMAM</span>
+            </div>
+            <p class="cop-notu">sepete gitti… ama sicilde duruyor → <label for="k-yok">düzelt, geri aç</label> <span style="font-size:12px">(hiçbir şey silinmez!)</span></p>
+
+            <div class="sepet"><div class="swish">SWISH!</div><div class="kova"></div></div>
+            <div class="top"><div class="x"><div class="y"><div class="govde"></div></div></div></div>
+
+            <label class="kose geri tikla" for="ac-vaka">⟵ içindekilere dön</label>
+          </div>
+          <div class="yuz arka"></div>
+        </div>
+
+        <!-- leaf: içindekiler (ortada) -->
+        <div class="yaprak" id="y-icindekiler" style="z-index:2">
+          <div class="yuz sayfa-yuz">
+            <span class="delik" style="top:12%"></span><span class="delik" style="top:50%"></span><span class="delik" style="top:88%"></span>
+            <span class="vaka-etiket">VAKA #001 · CONTEXT POLICE</span>
+            <div class="h-hand">Bu defterde <span class="hl">20 not</span> var. Dördü bana <span class="redink">bayağı şüpheli</span> göründü!!</div>
+
+            <div class="dosya-ust">
+              <div class="ring">
+                <svg width="104" height="104" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+                  <circle class="p1" cx="60" cy="60" r="48" stroke="var(--ink)" stroke-width="3.6" stroke-linecap="round"/>
+                  <circle class="p2" cx="61" cy="59" r="46" stroke="var(--graphite)" stroke-width="2"/>
+                </svg>
+                <div class="num">%80<small>16/20 temiz</small></div>
+              </div>
+              <div class="not-kucuk" style="font-size:14px">✓×16 temiz (dokunma!)<br>✗×4 şüpheli — listede<br><span style="background:var(--hilite);padding:0 4px">fosforlu = senden iş bekliyor</span></div>
+            </div>
+
+            <div class="icindekiler">
+              <label class="satir-not sicak tikla" for="ac-vaka"><span class="carpi">✗</span> masaüstü güven modeli <small>sf. 7 →</small></label>
+              <label class="satir-not sicak tikla" for="ac-vaka"><span class="carpi">✗</span> opencode ölçümü — DURUM bayat <small>sf. 9 →</small></label>
+              <label class="satir-not tikla" for="ac-vaka"><span class="carpi">✗</span> unity-architect mimarisi <small>sf. 11 →</small></label>
+              <div class="satir-not"><span class="tik">✓</span> kabuk tuzakları (macOS/zsh) <small>temiz</small></div>
+              <div class="satir-not"><span class="tik">✓</span> git commit kuralı <small>temiz</small></div>
+            </div>
+
+            <label class="kose geri tikla" for="ac-kapak">⟵ kapağı kapat</label>
+            <label class="kose tikla" for="ac-vaka">şüpheli vakaya git ➜</label>
+          </div>
+          <div class="yuz arka"></div>
+        </div>
+
+        <!-- leaf: kapak (en üstte) -->
+        <div class="yaprak" id="y-kapak" style="z-index:3">
+          <label class="yuz kapak-yuz tikla" for="ac-kapak">
+            <div class="kapak-etiket">
+              <div class="ust">ÇOK GİZLİ · DOSYA 001</div>
+              <h2>VAKA DEFTERİ</h2>
+              <div class="alt">— Context Police soruşturması —</div>
+            </div>
+            <div class="kapak-ipucu">☞ açmak için tıkla</div>
+          </label>
+          <div class="yuz arka"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <p class="cap"><b>Gerçeğe çeviri:</b> masa = giriş (özet cümle + defter rafı + yapışkan notlarda sıkıntılı yerler) · defter = proje raporu · sayfa = vaka · basket atışı = Reddet geri bildirimi, köşe notu §3.2'yi söylüyor ("sicilde duruyor — geri aç"). Gerçek uygulamada bunlar JS ile daha da akıcı olur (top kartın gerçek konumundan fırlar); maket ortamı script'e izin vermediği için burada saf CSS. Tauri penceresi dikey defter oranında.</p>
+</div>
