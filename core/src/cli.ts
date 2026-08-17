@@ -588,6 +588,10 @@ function printAuditResults(
     if (s.fetchFailed)
       console.log("  ⚠ git fetch başarısız: origin ref'i BAYAT olabilir, ölçüm eski uca karşı koştu (ayrıntı: status)");
     console.log(`  denetlenen: ${s.checked}  şüpheli: ${s.suspects}  temize dönen: ${s.cleared}`);
+    // Bastırma "yapılmayan iş": hiçbir sayaçta görünmezse fazla ısıran bir
+    // bastırma kuralı, denetimin hiçbir şey bulmamasıyla aynı görünür (tasarım §8).
+    if (s.verdictsSuppressed > 0)
+      console.log(`  bastırılan hüküm: ${s.verdictsSuppressed}  (daha önce reddedildi, kanıtı değişmedi — ayrıntı: verdict_suppressed olayları)`);
     // "codex çağrısı" GERÇEK koşum sayısıdır, aday sayısı değil: tek toplu
     // sınıflama yürütücü tekrarı ya da düzeltme turuyla birden çok koşum
     // olabiliyor (Görev 9). Bu yüzden hiçbir yerde "tek çağrı" denmiyor.

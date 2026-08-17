@@ -36,9 +36,10 @@ Readonly garantisinin bilinçli gevşetilmesi budur; sınırı şu:
 `route()`'a metot ayrımı girer (bugün yok; POST'lar GET dalına düşüyor).
 
 - `POST /api/verdicts/:id/review`, gövde `{"decision":"approved"|"rejected"}`.
-- Cevaplar: **200** yazıldı (güncel satırı döner) · **404** id yok ·
-  **409** superseded ya da zaten kararlı (`reviewVerdict`'in reddi HTTP'ye
-  taşınır) · **400** bozuk gövde/decision · **403** başlık eksik.
+- Cevaplar: **200** yazıldı (güncel satırı döner; §7b gereği kararlı canlı
+  satırın yeniden kararı ve `pending`'e geri alınışı da 200'dür) · **404** id
+  yok · **409** yalnız superseded ya da depo dosyası yok · **400** bozuk
+  gövde/decision · **403** başlık eksik.
 - **CSRF kapısı:** istek `X-CP-Review: 1` başlığı taşımak zorunda.
   Cross-origin bir sayfa bu başlığı preflight'sız gönderemez; OPTIONS'a
   cevap verilmez. Web-önizleme döneminin tedbiri; Tauri'de zararsız kalıntı.

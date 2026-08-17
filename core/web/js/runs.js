@@ -45,6 +45,9 @@ function runSentence(detail) {
 const INFO_CHIPS = [
   ["classifyCalls", (n) => `${n} codex çağrısı`],
   ["classifyUnclassified", (n) => `${n} aday sığmadı`],
+  // Suppression is work deliberately NOT done; unwatched, a rule that bites too
+  // hard looks exactly like a clean run (design §8).
+  ["verdictsSuppressed", (n) => `${n} hüküm bastırıldı (önceden reddedildi)`],
 ];
 const WARN_CHIPS = [
   ["measurementFailures", (n) => `${n} ölçüm arızası`],

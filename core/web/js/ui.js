@@ -275,7 +275,14 @@ export function reviewBadge(decision) {
 // UI decision and must stay identical whichever shell (web, Tauri) is talking.
 function reviewErrorText(err) {
   switch (err?.status) {
-    case 409: return "bu hüküm daha yeni bir ölçümle geçersiz kılınmış";
+    // 409 covers two unrelated refusals (serve.ts REVIEW_STATUS): the verdict was
+    // superseded, or the store file is gone. Only the body's `code` separates
+    // them, and telling a user to re-read a note when the store moved sends them
+    // looking for a problem that is not there.
+    case 409:
+      return err?.body?.code === "store_missing"
+        ? "depo dosyası bulunamadı — denetim deposu taşınmış ya da silinmiş olabilir"
+        : "bu hüküm daha yeni bir ölçümle geçersiz kılınmış";
     case 404: return "bu hüküm artık bulunamıyor";
     case 403: return "istek reddedildi — sayfayı yenile";
     case 400: return "istek geçersiz";
