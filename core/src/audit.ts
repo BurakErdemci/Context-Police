@@ -157,6 +157,13 @@ export interface AuditSummary {
    * "kullanıcının onay kuyruğunda ne değişti" demek.
    */
   verdictsRecorded: number;
+  /**
+   * Kullanıcının ZATEN reddettiği ve kanıtı değişmemiş olduğu için hiç
+   * yazılmayan hüküm sayısı (store/verdicts.ts, tasarım §5). Ayrı bir sayaç,
+   * çünkü bastırma "yapılmayan iş" — sessiz kalırsa fazla ısıran bir bastırma
+   * kuralı, denetimin hiçbir şey bulmamasıyla aynı görünür (tasarım §8).
+   */
+  verdictsSuppressed: number;
 }
 
 interface ScoreEntry {
@@ -239,7 +246,7 @@ export async function auditProject(
     classifyDropped: 0, classifyCalls: 0,
     classifyUnclassified: 0, heldUnmeasured: 0, starvedFindings: 0, budgetExhaustedAnchors: 0,
     anchorStates: emptyAnchorStates(), measurementFailures: 0, fetchFailed: false,
-    verdictsRecorded: 0,
+    verdictsRecorded: 0, verdictsSuppressed: 0,
   };
 
   /**
@@ -608,6 +615,7 @@ export async function auditProject(
           method, source: "mechanical", runId,
         });
         if (r.recorded) sum.verdictsRecorded++;
+        else if (r.suppressed) sum.verdictsSuppressed++;
         return;
       }
       if (!s.anchorsMeasured) return;
@@ -620,6 +628,7 @@ export async function auditProject(
         method, source: "mechanical", runId,
       });
       if (r.recorded) sum.verdictsRecorded++;
+      else if (r.suppressed) sum.verdictsSuppressed++;
     }
 
     // Yazım: skor SIFIRDAN (D-M3-3), geçiş active↔suspect (D-M3-9), her şey olaylı.
@@ -697,6 +706,7 @@ export async function auditProject(
             method: "unmeasured-dimension", source: "mechanical", runId,
           });
           if (r.recorded) sum.verdictsRecorded++;
+          else if (r.suppressed) sum.verdictsSuppressed++;
           continue;
         }
         setSuspicion(store, f.id, s.score);
@@ -728,6 +738,7 @@ export async function auditProject(
           method: "classify-rotation", source: "mechanical", runId,
         });
         if (r.recorded) { sum.verdictsRecorded++; sum.starvedFindings++; }
+        else if (r.suppressed) sum.verdictsSuppressed++;
       }
     });
 
@@ -743,6 +754,7 @@ export async function auditProject(
       starvedFindings: sum.starvedFindings,
       budgetExhaustedAnchors: sum.budgetExhaustedAnchors,
       fetchFailed: sum.fetchFailed, verdictsRecorded: sum.verdictsRecorded,
+      verdictsSuppressed: sum.verdictsSuppressed,
       importErrors: sum.import?.errors ?? 0, importRejected: sum.import?.rejected ?? 0,
     });
     return sum;

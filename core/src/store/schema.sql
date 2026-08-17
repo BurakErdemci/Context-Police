@@ -244,6 +244,20 @@ CREATE TABLE IF NOT EXISTS verdicts (
   -- and it is the one field that must be writable in place — a counter that can
   -- only grow by superseding rows is not a counter.
   repeat_count  INTEGER NOT NULL DEFAULT 1,
+  -- Deterministic hash of the evidence this verdict was measured from
+  -- (store/verdicts.ts computeEvidenceFingerprint). It exists so that a verdict
+  -- the user REJECTED is not re-produced while nothing about the measurement
+  -- changed: the next run compares its own fingerprint against the last rejected
+  -- one for the same (finding, reason) and, on a match, writes no row at all.
+  -- NULL is legitimate and means "written before this column existed" — a NULL
+  -- never suppresses, because "same evidence" cannot be claimed without it.
+  --
+  -- Written once, at INSERT, and deliberately NOT in
+  -- verdicts_measurement_immutable's column list: extending that trigger would
+  -- only take effect on fresh stores (ensureGuards checks trigger NAMES, and
+  -- CREATE TRIGGER IF NOT EXISTS does not rewrite an existing one), so migrated
+  -- and fresh stores would enforce different rules on the same column.
+  evidence_fingerprint TEXT,
   -- DEFERRED, and the reason is the unique index below: it is checked per
   -- statement, so the old row must stop being live BEFORE the new row is
   -- inserted — which means pointing it at an id that does not exist yet.

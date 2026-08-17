@@ -5,6 +5,7 @@
 // be offered to the user. K9 forbids writing that text into a memory file, so
 // this table is the only place it lands until the user approves it.
 
+import { createHash } from "node:crypto";
 import type { Store } from "./db.ts";
 import { nowIso } from "./db.ts";
 import { logEvent } from "./events.ts";
@@ -40,6 +41,14 @@ export interface VerdictInput {
   source: VerdictSource;
   runId: string;
   createdAt?: string;
+  /**
+   * Overrides the fingerprint derived from `verdict`+`evidence`. A caller that
+   * measured more than the evidence line says (anchor states, claim text) passes
+   * its own so that suppression compares what was actually measured. Omitted =
+   * derived; there is no way to ask for a NULL one, because a new row with no
+   * fingerprint could never be suppressed and would re-nag forever.
+   */
+  evidenceFingerprint?: string;
 }
 
 export interface VerdictRecord {
@@ -67,6 +76,8 @@ export interface VerdictRecord {
    * edebileceği kalıcı bir arıza.
    */
   repeatCount: number;
+  /** NULL on rows written before the column existed; such a row never suppresses. */
+  evidenceFingerprint: string | null;
 }
 
 export interface RecordedVerdict {
@@ -75,6 +86,13 @@ export interface RecordedVerdict {
   /** False when the conclusion was already on file and no row was written. */
   recorded: boolean;
   supersededId: number | null;
+  /**
+   * The row was not written because the user already rejected this exact
+   * complaint (design §5). Separate from `recorded: false` for the repeat case:
+   * one means "nothing new to say", the other means "the user said no" — and
+   * only the second is a number worth watching (design §8).
+   */
+  suppressed: boolean;
 }
 
 interface VerdictRow {
@@ -95,11 +113,13 @@ interface VerdictRow {
   reviewed_at: string | null;
   superseded_by: number | null;
   repeat_count: number;
+  evidence_fingerprint: string | null;
 }
 
 const COLUMNS =
   "id, project_id, finding_id, claim_ref, verdict, sub_reason, decay_type, evidence, method, " +
-  "correction, source, run_id, created_at, review, reviewed_at, superseded_by, repeat_count";
+  "correction, source, run_id, created_at, review, reviewed_at, superseded_by, repeat_count, " +
+  "evidence_fingerprint";
 
 function toRecord(r: VerdictRow): VerdictRecord {
   return {
@@ -108,8 +128,73 @@ function toRecord(r: VerdictRow): VerdictRecord {
     evidence: r.evidence, method: r.method, correction: r.correction,
     source: r.source, runId: r.run_id, createdAt: r.created_at,
     review: r.review, reviewedAt: r.reviewed_at, supersededBy: r.superseded_by,
-    repeatCount: r.repeat_count,
+    repeatCount: r.repeat_count, evidenceFingerprint: r.evidence_fingerprint,
   };
+}
+
+/**
+ * The identity of the COMPLAINT, without the evidence behind it: two verdicts
+ * with the same reason accuse the note of the same thing. Rejection is scoped to
+ * this — the user dismissed a complaint, not a run.
+ *
+ * `evidence` is deliberately out (it is the other half of the pair: same reason
+ * + same evidence = suppress, same reason + new evidence = ask again), and so
+ * are `source`, `method` and `run_id` — who measured it does not change what is
+ * being claimed.
+ */
+export function verdictReason(v: {
+  verdict: VerdictValue; subReason?: string | null; decayType?: string | null;
+}): string {
+  return `${v.verdict}|${v.subReason ?? ""}|${v.decayType ?? ""}`;
+}
+
+/**
+ * The evidence a verdict rests on, as one stable hash.
+ *
+ * Fields are serialised in alphabetical order and separated by control
+ * characters that cannot occur in a file path, a note or a git output line —
+ * a plain concatenation would let ("a","bc") and ("ab","c") collide, which
+ * would silently suppress a complaint the user never saw.
+ *
+ * `anchorStates` is sorted: the order anchors happen to be iterated in is not
+ * evidence, and letting it into the hash would make every run look like new
+ * evidence and defeat suppression entirely.
+ */
+export function computeEvidenceFingerprint(input: {
+  reason: string; claimText?: string; anchorStates?: string[];
+}): string {
+  const fields: [string, string][] = [
+    ["anchorStates", [...(input.anchorStates ?? [])].sort().join("\u001d")],
+    ["claimText", input.claimText ?? ""],
+    ["reason", input.reason],
+  ];
+  fields.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const payload = fields.map(([k, v]) => `${k}\u001f${v}`).join("\u001e");
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+/**
+ * The most recent REJECTED verdict for a complaint. Superseded rows included on
+ * purpose: the rejection that matters is usually no longer live (a later
+ * measurement withdrew it), which is exactly why `sameConclusion` — which only
+ * looks at the live row — cannot see the re-nag coming.
+ *
+ * `claimRef` omitted = any claim on the note.
+ */
+export function findLastRejected(
+  store: Store, findingId: number, reason: string, claimRef?: string,
+): VerdictRecord | undefined {
+  const reasonSql = "verdict || '|' || IFNULL(sub_reason,'') || '|' || IFNULL(decay_type,'')";
+  const r = claimRef === undefined
+    ? store.get<VerdictRow>(
+        `SELECT ${COLUMNS} FROM verdicts WHERE finding_id = ? AND review = 'rejected' ` +
+          `AND ${reasonSql} = ? ORDER BY id DESC LIMIT 1`,
+        findingId, reason)
+    : store.get<VerdictRow>(
+        `SELECT ${COLUMNS} FROM verdicts WHERE finding_id = ? AND claim_ref = ? AND review = 'rejected' ` +
+          `AND ${reasonSql} = ? ORDER BY id DESC LIMIT 1`,
+        findingId, claimRef, reason);
+  return r === undefined ? undefined : toRecord(r);
 }
 
 /**
@@ -145,7 +230,35 @@ export function recordVerdict(store: Store, input: VerdictInput): RecordedVerdic
       // düşmüyor — bir kere ölçülüp yüz kere teyit edilen bir hüküm, günlüğü
       // yüz satırla doldurmadan sayıdan okunabilmeli.
       store.run("UPDATE verdicts SET repeat_count = repeat_count + 1 WHERE id = ?", live.id);
-      return { id: live.id, recorded: false, supersededId: null };
+      return { id: live.id, recorded: false, supersededId: null, suppressed: false };
+    }
+
+    // The user already dismissed this exact complaint (design §5). The check
+    // lives HERE, at the one place a verdict row is born, because every caller
+    // (audit's three branches, the adjudicator later) would otherwise need its
+    // own copy — and a suppression rule that one caller forgets is a rule that
+    // does not exist.
+    //
+    // AFTER the repeat branch on purpose: a still-live rejected verdict being
+    // re-measured is a repeat, not a suppression, and counting it as the latter
+    // would inflate the one number design §8 asks us to watch.
+    const reason = verdictReason(input);
+    const fingerprint = input.evidenceFingerprint
+      ?? computeEvidenceFingerprint({ reason, claimText: input.evidence ?? undefined });
+    const rejected = findLastRejected(store, input.findingId, reason, claimRef);
+    if (rejected !== undefined && rejected.evidenceFingerprint === fingerprint) {
+      // Nothing is deleted and nothing is hidden: the non-production is itself a
+      // record, so a suppression rule that bites too hard is measurable rather
+      // than invisible (design §8).
+      logEvent(store, {
+        projectId: input.projectId,
+        kind: "verdict_suppressed",
+        detail: {
+          runId: input.runId, findingId: input.findingId, claimRef, reason, fingerprint,
+          rejectedVerdictId: rejected.id,
+        },
+      });
+      return { id: live?.id ?? rejected.id, recorded: false, supersededId: null, suppressed: true };
     }
 
     // Id is allocated by hand because the supersession pointer has to be written
@@ -160,11 +273,12 @@ export function recordVerdict(store: Store, input: VerdictInput): RecordedVerdic
     }
     store.run(
       "INSERT INTO verdicts (id, project_id, finding_id, claim_ref, verdict, sub_reason, decay_type, " +
-        "evidence, method, correction, source, run_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "evidence, method, correction, source, run_id, created_at, evidence_fingerprint) " +
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, input.projectId, input.findingId, claimRef, input.verdict,
       input.subReason ?? null, input.decayType ?? null, input.evidence ?? null,
       input.method ?? null, input.correction ?? null, input.source, input.runId,
-      input.createdAt ?? nowIso(),
+      input.createdAt ?? nowIso(), fingerprint,
     );
 
     // Same transaction as the row it describes: an event saying "verdict
@@ -180,7 +294,7 @@ export function recordVerdict(store: Store, input: VerdictInput): RecordedVerdic
         hasCorrection: (input.correction ?? null) !== null,
       },
     });
-    return { id, recorded: true, supersededId: live?.id ?? null };
+    return { id, recorded: true, supersededId: live?.id ?? null, suppressed: false };
   });
 }
 

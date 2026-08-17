@@ -105,6 +105,28 @@ function migrate(db: DatabaseSync): void {
   migrateScanLock(db);
   migrateClassifyStamps(db);
   migrateVerdictRepeatCount(db);
+  migrateVerdictEvidenceFingerprint(db);
+}
+
+/**
+ * `verdicts.evidence_fingerprint` eklendi (schema.sql'de gerekçe). ALTER şart:
+ * sütunsuz bir depoda `recordVerdict`in INSERT'ü ve tüm hüküm SELECT'leri "no
+ * such column" ile patlar — yani denetim hiç hüküm yazamaz.
+ *
+ * Sütun NULLABLE ve varsayılanı yok: var olan satırların kanıt parmak izi
+ * BİLİNMİYOR ve uydurulamaz. Bastırma yalnız parmak izi eşleşmesiyle işlediği
+ * için NULL doğru davranışı kendiliğinden veriyor — eski bir red, yeni bir
+ * hükmü sessizce yutamaz.
+ *
+ * SCHEMA_GENERATION bilerek ARTIRILMADI (`repeat_count` ile aynı gerekçe):
+ * sütun nullable, onu hiç anmayan eski kod bu depoya yazmaya devam edebiliyor.
+ */
+function migrateVerdictEvidenceFingerprint(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(verdicts)").all() as { name: string }[];
+  if (cols.length === 0) return; // tablo yok: schema.sql onu güncel hâliyle yarattı
+  if (!cols.some((c) => c.name === "evidence_fingerprint")) {
+    db.exec("ALTER TABLE verdicts ADD COLUMN evidence_fingerprint TEXT");
+  }
 }
 
 /**

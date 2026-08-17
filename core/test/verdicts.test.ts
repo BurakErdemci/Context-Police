@@ -396,6 +396,54 @@ test("göç: tekrar sayacı VAR OLAN depoya geliyor, eski satırlar 1'den başl�
   yeni.close();
 });
 
+test("göç: kanıt parmak izi VAR OLAN depoya geliyor, parmak izsiz red bastırmıyor", () => {
+  // CLAUDE.md §7 again: the column is added to a store that ALREADY has the
+  // verdicts table and rows in it — `CREATE TABLE IF NOT EXISTS` would not.
+  const path = tmpStorePath();
+  const ilk = openStore(path);
+  const projectId = Number(ilk.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)", "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(ilk, {
+    projectId, source: "imported", content: "not", sourceRef: "n.md",
+    anchors: [{ kind: "file_path", value: "src/a.ts" }],
+  });
+  const id = recordVerdict(ilk, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "e1", source: "mechanical", runId: "r1",
+  }).id;
+  reviewVerdict(ilk, id, "rejected");
+  // Withdraw it, so the rejected row is no longer live: that is the state in
+  // which suppression is the only thing standing between the user and a
+  // re-queued complaint they already dismissed.
+  recordVerdict(ilk, {
+    projectId, findingId, verdict: "olculemez", subReason: "anchor-evidence-cleared",
+    evidence: "kanıt yok", source: "mechanical", runId: "r2",
+  });
+  ilk.close();
+
+  const eski = new DatabaseSync(path);
+  eski.exec("ALTER TABLE verdicts DROP COLUMN evidence_fingerprint");
+  eski.close();
+
+  const yeni = openStore(path); // göç yolu: var olan dosya üzerinde
+  const cols = yeni.all<{ name: string }>("SELECT name FROM pragma_table_info('verdicts')").map((c) => c.name);
+  assert.ok(cols.includes("evidence_fingerprint"), "sütun gelmedi: her hüküm yazımı 'no such column' ile patlar");
+  assert.equal(getVerdict(yeni, id)!.evidenceFingerprint, null, "eski satıra parmak izi uyduruldu");
+
+  // Fingerprint-less rejection MUST NOT suppress: the store cannot know whether
+  // the evidence is the same one the user dismissed, and silently dropping a
+  // decay report is the one failure mode this tool cannot have.
+  const again = recordVerdict(yeni, {
+    projectId, findingId, verdict: "curuk", decayType: "dosya-silindi",
+    evidence: "e1", source: "mechanical", runId: "r3",
+  });
+  assert.equal(again.recorded, true, "parmak izsiz eski red, yeni hükmü sessizce yuttu");
+  assert.equal(again.suppressed, false);
+  assert.notEqual(getVerdict(yeni, again.id)!.evidenceFingerprint, null, "göç sonrası yazımda parmak izi yok");
+  yeni.close();
+});
+
 test("göç: GERÇEK deponun kopyası açılır, hüküm tablosu belirir, var olan satırlar durur", (t) => {
   const real = join(homedir(), ".context-police", "store.db");
   if (!existsSync(real)) return t.skip("gerçek depo yok — bu makinede ölçülemez");
@@ -534,6 +582,39 @@ test("çapa kanıtı geri geldiğinde hüküm SİLİNMEZ, olculemez ile geri çe
     rmSync(join(repo, "src", "silinecek.ts"));
     git("add", "-A"); git("commit", "-qm", "yeniden silindi");
   }
+  store.close();
+});
+
+test("reddedilen hüküm kanıtı değişmeden geri gelmez — bastırma denetim yolunda da işliyor", async () => {
+  // The store-level tests stage this by hand; this one stages it the way it
+  // actually happens: audit → user rejects → evidence goes away → evidence comes
+  // back. Without suppression the fourth step re-queues a complaint the user
+  // already dismissed, and no store-level test can prove the audit path reaches
+  // the choke point.
+  const { store, project } = auditSetup();
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const finding = listActive(store, project.id)[0]!;
+  const first = getLiveVerdict(store, finding.id)!;
+  assert.equal(first.verdict, "curuk");
+  assert.equal(reviewVerdict(store, first.id, "rejected"), true);
+
+  const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" }).trim();
+  writeFileSync(join(repo, "src", "silinecek.ts"), "export const a = 3;\n");
+  git("add", "-A"); git("commit", "-qm", "geri kondu");
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  assert.equal(getLiveVerdict(store, finding.id)!.verdict, "olculemez", "red hükmü hâlâ canlı: kurulum tutmadı");
+
+  rmSync(join(repo, "src", "silinecek.ts"));
+  git("add", "-A"); git("commit", "-qm", "yeniden silindi");
+  const sum = await auditProject(store, project, { executor: noContradictions(), fetch: false });
+
+  assert.equal(sum.verdictsSuppressed, 1, "reddedilen şikâyet aynı kanıtla kuyruğa geri döndü");
+  assert.equal(sum.verdictsRecorded, 0);
+  assert.deepEqual(listVerdictHistory(store, finding.id).map((v) => v.verdict), ["curuk", "olculemez"]);
+  assert.equal(
+    listEvents(store, { kind: "verdict_suppressed" }).length, 1,
+    "bastırma hiçbir iz bırakmadı: denetim raporundan az iş yapmış olur",
+  );
   store.close();
 });
 

@@ -187,7 +187,15 @@ export type EventKind =
    */
   | "verdict_recorded"
   /** The user approved or rejected a verdict; the rejected share is the tool's error rate. */
-  | "verdict_reviewed";
+  | "verdict_reviewed"
+  /**
+   * A verdict was NOT produced because the user already rejected the same
+   * complaint on the same evidence (design §5). The event is the whole trace:
+   * no row is written, so without it the audit would silently do less than it
+   * reports. `detail.fingerprint` is what makes the suppression falsifiable —
+   * if it bites too hard, this count is where it shows.
+   */
+  | "verdict_suppressed";
 
 export function logEvent(
   store: Store,
