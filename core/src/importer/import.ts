@@ -237,7 +237,14 @@ export async function importMemoryDir(
         createdAt: stamp.iso,
       });
       if (dropped > 0)
-        logEvent(store, { projectId, kind: "import_anchor_overflow", detail: { file: name, kept: anchors.length, dropped } });
+        logEvent(store, {
+          projectId, kind: "import_anchor_overflow",
+          detail: {
+            file: name, kept: anchors.length, dropped,
+            keptMeasurable: anchors.filter((a) => a.kind !== "symbol").length,
+            keptSymbol: anchors.filter((a) => a.kind === "symbol").length,
+          },
+        });
       // Kırpma ve kelepçe olayları kaydın KENDİ tx'inde: ikisi de bu kaydın
       // içeriğini/penceresini anlatıyor, ayrı commit edilirse günlük depoyu
       // yanlış anlatır (yukarıdaki değişmez kural).

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseNote, extractAnchors, noteTimestamp, capNoteContent,
-  MAX_ANCHORS_PER_NOTE, PER_KIND_QUOTA, MAX_NOTE_CHARS,
+  MAX_ANCHORS_PER_NOTE, MAX_ANCHORS_TOTAL, PER_KIND_QUOTA, MAX_NOTE_CHARS,
 } from "../src/importer/parse.ts";
 
 test("parseNote: frontmatter düz alanları okur, gövdeyi ayırır; frontmatter'sız dosya tamamen gövde", () => {
@@ -49,12 +49,15 @@ test("extractAnchors: tavan aşımı sessiz kırpılmaz, dropped sayılır", () 
 test("extractAnchors: tavan M0-D4 önceliğine uyar — yol seli içinde sembol hayatta kalır", () => {
   const paths = Array.from({ length: 30 }, (_, i) => `src/mod${i}/dosya${i}.ts`).join(" ");
   const { anchors, dropped } = extractAnchors(`${paths} ve \`scanOnce\` fonksiyonu`);
-  assert.equal(anchors.length, MAX_ANCHORS_PER_NOTE);
-  assert.equal(dropped, 31 - MAX_ANCHORS_PER_NOTE);
+  // Varyant C: 16'lık bütçe artık yalnız ölçülebilir türlerin, sembol kendi
+  // bütçesinden geliyor — yol sayısı 15'ten 16'ya çıktı, sembol yerinde duruyor.
+  assert.equal(anchors.filter((a) => a.kind !== "symbol").length, MAX_ANCHORS_PER_NOTE);
+  assert.equal(anchors.length, MAX_ANCHORS_PER_NOTE + 1);
+  assert.equal(dropped, 31 - (MAX_ANCHORS_PER_NOTE + 1));
   assert.deepEqual(anchors.filter((a) => a.kind === "symbol").map((a) => a.value), ["scanOnce"]);
   // Aynı tür içinde metin sırası korunur: ilk yollar kalır, kuyruktakiler düşer.
   assert.equal(anchors[1]!.value, "src/mod0/dosya0.ts");
-  assert.equal(anchors.at(-1)!.value, `src/mod${MAX_ANCHORS_PER_NOTE - 2}/dosya${MAX_ANCHORS_PER_NOTE - 2}.ts`);
+  assert.equal(anchors.at(-1)!.value, `src/mod${MAX_ANCHORS_PER_NOTE - 1}/dosya${MAX_ANCHORS_PER_NOTE - 1}.ts`);
 });
 
 // M3 altın set ölçümü §5.1: 260 çapanın %81'i sembol, 28 notun 18'inde SIFIR
@@ -65,12 +68,14 @@ test("extractAnchors: sembol seli file_path'i tavandan atamaz (tür kotası)", (
   const semboller = Array.from({ length: 30 }, (_, i) => `\`sembolAdi${i}\``).join(" ");
   const yollar = "src/a/bir.ts src/b/iki.ts src/c/uc.ts";
   const { anchors, dropped } = extractAnchors(`${semboller} ${yollar}`);
-  assert.equal(anchors.length, MAX_ANCHORS_PER_NOTE);
+  assert.equal(anchors.length, MAX_ANCHORS_TOTAL);
   const byKind = (k: string) => anchors.filter((a) => a.kind === k).map((a) => a.value);
   // Eski davranışta bu liste BOŞ dönüyordu (16'nın 16'sı sembol).
   assert.deepEqual(byKind("file_path"), ["src/a/bir.ts", "src/b/iki.ts", "src/c/uc.ts"]);
-  assert.equal(byKind("symbol").length, MAX_ANCHORS_PER_NOTE - 3);
-  assert.equal(dropped, 33 - MAX_ANCHORS_PER_NOTE);
+  // Varyant C: sembol kendi 6'sını alır, ölçülebilirlerden ARTAN 13 slotu da
+  // devralır (eski davranış korunur, hiçbir sembol düşmez).
+  assert.equal(byKind("symbol").length, PER_KIND_QUOTA + (MAX_ANCHORS_PER_NOTE - 3));
+  assert.equal(dropped, 33 - MAX_ANCHORS_TOTAL);
 });
 
 test("extractAnchors: kota tavanı KÜÇÜLTMEZ — az türlü notta 16 dolu kullanılır", () => {
@@ -78,7 +83,9 @@ test("extractAnchors: kota tavanı KÜÇÜLTMEZ — az türlü notta 16 dolu kul
   // şimdi de vermeli (önce kota kadar, sonra artıklar öncelikle doldurur).
   const text = Array.from({ length: 30 }, (_, i) => `\`tekTurSembol${i}\``).join(" ");
   const { anchors } = extractAnchors(text);
-  assert.equal(anchors.length, MAX_ANCHORS_PER_NOTE);
+  // Varyant C sonrası tek-türlü sembol notunun tavanı 16 değil 22: ölçülebilir
+  // çapa olmadığı için 16'lık bütçenin tamamı artık olarak sembole geçiyor.
+  assert.equal(anchors.length, MAX_ANCHORS_TOTAL);
   assert.ok(MAX_ANCHORS_PER_NOTE > PER_KIND_QUOTA, "kota tek başına tavanı doldurmamalı");
 });
 
@@ -92,16 +99,17 @@ test("extractAnchors: dört tür de kotasından pay alır, öncelik sırası kor
     Array.from({ length: 10 }, (_, i) => `~/dis${i}/y${i}.json`).join(" ");
   const { anchors } = extractAnchors(text);
   const count = (k: string) => anchors.filter((a) => a.kind === k).length;
-  assert.equal(anchors.length, MAX_ANCHORS_PER_NOTE);
-  // Her tür kotası kadar alır: 6+6+6+6 = 24 > 16, o yüzden öncelik sırası kotayı
-  // baştan doldurur ve son türe yer kalmayabilir — ama ilk ikisi tam kotalı.
+  assert.equal(anchors.length, MAX_ANCHORS_TOTAL);
+  // Varyant C: 16'lık bütçe için yalnız ÖLÇÜLEBİLİR üç tür yarışır (6+6+6 = 18 >
+  // 16), sembol ayrı 6'lık gösterim bütçesinden gelir. Eskiden sembol kotası bu
+  // bütçeden çıkıyordu ve external_path'e hiç yer kalmıyordu.
   assert.equal(count("symbol"), PER_KIND_QUOTA);
   assert.equal(count("file_path"), PER_KIND_QUOTA);
-  assert.equal(count("commit_sha"), MAX_ANCHORS_PER_NOTE - 2 * PER_KIND_QUOTA);
-  assert.equal(count("external_path"), 0);
+  assert.equal(count("commit_sha"), PER_KIND_QUOTA);
+  assert.equal(count("external_path"), MAX_ANCHORS_PER_NOTE - 2 * PER_KIND_QUOTA);
   // Çıktı sırası öncelik sırasına göre kararlı kalır.
   assert.equal(anchors[0]!.kind, "symbol");
-  assert.equal(anchors.at(-1)!.kind, "commit_sha");
+  assert.equal(anchors.at(-1)!.kind, "external_path");
 });
 
 test("parseNote: metadata altındaki girintili alanlar okunur, üst seviye kazanır", () => {

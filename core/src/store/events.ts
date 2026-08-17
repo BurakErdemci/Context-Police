@@ -96,8 +96,12 @@ export type EventKind =
    */
   | "import_file_deleted"
   /**
-   * Not MAX_ANCHORS_PER_NOTE tavanını aştı: kırpılan çapalar denetlenmeyecek.
-   * Kırpma sessiz olursa "çapası yok sanılan" bir not denetim dışı kalır.
+   * Not çapa tavanını aştı: kırpılan çapalar denetlenmeyecek. Kırpma sessiz
+   * olursa "çapası yok sanılan" bir not denetim dışı kalır.
+   *
+   * Tavan varyant C'den (17 Ağu 2026) beri TEK sayı değil: 16 ölçülebilir +
+   * 6 gösterim sembolü. Olay bu yüzden `kept`in yanına türe göre dağılımı da
+   * yazar — çıplak "kept: 22" hangi bütçenin dolduğunu söylemiyor.
    */
   | "import_anchor_overflow"
   /**

@@ -106,7 +106,10 @@ test("düşmanca çıktılar, ikinci tur: parser'ın kendi kör noktaları", () 
     ["çapa value eksik", '{"findings":[{"content":"x","anchors":[{"kind":"symbol"}]}]}'],
     ["çapa value sayı", '{"findings":[{"content":"x","anchors":[{"kind":"symbol","value":7}]}]}'],
     ["çapa değeri şişkin", `{"findings":[{"content":"x","anchors":[{"kind":"file_path","value":"${"a".repeat(513)}"}]}]}`],
-    ["çapa sayısı sınır üstü", `{"findings":[{"content":"x","anchors":[${Array.from({ length: 17 }, () => '{"kind":"symbol","value":"s"}').join(",")}]}]}`],
+    // Sınır varyant C ile 22'ye çıktı (16 ölçülebilir + 6 gösterim sembolü);
+    // gerçekten şişkin bir liste hâlâ reddedilmeli.
+    ["çapa sayısı sınır üstü", `{"findings":[{"content":"x","anchors":[${Array.from({ length: 23 }, () => '{"kind":"symbol","value":"s"}').join(",")}]}]}`],
+    ["çapa sayısı çöp kadar çok", `{"findings":[{"content":"x","anchors":[${Array.from({ length: 500 }, () => '{"kind":"symbol","value":"s"}').join(",")}]}]}`],
     ["supersedes sıfır", '{"findings":[{"content":"x","anchors":[],"supersedes":0}]}'],
     ["supersedes dize", '{"findings":[{"content":"x","anchors":[],"supersedes":"12"}]}'],
     ["supersedes NaN benzeri", '{"findings":[{"content":"x","anchors":[],"supersedes":1e999}]}'],
@@ -124,7 +127,8 @@ test("sınır değerler kabul edilir: tam sınırda content, çapa, çapa sayıs
   const okCases: Array<[string, string]> = [
     ["content tam 4000", `{"findings":[{"content":"${"a".repeat(4000)}","anchors":[]}]}`],
     ["çapa değeri tam 512", `{"findings":[{"content":"x","anchors":[{"kind":"file_path","value":"${"a".repeat(512)}"}]}]}`],
-    ["çapa sayısı tam 16", `{"findings":[{"content":"x","anchors":[${Array.from({ length: 16 }, () => '{"kind":"symbol","value":"s"}').join(",")}]}]}`],
+    // Import 22 çapalı not üretebiliyor (varyant C): gözlemci yüzeyi de kabul etmeli.
+    ["çapa sayısı tam 22", `{"findings":[{"content":"x","anchors":[${Array.from({ length: 22 }, () => '{"kind":"symbol","value":"s"}').join(",")}]}]}`],
     ["supersedes 1", '{"findings":[{"content":"x","anchors":[],"supersedes":1}]}'],
   ];
   for (const [ad, raw] of okCases) {

@@ -312,6 +312,12 @@ export const PER_KIND_QUOTA = 6;
 /** Tavan kırpmasının sırası (M0-D4); satır no çapası hiç üretilmediği için listede yok. */
 const ANCHOR_PRIORITY: readonly Anchor["kind"][] = ["symbol", "file_path", "commit_sha", "external_path"];
 
+/** MAX_ANCHORS_PER_NOTE bütçesi için yarışan türler: sembol hariç hepsi (varyant C). */
+const MEASURABLE_PRIORITY: readonly Anchor["kind"][] = ANCHOR_PRIORITY.filter((k) => k !== "symbol");
+
+/** Bir notun taşıyabileceği en çok çapa: 16 ölçülebilir + 6 gösterim sembolü. */
+export const MAX_ANCHORS_TOTAL = MAX_ANCHORS_PER_NOTE + PER_KIND_QUOTA;
+
 // Satır numarası deseni BİLEREK yok (M0-D4): kırılgan ve içerik göstergesi değil.
 // Tire komşulu hex bir commit sha'sı değil: uuid segmentleri tireyle ayrılır ve
 // `\b` tirede eşleştiği için yetersizdi — gerçek hafıza notlarında ölçüldü (Görev 4),
@@ -450,15 +456,30 @@ export function extractAnchors(text: string): { anchors: Anchor[]; dropped: numb
   // türlü notta tavan kısıtlanmasın). Tür içinde metindeki geçiş sırası korunur
   // (kararlı çıktı), çıktı sırası tür önceliğine göre. Sessiz kırpma yok —
   // çağıran dropped'ı olaya yazar (Görev 4).
+  //
+  // VARYANT C (17 Ağu 2026) — 16 ÖLÇÜLEBİLİR + 6 GÖSTERİM SEMBOLÜ.
+  // f161e14'ten beri sembol çapaları gösterim-only: skorlamıyorlar, çapa kayması
+  // onları `unverifiable` diye kısa devre yapıyor. Skorlamayan bir çapanın
+  // skorlayan bir çapayı tavandan atması ölçülebilir yüzeyi bedavaya kaybettiriyordu.
+  // Bu yüzden ilk (kota) turuna YALNIZ ölçülebilir türler girer; semboller
+  // paylaşılan 16'nın dışında kendi 6'lık bütçesinden beslenir.
+  //
+  // Sembolün ARTIK turundaki eski önceliği bilerek KORUNDU: sözleşme eski çıktıya
+  // göre YALNIZCA EKLEME (98 notluk korpusta ölçüldü — 0 çıkarma, 0 sıra değişimi,
+  // +38 ekleme; regresyon: test/cap-variant-c.test.ts). Sembolü artık turundan da
+  // atmak, ölçülebilir çapanın az olduğu notlarda bugün duran sembolleri
+  // DÜŞÜRÜRDÜ. Toplam tavan yine sınırlı: 6'nın üstündeki her sembol paylaşılan
+  // 16'dan gelir, yani not en fazla 22 çapa taşır.
   const byKind = new Map<Anchor["kind"], Anchor[]>(ANCHOR_PRIORITY.map((k) => [k, all.filter((a) => a.kind === k)]));
   const kept = new Map<Anchor["kind"], Anchor[]>(ANCHOR_PRIORITY.map((k) => [k, []]));
   let budget = MAX_ANCHORS_PER_NOTE;
-  for (const kind of ANCHOR_PRIORITY) {
+  for (const kind of MEASURABLE_PRIORITY) {
     if (budget === 0) break;
     const take = Math.min(PER_KIND_QUOTA, byKind.get(kind)!.length, budget);
     kept.get(kind)!.push(...byKind.get(kind)!.slice(0, take));
     budget -= take;
   }
+  kept.get("symbol")!.push(...byKind.get("symbol")!.slice(0, PER_KIND_QUOTA));
   for (const kind of ANCHOR_PRIORITY) {
     if (budget === 0) break;
     const rest = byKind.get(kind)!.slice(kept.get(kind)!.length);

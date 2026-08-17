@@ -100,6 +100,11 @@ test("dropping keyword symbols frees cap budget for real ones", () => {
   // the first 6 of the 16 slots and the last real symbols fell off the end.
   const noise = ["return", "true", "null", "type", "const", "false"];
   const real = Array.from({ length: 18 }, (_, i) => `run_step_${String.fromCharCode(97 + i)}`);
+  // Cap widened by variant C (17 Aug 2026): symbols draw on their own 6-slot
+  // display budget plus whatever the measurable budget leaves, so a symbol-only
+  // note keeps up to 22. If the keywords still counted, the first 6 slots would
+  // be theirs and the last real symbols would fall off — the discrimination the
+  // assertion carries is unchanged.
   const got = values([...noise, ...real].map((w) => `\`${w}\``).join(" "), "symbol");
-  assert.deepEqual(got, real.slice(0, 16));
+  assert.deepEqual(got, real);
 });

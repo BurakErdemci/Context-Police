@@ -7,6 +7,7 @@
 import type { Anchor, AnchorKind, Finding, Turn } from "../types.ts";
 import { DATA_FENCE_RULE, fenceUntrusted } from "../prompt-fence.ts";
 import { anchorValueError, normalizeAnchorValue } from "../anchor-value.ts";
+import { MAX_ANCHORS_TOTAL } from "../importer/parse.ts";
 
 export interface StateTitle {
   id: number;
@@ -22,7 +23,15 @@ export interface ObserverItem {
 const TITLE_MAX = 80;
 const CONTENT_MAX = 4000;
 const ANCHOR_VALUE_MAX = 512;
-const ANCHORS_MAX = 16;
+/**
+ * Bir maddenin taşıyabileceği çapa sayısı: import yüzeyinin tavanıyla AYNI
+ * sayı olmak zorunda. Varyant C (17 Ağu 2026) tavanı böldü — 16 ölçülebilir +
+ * 6 gösterim sembolü — ve import artık 22 çapalı not üretebiliyor; 16'da kalan
+ * bir doğrulama, iki yüzeyi sessizce ayırıp import'un geçerli saydığı bir notu
+ * gözlemci yüzeyinde reddederdi. Sabit değil TÜRETİLMİŞ: sayı tek yerde
+ * (parse.ts) değişsin.
+ */
+const ANCHORS_MAX = MAX_ANCHORS_TOTAL;
 const STATE_BUDGET_CHARS = 10_000; // ~2.5k token (spec §3.3: durum ~2-3k)
 
 /**
