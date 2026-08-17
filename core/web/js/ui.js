@@ -1,3 +1,5 @@
+import { postReview } from "./api.js";
+
 // Shared visual dictionary (tasarim-notu.md): rings, bands, sparklines,
 // meters, chips, and the Turkish sentence helpers. Everything here builds
 // DOM via createElement — API-derived strings only ever pass through
@@ -260,36 +262,25 @@ export function handleStoreStates(payload, showMessage) {
   return false;
 }
 
-/* --- mock review (display-only preview) -------------------------------------
-   State lives ONLY in sessionStorage: it survives the 3s poll re-render but
-   resets with the browser, and nothing is ever sent to the server. The hint
-   text next to the progress bar states this boundary to the user. */
+/* --- review --------------------------------------------------------------- */
 
-const MOCK_REVIEW_KEY = "cp-mock-review";
-
-function readMockMap() {
-  try {
-    const m = JSON.parse(sessionStorage.getItem(MOCK_REVIEW_KEY) ?? "{}");
-    return m !== null && typeof m === "object" ? m : {};
-  } catch {
-    return {};
-  }
+/** Decided-state chip. Also the post-success state of `reviewControls`. */
+export function reviewBadge(decision) {
+  return decision === "approved"
+    ? el("span", "status status--approved", "ONAYLANDI")
+    : el("span", "status status--rejected", "REDDEDİLDİ");
 }
 
-/** "approved" | "rejected" | null for a verdict id. */
-export function mockReviewGet(verdictId) {
-  const v = readMockMap()[String(verdictId)];
-  return v === "approved" || v === "rejected" ? v : null;
-}
-
-export function mockReviewSet(verdictId, decision) {
-  const m = readMockMap();
-  if (decision === null) delete m[String(verdictId)];
-  else m[String(verdictId)] = decision;
-  try {
-    sessionStorage.setItem(MOCK_REVIEW_KEY, JSON.stringify(m));
-  } catch {
-    /* storage full/blocked: the preview degrades to stateless buttons */
+// Mapped from the status code, not from the server's message: the wording is a
+// UI decision and must stay identical whichever shell (web, Tauri) is talking.
+function reviewErrorText(err) {
+  switch (err?.status) {
+    case 409: return "bu hüküm zaten kararlı ya da geçersiz kılınmış";
+    case 404: return "bu hüküm artık bulunamıyor";
+    case 403: return "istek reddedildi — sayfayı yenile";
+    case 400: return "istek geçersiz";
+    case 0: return "sunucuya ulaşılamadı";
+    default: return "karar kaydedilemedi";
   }
 }
 
@@ -297,7 +288,11 @@ export function mockReviewSet(verdictId, decision) {
  * Chip + Onayla/Reddet buttons for one or more verdict ids (a case card can
  * speak for several grouped verdicts; the sicil card passes one). Amber lives
  * only on the undecided state — once decided, the chip goes green/gray and the
- * amber affordance disappears. `onChange` fires after every state flip.
+ * amber affordance disappears.
+ *
+ * The decision is written to the store here and now. There is no undo button:
+ * the server has no un-review, and a button whose click can only ever 409 is a
+ * lie. `onChange(ids, decision)` fires only after the write actually landed.
  */
 export function reviewControls(verdictIds, onChange) {
   const ids = Array.isArray(verdictIds) ? verdictIds : [verdictIds];
@@ -307,34 +302,54 @@ export function reviewControls(verdictIds, onChange) {
     box.addEventListener(type, (e) => e.stopPropagation());
   }
 
+  let busy = false;
+
   const btn = (className, label, go) => {
     const b = el("button", className, label);
     b.type = "button";
+    b.disabled = busy;
     b.addEventListener("click", go);
     return b;
   };
 
-  function render() {
+  function renderPending(errorText) {
     box.textContent = "";
-    const state = mockReviewGet(ids[0]);
-    if (state === null) {
-      box.appendChild(el("span", "status status--wait", "ONAY BEKLİYOR"));
-      box.appendChild(btn("btn btn--approve", "Onayla", () => decide("approved")));
-      box.appendChild(btn("btn btn--reject", "Reddet", () => decide("rejected")));
-    } else {
-      const cls = state === "approved" ? "status status--approved" : "status status--rejected";
-      box.appendChild(el("span", cls, state === "approved" ? "ONAYLANDI" : "REDDEDİLDİ"));
-      box.appendChild(btn("btn btn--undo", "geri al", () => decide(null)));
+    box.appendChild(el("span", "status status--wait", "ONAY BEKLİYOR"));
+    box.appendChild(btn("btn btn--approve", "Onayla", () => decide("approved")));
+    box.appendChild(btn("btn btn--reject", "Reddet", () => decide("rejected")));
+    if (errorText !== undefined) {
+      const line = el("span", "review-error", errorText);
+      line.setAttribute("role", "status");
+      box.appendChild(line);
     }
   }
 
-  function decide(decision) {
-    for (const id of ids) mockReviewSet(id, decision);
-    render();
-    if (onChange !== undefined) onChange();
+  function renderDecided(decision) {
+    box.textContent = "";
+    box.appendChild(reviewBadge(decision));
   }
 
-  render();
+  async function decide(decision) {
+    if (busy) return;
+    busy = true;
+    renderPending(); // clears any previous error and disables both buttons
+    try {
+      // Sequential on purpose: the first refusal stops the rest, so a grouped
+      // card cannot half-decide beyond the one request already in flight.
+      for (const id of ids) await postReview(id, decision);
+      busy = false;
+      renderDecided(decision);
+      if (onChange !== undefined) onChange(ids, decision);
+    } catch (err) {
+      // Nothing sticks in the UI: back to the undecided controls plus one line.
+      // Any ids written before the failure drop out of the queue on the next
+      // poll refresh, which is the same reconciliation every screen already does.
+      busy = false;
+      renderPending(reviewErrorText(err));
+    }
+  }
+
+  renderPending();
   return box;
 }
 

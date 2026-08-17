@@ -897,7 +897,7 @@ mark.hl-ev {
   color: var(--ink);
 }
 
-/* --- mock review (display-only) ---------------------------------------------- */
+/* --- review ------------------------------------------------------------------ */
 
 .review-box { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
@@ -917,16 +917,14 @@ mark.hl-ev {
 .btn--reject { background: transparent; border-color: var(--line); color: var(--dim); }
 .btn--reject:hover { border-color: #31344288; color: var(--ink); }
 
-.btn--undo {
-  background: none;
-  border: none;
-  padding: 2px 4px;
-  font: 500 11px/1.4 var(--sans);
-  color: var(--faint);
-  text-decoration: underline dotted;
-  cursor: pointer;
+.btn:disabled { opacity: 0.5; cursor: default; filter: none; }
+
+/* A refused decision speaks in one line next to the controls, never a dialog. */
+.review-error {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--drift);
 }
-.btn--undo:hover { color: var(--dim); }
 
 .status--approved { background: #1E2A24; color: #7ACB9C; border: 1px solid #2A4234; }
 .status--rejected { background: #22242E; color: var(--dim2); border: 1px solid #2C2E3A; }
@@ -949,7 +947,6 @@ mark.hl-ev {
 }
 
 .progress-label { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
-.progress-hint { font-size: 11px; color: var(--faint); font-style: italic; }
 
 /* --- focus / motion --------------------------------------------------------- */
 

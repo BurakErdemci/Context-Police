@@ -8,7 +8,7 @@
 import {
   el, ring, band, bandKey, sparkline, meter, renderSentence, anchorChip,
   anchorlessChip, verdictLabel, relTime, daysSince, possessive, projectStatus, clickable,
-  handleStoreStates, driftedValues, shortPath, COLORS, reviewControls, mockReviewGet,
+  handleStoreStates, driftedValues, shortPath, COLORS, reviewControls,
 } from "./ui.js";
 
 // Sub-reasons that mean "still a candidate for the next classify rotation".
@@ -62,7 +62,7 @@ function caseCard(rows, detail, i, navigate, onDecision) {
   if (rows.length > 1) {
     top.appendChild(el("span", "badge badge--repeat", `+${rows.length - 1} iddia daha`));
   }
-  // Mock review preview: deciding the case decides all its grouped verdicts.
+  // Deciding the case decides all of its grouped verdicts.
   top.appendChild(reviewControls(rows.map((r) => r.id), onDecision));
   node.appendChild(top);
 
@@ -99,6 +99,9 @@ export function mount(root, ctx, projectId) {
   let loadSeq = 0;
   // Set by renderHero when a progress bar exists; case-card decisions call it.
   let updateProgress = () => {};
+  // Verdicts decided during THIS render. Reset per load because the server
+  // stops listing them as pending, so the next load recomputes from scratch.
+  let decidedIds = new Set();
 
   function showMessage(text) {
     wrap.textContent = "";
@@ -150,17 +153,15 @@ export function mount(root, ctx, projectId) {
     spark.appendChild(since);
     main.appendChild(spark);
 
-    // Mock review progress: green = decided, amber remainder = still waiting.
-    // Display-only preview — the hint states that nothing is persisted.
+    // Review progress: green = decided, amber remainder = still waiting.
     if (pendingIds.length > 0) {
       const prog = el("div", "progress");
       const label = el("span", "progress-label");
       const track = el("div", "progress-track");
       const fill = el("i");
       track.appendChild(fill);
-      const hint = el("span", "progress-hint", "önizleme — kararlar henüz kaydedilmiyor");
       updateProgress = () => {
-        const done = pendingIds.filter((id) => mockReviewGet(id) !== null).length;
+        const done = pendingIds.filter((id) => decidedIds.has(id)).length;
         label.textContent = done === 0
           ? (pendingIds.length === 1
             ? "1 hüküm karar bekliyor"
@@ -169,7 +170,7 @@ export function mount(root, ctx, projectId) {
         fill.style.width = `${Math.round((100 * done) / pendingIds.length)}%`;
       };
       updateProgress();
-      prog.append(label, track, hint);
+      prog.append(label, track);
       main.appendChild(prog);
     } else {
       updateProgress = () => {};
@@ -202,7 +203,11 @@ export function mount(root, ctx, projectId) {
 
     const list = el("div", "case-list");
     groups.forEach((rows, i) => {
-      list.appendChild(caseCard(rows, details.get(rows[0].findingId), i, ctx.navigate, () => updateProgress()));
+      const onDecision = (ids) => {
+        for (const id of ids) decidedIds.add(id);
+        updateProgress();
+      };
+      list.appendChild(caseCard(rows, details.get(rows[0].findingId), i, ctx.navigate, onDecision));
     });
     frag.appendChild(list);
     return frag;
@@ -272,6 +277,7 @@ export function mount(root, ctx, projectId) {
       if (seq !== loadSeq) return;
 
       wrap.textContent = "";
+      decidedIds = new Set();
       wrap.appendChild(renderHero(card, myPending.map((r) => r.id)));
       wrap.appendChild(renderCases(myPending, details));
       wrap.appendChild(renderQuiet(card, candidateCount));

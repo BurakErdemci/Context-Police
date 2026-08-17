@@ -7,7 +7,9 @@
 // All highlighting is built by splitting text into createElement/textContent
 // nodes — API-derived strings never pass through innerHTML.
 
-import { verdictLabel, renderSentence, driftedValues, anchorChip, el, reviewControls } from "./ui.js";
+import {
+  verdictLabel, renderSentence, driftedValues, anchorChip, el, reviewControls, reviewBadge,
+} from "./ui.js";
 
 function shortSha(sha) {
   if (typeof sha !== "string" || sha === "") return "—";
@@ -276,8 +278,12 @@ export function mount(root, ctx, findingId) {
       repeat.dataset.mono = "";
       head.appendChild(repeat);
     }
+    // The ledger is the place a past decision stays readable, so a decided
+    // record keeps its badge instead of silently losing the review row.
     if (record.review === "pending") {
       head.appendChild(reviewControls(record.id));
+    } else if (record.review === "approved" || record.review === "rejected") {
+      head.appendChild(reviewBadge(record.review));
     }
     live.appendChild(head);
     live.appendChild(renderVerdictBody(record));
