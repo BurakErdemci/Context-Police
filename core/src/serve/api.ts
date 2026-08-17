@@ -34,6 +34,7 @@ export type Summary = {
 export type VerdictRow = {
   id: number;
   findingId: number;
+  projectId: number;
   claimRef: string;
   verdict: VerdictValue;
   subReason: string | null;
@@ -178,8 +179,10 @@ export function listVerdicts(store: ReadStore, filters: VerdictFilters = {}): Ve
     params.push(filters.limit ?? 200);
     return store
       .all<Record<string, unknown>>(
-        `SELECT ${VERDICT_COLS}, f.suspicion, f.status AS finding_status, f.content AS finding_content,
-              substr(f.content, 1, 160) AS preview
+        // project_id comes off findings, not verdicts: findings owns the note's
+        // project and the row's other fields are already read from that join.
+        `SELECT ${VERDICT_COLS}, f.project_id, f.suspicion, f.status AS finding_status,
+              f.content AS finding_content, substr(f.content, 1, 160) AS preview
        FROM verdicts v JOIN findings f ON f.id = v.finding_id
        WHERE ${where.join(" AND ")}
        ORDER BY f.suspicion DESC, v.id DESC LIMIT ?`,
@@ -202,6 +205,7 @@ export function listVerdicts(store: ReadStore, filters: VerdictFilters = {}): Ve
         return {
           id: r["id"] as number,
           findingId: r["finding_id"] as number,
+          projectId: r["project_id"] as number,
           claimRef: r["claim_ref"] as string,
           verdict: r["verdict"] as VerdictValue,
           subReason: r["sub_reason"] as string | null,

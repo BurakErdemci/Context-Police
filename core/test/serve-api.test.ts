@@ -14,7 +14,7 @@ import {
 } from "../src/serve/api.ts";
 
 // Fixture: 2 finding; f1 has a superseded chain (curuk -> gecerli), f2 olculemez.
-function fixture(): { path: string; ro: ReadStore; f1: number; f2: number } {
+function fixture(): { path: string; ro: ReadStore; p: number; f1: number; f2: number } {
   const path = tmpStorePath();
   const store = openStore(path);
   const projectId = Number(store.run(
@@ -44,7 +44,7 @@ function fixture(): { path: string; ro: ReadStore; f1: number; f2: number } {
   });
   logEvent(store, { projectId, kind: "audit_completed", detail: JSON.stringify({ verdictsRecorded: 3 }) });
   store.close();
-  return { path, ro: openStoreReadonly(path), f1, f2 };
+  return { path, ro: openStoreReadonly(path), p: projectId, f1, f2 };
 }
 
 test("summary canlı hükümleri sayar", () => {
@@ -77,6 +77,46 @@ test("listVerdicts subReason alt dize eşleşir, tam eşleşme değil", () => {
   const combined = listVerdicts(ro, { verdict: "olculemez", subReason: "classify" });
   assert.equal(combined.length, 1);
   assert.equal(combined[0]!.findingId, f2);
+  ro.close();
+});
+
+test("listVerdicts satırları projectId taşır", () => {
+  const { ro, p } = fixture();
+  const rows = listVerdicts(ro);
+  assert.equal(rows.length, 2);
+  for (const row of rows) assert.equal(row.projectId, p);
+  ro.close();
+});
+
+// The field exists so the explorer can filter the queue by project without a
+// per-finding detail fetch; two projects in one store is the case that proves it.
+test("listVerdicts projectId satırı kendi projesine bağlar", () => {
+  const path = tmpStorePath();
+  const store = openStore(path);
+  const ids = ["/a-proje", "/z-proje"].map((projectPath) => Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)",
+    projectPath, "claude-code", "/t",
+  ).lastInsertRowid));
+  const [projectA, projectB] = ids as [number, number];
+  const fA = appendFinding(store, {
+    projectId: projectA, source: "imported", content: "a notu", sourceRef: "a.md", anchors: [],
+  });
+  const fB = appendFinding(store, {
+    projectId: projectB, source: "imported", content: "b notu", sourceRef: "b.md", anchors: [],
+  });
+  recordVerdict(store, {
+    projectId: projectA, findingId: fA, verdict: "curuk", subReason: null,
+    evidence: "a", method: "anchor-drift", source: "mechanical", runId: "r1",
+  });
+  recordVerdict(store, {
+    projectId: projectB, findingId: fB, verdict: "curuk", subReason: null,
+    evidence: "b", method: "anchor-drift", source: "mechanical", runId: "r1",
+  });
+  store.close();
+  const ro = openStoreReadonly(path);
+  const byFinding = new Map(listVerdicts(ro).map((r) => [r.findingId, r.projectId]));
+  assert.equal(byFinding.get(fA), projectA);
+  assert.equal(byFinding.get(fB), projectB);
   ro.close();
 });
 

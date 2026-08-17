@@ -1,9 +1,9 @@
 // Proje raporu (diagnosis report): hero ring + one serif verdict sentence +
 // band + sparkline, then "bakmanı isteyen N vaka" case cards, then quiet rows.
 //
-// /api/verdicts rows carry no project id, so the rows are joined to their
-// project client-side through /api/findings/:id (one fetch per unique finding,
-// pending + candidate rows only — bounded by the pending queue's size).
+// /api/verdicts rows carry projectId, so the project filter costs no fetch.
+// /api/findings/:id is still fetched for the cards that end up on screen —
+// their anchors live only on the detail.
 
 import {
   el, ring, band, bandKey, sparkline, meter, renderSentence, anchorChip,
@@ -248,21 +248,7 @@ export function mount(root, ctx, projectId) {
       const pendingRows = Array.isArray(pendingAll) ? pendingAll : [];
       const unmeasuredRows = Array.isArray(unmeasuredAll) ? unmeasuredAll : [];
 
-      // Join rows to this project via finding details (cached per id).
-      const ids = new Set();
-      for (const r of pendingRows) ids.add(r.findingId);
-      for (const r of unmeasuredRows) ids.add(r.findingId);
-      const details = new Map();
-      await Promise.all([...ids].map(async (id) => {
-        try {
-          details.set(id, await ctx.apiGet(`/api/findings/${id}`));
-        } catch {
-          /* a missing detail only costs that row its anchors/project match */
-        }
-      }));
-      if (seq !== loadSeq) return;
-
-      const mine = (r) => details.get(r.findingId)?.projectId === projectId;
+      const mine = (r) => r.projectId === projectId;
       const myPending = pendingRows.filter(mine);
       const pendingFindings = new Set(myPending.map((r) => r.findingId));
       const candidateCount = new Set(
@@ -272,6 +258,18 @@ export function mount(root, ctx, projectId) {
             && !pendingFindings.has(r.findingId))
           .map((r) => r.findingId),
       ).size;
+
+      // Anchors are detail-only, so the case cards still need one fetch each —
+      // but only for the findings that actually get a card.
+      const details = new Map();
+      await Promise.all([...pendingFindings].map(async (id) => {
+        try {
+          details.set(id, await ctx.apiGet(`/api/findings/${id}`));
+        } catch {
+          /* a missing detail only costs that card its anchor chips */
+        }
+      }));
+      if (seq !== loadSeq) return;
 
       wrap.textContent = "";
       wrap.appendChild(renderHero(card, myPending.map((r) => r.id)));
