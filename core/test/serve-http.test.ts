@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { openStore } from "../src/store/db.ts";
+import { openStore, openStoreReadonly } from "../src/store/db.ts";
 import { appendFinding } from "../src/store/findings.ts";
 import { recordVerdict } from "../src/store/verdicts.ts";
 import { tmpStorePath, tmpDir } from "./helpers.ts";
@@ -113,6 +113,171 @@ test("yol ön eki sınırı: sibling dizin 404", async () => {
     // Even though root-evil/x.js exists, it's outside the webRoot boundary.
     const sibling = await fetch(`${base}/..%2froot-evil%2fx.js`);
     assert.equal(sibling.status, 404);
+  } finally {
+    await new Promise((res) => server.close(res));
+  }
+});
+
+// --- POST /api/verdicts/:id/review (gerçek onay akışı, tasarım §3) ---
+
+const REVIEW_HEADERS = { "content-type": "application/json", "x-cp-review": "1" };
+
+/** Seeds a store and hands back both the path and the live verdict id. */
+function seedWithVerdict(): { path: string; verdictId: number; findingId: number; projectId: number } {
+  const path = tmpStorePath();
+  const store = openStore(path);
+  const projectId = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)",
+    "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(store, {
+    projectId, source: "imported", content: "not", sourceRef: "n.md", anchors: [],
+  });
+  const rec = recordVerdict(store, {
+    projectId, findingId, verdict: "curuk", subReason: null,
+    evidence: "e", method: "m", source: "mechanical", runId: "r1",
+  });
+  store.close();
+  return { path, verdictId: rec.id, findingId, projectId };
+}
+
+function postReview(
+  base: string, id: number, body: unknown, headers: Record<string, string> = REVIEW_HEADERS,
+): Promise<Response> {
+  return fetch(`${base}/api/verdicts/${id}/review`, {
+    method: "POST",
+    headers,
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+}
+
+test("POST review mutlu yol: 200 ve güncel satır", async () => {
+  const { path, verdictId } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    const r = await postReview(base, verdictId, { decision: "approved" });
+    assert.equal(r.status, 200);
+    const body = await r.json() as { ok: boolean; row: { id: number; review: string; reviewedAt: string | null } };
+    assert.equal(body.ok, true);
+    assert.equal(body.row.id, verdictId);
+    assert.equal(body.row.review, "approved");
+    assert.notEqual(body.row.reviewedAt, null);
+  });
+});
+
+test("POST review başlıksız istek 403", async () => {
+  const { path, verdictId } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    const r = await postReview(base, verdictId, { decision: "approved" }, { "content-type": "application/json" });
+    assert.equal(r.status, 403);
+    // The decision must not have landed.
+    const store = openStore(path);
+    assert.equal(store.get<{ review: string }>("SELECT review FROM verdicts WHERE id = ?", verdictId)!.review, "pending");
+    store.close();
+  });
+});
+
+test("POST review bozuk gövde ve bozuk karar 400", async () => {
+  const { path, verdictId } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    assert.equal((await postReview(base, verdictId, "{bozuk")).status, 400);
+    assert.equal((await postReview(base, verdictId, { decision: "pending" })).status, 400);
+    assert.equal((await postReview(base, verdictId, {})).status, 400);
+  });
+});
+
+test("POST review olmayan id 404", async () => {
+  const { path } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    const r = await postReview(base, 9999, { decision: "approved" });
+    assert.equal(r.status, 404);
+  });
+});
+
+test("POST review zaten kararlı hüküm 409", async () => {
+  const { path, verdictId } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    assert.equal((await postReview(base, verdictId, { decision: "rejected" })).status, 200);
+    const r = await postReview(base, verdictId, { decision: "approved" });
+    assert.equal(r.status, 409);
+    const body = await r.json() as { code: string };
+    assert.equal(body.code, "already_decided");
+  });
+});
+
+test("POST review superseded hüküm 409", async () => {
+  const { path, verdictId, findingId, projectId } = seedWithVerdict();
+  const store = openStore(path);
+  recordVerdict(store, {
+    projectId, findingId, verdict: "gecerli", subReason: null,
+    evidence: "yeniden ölçüldü", method: "m", source: "mechanical", runId: "r2",
+  });
+  store.close();
+  await withServer(path, async (base) => {
+    const r = await postReview(base, verdictId, { decision: "approved" });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json() as { code: string }).code, "superseded");
+  });
+});
+
+test("POST review depo yokken 409 storeMissing (200 DEĞİL)", async () => {
+  const missing = tmpStorePath();
+  await withServer(missing, async (base) => {
+    const r = await postReview(base, 1, { decision: "approved" });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json() as { storeMissing: boolean }).storeMissing, true);
+  });
+});
+
+test("metot ayrımı: GET dışı metotlar 405, review yolunda GET 404", async () => {
+  const { path, verdictId } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    assert.equal((await fetch(`${base}/api/summary`, { method: "POST", headers: REVIEW_HEADERS, body: "{}" })).status, 405);
+    assert.equal((await fetch(`${base}/api/summary`, { method: "DELETE" })).status, 405);
+    assert.equal((await fetch(`${base}/`, { method: "PUT" })).status, 405);
+    // GET on the review route is not a route at all.
+    assert.equal((await fetch(`${base}/api/verdicts/${verdictId}/review`)).status, 404);
+  });
+});
+
+test("OPTIONS'a CORS izni verilmez", async () => {
+  const { path, verdictId } = seedWithVerdict();
+  await withServer(path, async (base) => {
+    const r = await fetch(`${base}/api/verdicts/${verdictId}/review`, { method: "OPTIONS" });
+    assert.equal(r.status, 405);
+    for (const h of ["access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods"]) {
+      assert.equal(r.headers.get(h), null, `${h} verilmemeli`);
+    }
+  });
+});
+
+test("sayım mutabakatı bozuksa 500 döner", async () => {
+  const { path } = seedWithVerdict();
+  const p = nextPort();
+  // Injects a store view whose superseded count is a lie: the reconciliation
+  // has no reachable failure in a healthy store (the CHECK constraint on
+  // `review` makes the identity a tautology), so the tripwire is exercised
+  // through the read seam instead.
+  const server = await startServer({
+    storePath: path,
+    port: p,
+    openRead: (sp) => {
+      const real = openStoreReadonly(sp);
+      return {
+        get<T>(sql: string, ...params: never[]): T | undefined {
+          if (/superseded_by IS NOT NULL/.test(sql)) return { c: 99 } as T;
+          return real.get<T>(sql, ...params);
+        },
+        all: real.all.bind(real),
+        close: real.close.bind(real),
+      };
+    },
+  });
+  try {
+    const r = await fetch(`http://127.0.0.1:${p}/api/summary`);
+    assert.equal(r.status, 500);
+    const body = await r.json() as { error: string; counts?: { total: number } };
+    assert.equal(body.error, "queue_count_mismatch");
+    assert.equal(typeof body.counts?.total, "number");
   } finally {
     await new Promise((res) => server.close(res));
   }

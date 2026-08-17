@@ -6,11 +6,12 @@ import type { ReadStore } from "../src/store/db.ts";
 // old-schema fixture needs a raw writable handle; production code never does this.
 import { DatabaseSync } from "node:sqlite";
 import { appendFinding } from "../src/store/findings.ts";
-import { recordVerdict } from "../src/store/verdicts.ts";
+import { recordVerdict, reviewVerdict } from "../src/store/verdicts.ts";
 import { logEvent } from "../src/store/events.ts";
 import { tmpStorePath } from "./helpers.ts";
 import {
   getSummary, listVerdicts, getFindingDetail, listRuns, getVersion, listProjectCards, SchemaOutdated,
+  QueueCountMismatch,
 } from "../src/serve/api.ts";
 
 // Fixture: 2 finding; f1 has a superseded chain (curuk -> gecerli), f2 olculemez.
@@ -254,5 +255,112 @@ test("eski şemalı depo SchemaOutdated fırlatır", () => {
   raw.close();
   const ro = openStoreReadonly(path);
   assert.throws(() => getSummary(ro), SchemaOutdated);
+  ro.close();
+});
+
+// --- Kuyruk semantiği (tasarım §4) ---
+
+test("bekleyen sayımı DIŞLAMAYLA yapılır, pozitif status filtresiyle değil", () => {
+  const { path, ro, f2 } = fixture();
+  // A row whose `review` is neither approved nor rejected must count as pending
+  // even if its value is not the literal 'pending' — the exclusion form is what
+  // keeps an unknown/absent value from being silently dropped from the queue.
+  assert.equal(getSummary(ro).pending, 2);
+  ro.close();
+
+  const store = openStore(path);
+  const id = store.get<{ id: number }>(
+    "SELECT id FROM verdicts WHERE finding_id = ? AND superseded_by IS NULL", f2,
+  )!.id;
+  reviewVerdict(store, id, "approved");
+  store.close();
+
+  const ro2 = openStoreReadonly(path);
+  const s = getSummary(ro2);
+  assert.equal(s.pending, 1);
+  assert.equal(s.queue.decided, 1);
+  assert.equal(s.queue.superseded, 1);
+  assert.equal(s.queue.total, s.queue.pending + s.queue.decided + s.queue.superseded);
+  // The decided verdict stays visible in the default listing (spec §4:
+  // it does not vanish from the screen the moment it is decided).
+  assert.equal(listVerdicts(ro2).length, 2);
+  assert.equal(listVerdicts(ro2, { review: "pending" }).length, 1);
+  ro2.close();
+});
+
+test("proje kartı bekleyeni de dışlamayla sayar", () => {
+  const { path, ro, f2 } = fixture();
+  assert.equal(listProjectCards(ro)[0]!.pending, 2);
+  ro.close();
+  const store = openStore(path);
+  const id = store.get<{ id: number }>(
+    "SELECT id FROM verdicts WHERE finding_id = ? AND superseded_by IS NULL", f2,
+  )!.id;
+  reviewVerdict(store, id, "rejected");
+  store.close();
+  const ro2 = openStoreReadonly(path);
+  assert.equal(listProjectCards(ro2)[0]!.pending, 1);
+  ro2.close();
+});
+
+test("sayım mutabakatı tutmazsa QueueCountMismatch fırlar", () => {
+  const { path, ro } = fixture();
+  ro.close();
+  const real = openStoreReadonly(path);
+  const lying: ReadStore = {
+    get<T>(sql: string, ...params: never[]): T | undefined {
+      if (/superseded_by IS NOT NULL/.test(sql)) return { c: 99 } as T;
+      return real.get<T>(sql, ...params);
+    },
+    all: real.all.bind(real),
+    close: real.close.bind(real),
+  };
+  assert.throws(() => getSummary(lying), QueueCountMismatch);
+  real.close();
+});
+
+test("review'ı olmayan satır kuyruktan DÜŞMEZ (pozitif filtre düşürürdü)", () => {
+  // The exclusion form only differs from `review = 'pending'` on a store whose
+  // `review` column can hold NULL — a foreign or pre-CHECK store. Without this
+  // fixture the change is untestable: the CHECK constraint makes the two forms
+  // equivalent, so a plain fixture leaves the design claim unfalsified.
+  // Fixture only: writable_schema strips NOT NULL/CHECK from `review`.
+  const path = tmpStorePath();
+  const store = openStore(path);
+  const projectId = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir) VALUES (?,?,?)",
+    "/p", "claude-code", "/t",
+  ).lastInsertRowid);
+  const findingId = appendFinding(store, {
+    projectId, source: "imported", content: "not", sourceRef: "n.md", anchors: [],
+  });
+  store.close();
+
+  const raw = new DatabaseSync(path);
+  raw.exec("PRAGMA writable_schema = ON");
+  const ddl = raw.prepare("SELECT sql FROM sqlite_master WHERE name = 'verdicts'")
+    .get() as { sql: string };
+  const relaxed = ddl.sql.replace(
+    /review\s+TEXT NOT NULL DEFAULT 'pending' CHECK \(review IN \('pending','approved','rejected'\)\)/,
+    "review TEXT",
+  );
+  assert.notEqual(relaxed, ddl.sql, "fixture: review kolonu gevşetilemedi");
+  raw.prepare("UPDATE sqlite_master SET sql = ? WHERE name = ?").run(relaxed, "verdicts");
+  raw.exec("PRAGMA writable_schema = OFF");
+  raw.close();
+
+  const raw2 = new DatabaseSync(path);
+  raw2.prepare(
+    "INSERT INTO verdicts (id, project_id, finding_id, claim_ref, verdict, source, run_id, created_at, review) " +
+      "VALUES (1,?,?,'','curuk','mechanical','r1','2026-01-01', NULL)",
+  ).run(projectId, findingId);
+  raw2.close();
+
+  const ro = openStoreReadonly(path);
+  const s = getSummary(ro);
+  assert.equal(s.pending, 1);
+  assert.equal(s.queue.total, 1);
+  assert.equal(listVerdicts(ro, { review: "pending" }).length, 1);
+  assert.equal(listProjectCards(ro)[0]!.pending, 1);
   ro.close();
 });

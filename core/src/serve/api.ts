@@ -20,6 +20,57 @@ function guard<T>(fn: () => T): T {
   }
 }
 
+/**
+ * The queue is defined by EXCLUSION, not by a positive status match
+ * (design §4): a row counts as pending unless it carries a decision. A
+ * `review = 'pending'` filter drops any row whose value is absent or unknown —
+ * the task-observer lesson: grepping an optional field silently loses the rows
+ * that lack it. `IFNULL` covers a NULL that a pre-CHECK store could hold.
+ */
+const DECIDED = "IFNULL(v.review,'pending') IN ('approved','rejected')";
+const PENDING = `v.superseded_by IS NULL AND NOT (${DECIDED})`;
+
+export type QueueCounts = {
+  total: number;
+  pending: number;
+  decided: number;
+  superseded: number;
+};
+
+/** Thrown when the queue partition does not add up; never swallowed. */
+export class QueueCountMismatch extends Error {
+  readonly counts: QueueCounts;
+  constructor(counts: QueueCounts) {
+    super(
+      `queue counts do not reconcile: total=${counts.total} != pending=${counts.pending} + ` +
+        `decided=${counts.decided} + superseded=${counts.superseded}`,
+    );
+    this.counts = counts;
+  }
+}
+
+/**
+ * The single reconciliation point. Every verdict row is in exactly one of three
+ * buckets; if the arithmetic breaks, the API errors instead of quietly showing
+ * a queue that has lost rows.
+ */
+export function queueCounts(store: ReadStore): QueueCounts {
+  return guard(() => {
+    const count = (where: string): number =>
+      store.get<{ c: number }>(`SELECT COUNT(*) c FROM verdicts v WHERE ${where}`)?.c ?? 0;
+    const counts: QueueCounts = {
+      total: count("1 = 1"),
+      pending: count(PENDING),
+      decided: count(`v.superseded_by IS NULL AND ${DECIDED}`),
+      superseded: count("v.superseded_by IS NOT NULL"),
+    };
+    if (counts.total !== counts.pending + counts.decided + counts.superseded) {
+      throw new QueueCountMismatch(counts);
+    }
+    return counts;
+  });
+}
+
 const VERDICT_COLS = `v.id, v.finding_id, v.claim_ref, v.verdict, v.sub_reason,
   v.decay_type, v.evidence, v.method, v.correction, v.source, v.run_id,
   v.created_at, v.review, v.reviewed_at, v.superseded_by, v.repeat_count`;
@@ -27,6 +78,7 @@ const VERDICT_COLS = `v.id, v.finding_id, v.claim_ref, v.verdict, v.sub_reason,
 export type Summary = {
   counts: Partial<Record<VerdictValue, number>>;
   pending: number;
+  queue: QueueCounts;
   findings: number;
   projects: { id: number; path: string }[];
 };
@@ -144,14 +196,12 @@ export function getSummary(store: ReadStore): Summary {
     for (const row of store.all<{ verdict: VerdictValue; c: number }>(
       "SELECT verdict, COUNT(*) c FROM verdicts WHERE superseded_by IS NULL GROUP BY verdict",
     )) counts[row.verdict] = row.c;
-    const pending = store.get<{ c: number }>(
-      "SELECT COUNT(*) c FROM verdicts WHERE superseded_by IS NULL AND review = 'pending'",
-    )?.c ?? 0;
+    const queue = queueCounts(store);
     const findings = store.get<{ c: number }>("SELECT COUNT(*) c FROM findings")?.c ?? 0;
     const projects = store.all<{ id: number; path: string }>(
       "SELECT id, path FROM projects ORDER BY path",
     );
-    return { counts, pending, findings, projects };
+    return { counts, pending: queue.pending, queue, findings, projects };
   });
 }
 
@@ -165,10 +215,12 @@ export function listVerdicts(store: ReadStore, filters: VerdictFilters = {}): Ve
       ["review", "v.review"],
     ] as const) {
       const val = filters[key];
-      if (val !== undefined) {
-        where.push(`${col} = ?`);
-        params.push(val);
-      }
+      if (val === undefined) continue;
+      // "pending" is not a value to match but the absence of a decision — the
+      // same exclusion the counts use, so list and badge cannot disagree.
+      if (key === "review" && val === "pending") { where.push(`NOT (${DECIDED})`); continue; }
+      where.push(`${col} = ?`);
+      params.push(val);
     }
     // subReason is a substring match (queue.js's placeholder says "alt sebep içerir…"),
     // not exact — value stays a bound parameter, only the wildcards are concatenated.
@@ -341,7 +393,7 @@ export function listProjectCards(store: ReadStore): ProjectCard[] {
       )?.c ?? 0;
       const pending = store.get<{ c: number }>(
         `SELECT COUNT(*) c FROM verdicts v JOIN findings f ON f.id = v.finding_id
-         WHERE f.project_id = ? AND v.superseded_by IS NULL AND v.review = 'pending'`,
+         WHERE f.project_id = ? AND ${PENDING}`,
         p.id,
       )?.c ?? 0;
       const anchorless = store.get<{ c: number }>(
