@@ -663,6 +663,67 @@ test("reddedilen hüküm kanıtı değişmeden geri gelmez — bastırma denetim
   store.close();
 });
 
+// class: truncated-evidence-line-as-identity
+// The evidence line caps at MAX_EVIDENCE_ANCHORS and collapses the rest to
+// "(+N)". Deriving the suppression fingerprint from that line makes two
+// DIFFERENT anchor sets of the same size byte-identical: one file comes back,
+// another dies, and the complaint the user never saw is suppressed by a
+// rejection that was about other files.
+test("kırpılmış kanıt satırı kimlik olamaz: çapa kümesi değiştiyse bastırma tutmaz", async () => {
+  const aliasRepo = tmpDir("cp-alias-repo-");
+  const git = (...a: string[]) => execFileSync("git", ["-C", aliasRepo, ...a], { encoding: "utf8" }).trim();
+  git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t");
+  mkdirSync(join(aliasRepo, "src"));
+  const names = ["a", "b", "c", "d", "e", "f", "g"];
+  const write = (n: string, v: number) =>
+    writeFileSync(join(aliasRepo, "src", `${n}.ts`), `export const ${n} = ${v};\n`);
+  const drop = (n: string) => rmSync(join(aliasRepo, "src", `${n}.ts`));
+  for (const n of names) write(n, 1);
+  git("add", "-A"); git("commit", "-qm", "hepsi");
+
+  // 1. tur: a..f silik, g duruyor → kanıt satırı "a, b, c, d, e (+1)".
+  for (const n of ["a", "b", "c", "d", "e", "f"]) drop(n);
+  git("add", "-A"); git("commit", "-qm", "altisi silindi");
+
+  const memoryDir = tmpDir("cp-alias-mem-");
+  writeFileSync(
+    join(memoryDir, "cok-capa.md"),
+    "---\nname: cok-capa\nmodified: 2020-01-01T00:00:00.000Z\n---\n" +
+      `DURUM: ${names.map((n) => `\`src/${n}.ts\``).join(", ")} üzerinde çalışılıyor.`,
+  );
+  const store = openStore(":memory:");
+  const projectId = Number(store.run(
+    "INSERT INTO projects (path, adapter_id, transcript_dir, memory_dir) VALUES (?,?,?,?)",
+    aliasRepo, "claude-code", "/t", memoryDir,
+  ).lastInsertRowid);
+  const project = { id: projectId, path: aliasRepo, memoryDir };
+
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  const finding = listActive(store, project.id)[0]!;
+  const first = getLiveVerdict(store, finding.id)!;
+  assert.equal(first.verdict, "curuk", "kurulum tutmadı: silinen çapalar hükme dönmedi");
+  assert.equal(reviewVerdict(store, first.id, "rejected"), true);
+
+  // 2. tur: hepsi geri → hüküm olculemez ile geri çekilir, red satırı canlı olmaktan çıkar.
+  for (const n of ["a", "b", "c", "d", "e", "f"]) write(n, 2);
+  git("add", "-A"); git("commit", "-qm", "hepsi geri");
+  await auditProject(store, project, { executor: noContradictions(), fetch: false });
+  assert.equal(getLiveVerdict(store, finding.id)!.verdict, "olculemez", "red hükmü hâlâ canlı: kurulum tutmadı");
+
+  // 3. tur: f duruyor ama g gitti — küme BAŞKA, sayı aynı, kanıt satırı aynı.
+  for (const n of ["a", "b", "c", "d", "e", "g"]) drop(n);
+  git("add", "-A"); git("commit", "-qm", "f geri g gitti");
+  const sum = await auditProject(store, project, { executor: noContradictions(), fetch: false });
+
+  assert.equal(sum.verdictsSuppressed, 0, "başka dosyalar hakkındaki red, hiç görülmemiş bir şikâyeti bastırdı");
+  assert.equal(sum.verdictsRecorded, 1);
+  const live = getLiveVerdict(store, finding.id)!;
+  assert.equal(live.verdict, "curuk");
+  assert.equal(live.review, "pending");
+  assert.equal(live.evidence, first.evidence, "kurulum tutmadı: kanıt satırları zaten farklı, takma ad sınanmıyor");
+  store.close();
+});
+
 test("git yokken hüküm ne verilir ne geri çekilir: ölçmemek hüküm değildir", async () => {
   const { store, project } = auditSetup();
   await auditProject(store, project, { executor: noContradictions(), fetch: false });

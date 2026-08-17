@@ -202,3 +202,41 @@ test("findLastRejected en SON reddi verir, reddedilmemiş satırları görmez", 
   assert.equal(projectId > 0, true);
   store.close();
 });
+
+/**
+ * Re-review finding (17 Aug): `sameConclusion` compares the TRUNCATED display
+ * line, so a still-live REJECTED verdict whose underlying evidence changed
+ * (fingerprint differs, line byte-identical) fell into the repeat branch — the
+ * never-seen complaint reached neither the queue nor the suppression counter.
+ */
+test("canlı reddin kanıtı değişince (satır aynı, parmak izi farklı) tekrar DEĞİL yeni hüküm", () => {
+  const s = seed();
+  const first = recordVerdict(s.store, {
+    ...s, ...DECAYED, source: "mechanical", runId: "r1", evidenceFingerprint: "a".repeat(64),
+  });
+  assert.equal(reviewVerdict(s.store, first.id, "rejected"), true);
+
+  const changed = recordVerdict(s.store, {
+    ...s, ...DECAYED, source: "mechanical", runId: "r2", evidenceFingerprint: "b".repeat(64),
+  });
+  assert.equal(changed.recorded, true, "değişen kanıt tekrar sayıldı: görünmez bastırma");
+  assert.equal(changed.suppressed, false);
+  const live = getLiveVerdict(s.store, s.findingId)!;
+  assert.equal(live.id, changed.id);
+  assert.equal(live.review, "pending", "yeni şikâyet kuyruğa girmedi");
+  s.store.close();
+});
+
+test("canlı reddin parmak izi NULL ise (göç öncesi) davranış tekrar olarak kalır", () => {
+  const s = seed();
+  const first = recordVerdict(s.store, { ...s, ...DECAYED, source: "mechanical", runId: "r1" });
+  assert.equal(reviewVerdict(s.store, first.id, "rejected"), true);
+  s.store.run("UPDATE verdicts SET evidence_fingerprint = NULL WHERE id = ?", first.id);
+
+  const again = recordVerdict(s.store, {
+    ...s, ...DECAYED, source: "mechanical", runId: "r2", evidenceFingerprint: "b".repeat(64),
+  });
+  assert.equal(again.recorded, false, "göç öncesi satır her koşumda yeniden diriltiliyor");
+  assert.equal(again.id, first.id);
+  s.store.close();
+});

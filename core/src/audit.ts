@@ -24,7 +24,9 @@ import { findCoverageCandidates } from "./signals/coverage.ts";
 import { classifyCandidates, MAX_CLASSIFY_ITEMS } from "./signals/classify.ts";
 import { listActive, getAnchors, setSuspicion, markSuspect, clearSuspect } from "./store/findings.ts";
 import { readRotationState, writeClassifyStamps } from "./store/classify-stamps.ts";
-import { recordVerdict, getLiveVerdict, type VerdictValue } from "./store/verdicts.ts";
+import {
+  recordVerdict, getLiveVerdict, computeEvidenceFingerprint, verdictReason, type VerdictValue,
+} from "./store/verdicts.ts";
 import { parseNote } from "./importer/parse.ts";
 import { logEvent, type EventKind } from "./store/events.ts";
 
@@ -181,6 +183,16 @@ interface AnchorEvidence {
   verdict: VerdictValue;
   decayType: string | null;
   evidence: string;
+  /**
+   * The untruncated evidence, for the suppression fingerprint only.
+   *
+   * `evidence` is a DISPLAY string: it caps at MAX_EVIDENCE_ANCHORS and collapses
+   * the rest to "(+N)". Measured (fix round 1): a note with six decayed anchors
+   * renders the same five names either way, so one file coming back while another
+   * dies produces a byte-identical line — and a fingerprint taken from that line
+   * lets a rejection about other files suppress a complaint the user never saw.
+   */
+  fingerprintAnchors: string[];
 }
 
 /** Kanıt metninde listelenecek çapa sayısı: teşhise yeter, satırı şişirmez. */
@@ -191,6 +203,16 @@ function evidenceLine(state: AnchorState, verdicts: AnchorVerdict[]): string {
   const shown = values.slice(0, MAX_EVIDENCE_ANCHORS).join(", ");
   const rest = values.length > MAX_EVIDENCE_ANCHORS ? ` (+${values.length - MAX_EVIDENCE_ANCHORS})` : "";
   return `${state}: ${shown}${rest}`;
+}
+
+/**
+ * Full anchor identity behind an evidence line: every value, untruncated, with
+ * its state. `computeEvidenceFingerprint` sorts the list, so the order anchors
+ * happen to be measured in stays out of the hash. The separator is a control
+ * character no path can carry, so ("a","b:c") and ("a:b","c") cannot collide.
+ */
+function evidenceAnchors(state: AnchorState, verdicts: AnchorVerdict[]): string[] {
+  return verdicts.map((v) => `${state}\u001c${v.anchor.value}`);
 }
 
 /**
@@ -213,10 +235,18 @@ function decisiveAnchorEvidence(verdicts: AnchorVerdict[]): AnchorEvidence | nul
   const of = (s: AnchorState) => verdicts.filter((v) => v.state === s);
   const missing = of("missing_now");
   if (missing.length > 0)
-    return { verdict: "curuk", decayType: "dosya-silindi", evidence: evidenceLine("missing_now", missing) };
+    return {
+      verdict: "curuk", decayType: "dosya-silindi",
+      evidence: evidenceLine("missing_now", missing),
+      fingerprintAnchors: evidenceAnchors("missing_now", missing),
+    };
   const never = of("never_existed");
   if (never.length > 0)
-    return { verdict: "dogustan-yanlis", decayType: null, evidence: evidenceLine("never_existed", never) };
+    return {
+      verdict: "dogustan-yanlis", decayType: null,
+      evidence: evidenceLine("never_existed", never),
+      fingerprintAnchors: evidenceAnchors("never_existed", never),
+    };
   return null;
 }
 
@@ -611,6 +641,12 @@ export async function auditProject(
         const r = recordVerdict(store, {
           projectId: project.id, findingId, verdict: s.decisive.verdict,
           decayType: s.decisive.decayType, evidence: s.decisive.evidence,
+          // Suppression identity comes from the FULL anchor set, not the capped
+          // display line (see AnchorEvidence.fingerprintAnchors).
+          evidenceFingerprint: computeEvidenceFingerprint({
+            reason: verdictReason({ verdict: s.decisive.verdict, decayType: s.decisive.decayType }),
+            anchorStates: s.decisive.fingerprintAnchors,
+          }),
           method, source: "mechanical", runId,
         });
         if (r.recorded) sum.verdictsRecorded++;

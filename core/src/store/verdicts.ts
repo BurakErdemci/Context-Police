@@ -227,9 +227,21 @@ function sameConclusion(a: VerdictRecord, b: VerdictInput): boolean {
  */
 export function recordVerdict(store: Store, input: VerdictInput): RecordedVerdict {
   const claimRef = input.claimRef ?? WHOLE_NOTE;
+  const reason = verdictReason(input);
+  const fingerprint = input.evidenceFingerprint
+    ?? computeEvidenceFingerprint({ reason, claimText: input.evidence ?? undefined });
   return store.tx(() => {
     const live = getLiveVerdict(store, input.findingId, claimRef);
-    if (live !== undefined && sameConclusion(live, input)) {
+    // A live REJECTED row is only a repeat if the fingerprint also matches: the
+    // display line truncates at 5 anchors, so `sameConclusion` alone can read a
+    // changed world as unchanged — and a "repeat" on a rejected row means the
+    // user never sees the new complaint (re-review finding, 17 Aug). A NULL
+    // fingerprint (pre-migration row) stays a repeat: treating it as changed
+    // would resurrect every old rejection on every run.
+    const fingerprintMoved = live?.review === "rejected"
+      && live.evidenceFingerprint !== null
+      && live.evidenceFingerprint !== fingerprint;
+    if (live !== undefined && sameConclusion(live, input) && !fingerprintMoved) {
       // Satır yazılmıyor ama ölçüm YAPILDI: sayaç o ölçümün tek izi. Olay da
       // düşmüyor — bir kere ölçülüp yüz kere teyit edilen bir hüküm, günlüğü
       // yüz satırla doldurmadan sayıdan okunabilmeli.
@@ -246,9 +258,6 @@ export function recordVerdict(store: Store, input: VerdictInput): RecordedVerdic
     // AFTER the repeat branch on purpose: a still-live rejected verdict being
     // re-measured is a repeat, not a suppression, and counting it as the latter
     // would inflate the one number design §8 asks us to watch.
-    const reason = verdictReason(input);
-    const fingerprint = input.evidenceFingerprint
-      ?? computeEvidenceFingerprint({ reason, claimText: input.evidence ?? undefined });
     const rejected = findLastRejected(store, input.findingId, reason, claimRef);
     if (rejected !== undefined && rejected.evidenceFingerprint === fingerprint) {
       // Nothing is deleted and nothing is hidden: the non-production is itself a
