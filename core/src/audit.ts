@@ -199,8 +199,10 @@ function evidenceLine(state: AnchorState, verdicts: AnchorVerdict[]): string {
  * şüphe hüküm değildir, çünkü hiçbiri notun METNİNİ okumuyor. `gecerli` bu
  * yüzden buradan hiç dönmez: çapası duran bir not pekâlâ yanlış olabilir.
  *
- * Sıra ağırlığı izliyor (anchor-drift WEIGHT): dosya yoksa sembolün durumu
- * ikincil bilgidir.
+ * Sıra ağırlığı izliyor (anchor-drift WEIGHT). Sembol çapası buraya HİÇ girmez:
+ * görüntü amaçlıdır, hüküm üretmez (anchor-drift dosya başı) — bu yüzden
+ * `sembol-kayboldu` mekanik katmandan artık dönmüyor; altın set sözlüğünde
+ * insan etiketi olarak duruyor.
  *
  * `never_existed` → `dogustan-yanlis`, çünkü o hüküm ancak sonek çözümlemesi
  * SIFIR eşleşme döndükten sonra ayakta kalıyor (anchor-drift.ts): yol hiçbir
@@ -212,9 +214,6 @@ function decisiveAnchorEvidence(verdicts: AnchorVerdict[]): AnchorEvidence | nul
   const missing = of("missing_now");
   if (missing.length > 0)
     return { verdict: "curuk", decayType: "dosya-silindi", evidence: evidenceLine("missing_now", missing) };
-  const lost = of("symbol_lost");
-  if (lost.length > 0)
-    return { verdict: "curuk", decayType: "sembol-kayboldu", evidence: evidenceLine("symbol_lost", lost) };
   const never = of("never_existed");
   if (never.length > 0)
     return { verdict: "dogustan-yanlis", decayType: null, evidence: evidenceLine("never_existed", never) };
@@ -225,7 +224,7 @@ function decisiveAnchorEvidence(verdicts: AnchorVerdict[]): AnchorEvidence | nul
 const MECHANICAL_WITHDRAWABLE = new Set<VerdictValue>(["curuk", "dogustan-yanlis"]);
 
 function emptyAnchorStates(): Record<AnchorState, number> {
-  return { ok: 0, missing_now: 0, never_existed: 0, symbol_lost: 0, churned: 0, unverifiable: 0 };
+  return { ok: 0, missing_now: 0, never_existed: 0, churned: 0, unverifiable: 0 };
 }
 
 function countStates(verdicts: AnchorVerdict[]): Partial<Record<AnchorState, number>> {

@@ -209,8 +209,13 @@ export function mount(root, ctx, findingId) {
     const list = el("div", "anchor-list");
     list.style.marginTop = "12px";
     for (const a of anchors) {
-      const chip = anchorChip(a.value, drifted.has(a.value) ? "drift" : "ok");
-      chip.title = `${a.kind} · alındığı commit ${shortSha(a.takenAtCommit)}`;
+      // Sembol çapası ölçülmüyor; yeşil nokta "ölçüldü, temiz" demek olduğu için
+      // sembol o noktayı alamaz.
+      const untracked = a.kind === "symbol";
+      const chip = anchorChip(a.value, untracked ? "untracked" : (drifted.has(a.value) ? "drift" : "ok"));
+      chip.title = untracked
+        ? `${a.kind} · izlenmez (görüntü amaçlı) · alındığı commit ${shortSha(a.takenAtCommit)}`
+        : `${a.kind} · alındığı commit ${shortSha(a.takenAtCommit)}`;
       const sha = el("span", "anchor-sha", shortSha(a.takenAtCommit));
       chip.appendChild(sha);
       list.appendChild(chip);

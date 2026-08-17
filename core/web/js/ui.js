@@ -137,9 +137,17 @@ export function renderSentence(target, sentence) {
   });
 }
 
-/** Anchor chip with health dot. state: "ok" | "drift". */
+/**
+ * Anchor chip with health dot. state: "ok" | "drift" | "untracked".
+ * "untracked" is the symbol anchor: stored and shown, never measured (17 Aug
+ * decision) — it gets the faint dot so a green one keeps meaning "measured, fine".
+ */
+const CHIP_CLASS = {
+  drift: "anchor-chip anchor-chip--drift",
+  untracked: "anchor-chip anchor-chip--untracked",
+};
 export function anchorChip(value, state) {
-  const chip = el("span", state === "drift" ? "anchor-chip anchor-chip--drift" : "anchor-chip");
+  const chip = el("span", CHIP_CLASS[state] ?? "anchor-chip");
   chip.appendChild(el("span", "", value));
   return chip;
 }

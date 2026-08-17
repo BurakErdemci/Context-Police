@@ -1,16 +1,24 @@
 // Çapa doğrulama + kayma skoru. M2'nin %10 uydurma çapa borcu burada kapanır:
 // "geçmişte hiç izi yok" (never_existed / unverifiable) ile "var olup kaybolmuş"
-// (missing_now / symbol_lost) yapısal olarak ayrışır — suçlama yalnız kanıtlıya.
+// (missing_now) yapısal olarak ayrışır — suçlama yalnız kanıtlıya.
+//
+// Symbol anchors are DISPLAY-ONLY (decision 17 Aug 2026, "option C"): they are
+// stored and shown, but they never score and never trigger a verdict. The old
+// `symbol_lost` state (0.4) rested on `git grep -F`, a substring match over the
+// whole tree — "the name still occurs somewhere" is not "the symbol is intact",
+// and its negation is not "the symbol is gone" either (rename, re-export, string
+// literal). The state was therefore removed from `AnchorState` rather than
+// weighted to zero: a state nothing can produce is a landmine for consumers.
 
 import type { Anchor } from "../types.ts";
 import {
   type GitContext, type Measured, fileExistsAt, fileEverExisted, commitsTouching,
-  symbolExists, symbolEverExisted, commitExists, filesMatchingSuffix,
+  commitExists, filesMatchingSuffix,
 } from "./git.ts";
 
 export const SUSPICION_THRESHOLD = 0.6; // M0 kalibrasyonu (rapor §5)
 
-export type AnchorState = "ok" | "missing_now" | "never_existed" | "symbol_lost" | "churned" | "unverifiable";
+export type AnchorState = "ok" | "missing_now" | "never_existed" | "churned" | "unverifiable";
 
 /** Hangi çapa, hangi komut, hangi sebeple ölçülemedi. audit.ts bunu
  *  `anchor_measurement_failed` olayına yazar — arıza sessiz kalmaz. */
@@ -49,6 +57,13 @@ export interface AnchorVerdict {
    * olayında da yazılı. Skor açısından ikisi de nötr: state `unverifiable`.
    */
   budgetExhausted?: true;
+  /**
+   * Çapa BİLEREK ölçülmedi: sembol çapaları görüntü amaçlı (dosya başı).
+   * `budgetExhausted` ve `measurementFailed`ten ayrı tutuluyor — o ikisi
+   * "ölçemedik" (arıza ya da maliyet sınırı), bu ise "ölçmüyoruz" (tasarım).
+   * Aynı sayaçta toplamak bir kararı bir eksiklik gibi gösterirdi.
+   */
+  displayOnly?: true;
 }
 
 /**
@@ -86,7 +101,6 @@ export interface DriftScore { score: number; reasons: string[] }
 // D-M3-4 ağırlıkları. Değişiklik ancak altın set ölçümüyle — sayılar M0'dan.
 const WEIGHT: Partial<Record<AnchorState, number>> = {
   missing_now: 0.5,
-  symbol_lost: 0.4,
   never_existed: 0.3,
 };
 /**
@@ -114,7 +128,7 @@ export const BORN_INVALID_MIN_RESOLVED = 2;
 export const BORN_INVALID_WEIGHT = 0.2;
 
 const SEVERITY: Record<AnchorState, number> = {
-  missing_now: 3, symbol_lost: 3, never_existed: 2, churned: 1, ok: 0, unverifiable: 0,
+  missing_now: 3, never_existed: 2, churned: 1, ok: 0, unverifiable: 0,
 };
 
 /** Ölçüm arızasını AnchorVerdict alanına çevirir. */
@@ -169,6 +183,8 @@ export async function checkAnchors(
   const out: AnchorVerdict[] = [];
   for (const anchor of anchors) {
     if (anchor.kind === "external_path") { out.push({ anchor, state: "unverifiable" }); continue; } // D-M3-7
+    // Sembol: görüntü amaçlı, ölçülmez (dosya başı). Bütçe kapısından ÖNCE —
+    // bu dal git çağırmıyor, bütçeye takılması yalnız sayıyı bulandırırdı.
     // Bütçe kapısı: dolduysa ölçüm YAPILMAZ. Ölçmemek asla suçlamaya dönmez
     // (dosya başındaki temel sözleşme) → unverifiable, ağırlık 0. Kapı
     // `external_path`ten SONRA: o dal zaten git çağırmıyor, bütçeye takılması
@@ -184,18 +200,7 @@ export async function checkAnchors(
       out.push({ anchor, state: r.ok && r.value ? "ok" : "unverifiable", ...(r.ok ? {} : { measurementFailed: failureOf(r)! }) });
       continue;
     }
-    if (anchor.kind === "symbol") {
-      // Dikkat: `symbolExists` ALT-DİZE eşleşmesidir (git grep -F). Buradaki "ok"
-      // "sembol kesin duruyor" değil "adı bir yerde hâlâ geçiyor" demektir —
-      // yorumda kaldığı yer, skorda suçlama üretmediği için zararsız.
-      const here = await spend(budget, () => symbolExists(ctx, null, anchor.value));
-      if (!here.ok) { out.push({ anchor, state: "unverifiable", measurementFailed: failureOf(here)! }); continue; }
-      if (here.value) { out.push({ anchor, state: "ok" }); continue; }
-      const ever = await spend(budget, () => symbolEverExisted(ctx, anchor.value));
-      if (!ever.ok) { out.push({ anchor, state: "unverifiable", measurementFailed: failureOf(ever)! }); continue; }
-      out.push({ anchor, state: ever.value ? "symbol_lost" : "unverifiable" });
-      continue;
-    }
+    if (anchor.kind === "symbol") { out.push({ anchor, state: "unverifiable", displayOnly: true }); continue; }
     // file_path: iki ref birden (M0-D7), skor kötüsünden (D-M3-5).
     let v = await filePathVerdict(ctx, anchor, anchor.value, sinceIso, budget);
 
@@ -261,6 +266,7 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
   let neverExistedCount = 0;
   let resolvedCount = 0;     // sonekle çözülen çapa sayısı (born_invalid göstergesi)
   let budgetExhausted = 0;   // bütçe dolduğu için HİÇ ölçülmemiş çapa
+  let displayOnly = 0;       // tasarım gereği ölçülmeyen çapa (sembol)
 
   for (const v of verdicts) {
     const w = WEIGHT[v.state];
@@ -302,6 +308,7 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
       reasons.push(`${v.anchor.kind} ${v.anchor.value}: sonek çözümlendi → ${v.resolvedPath} (durum: ${v.state})`);
     }
     if (v.budgetExhausted === true) budgetExhausted++;
+    if (v.displayOnly === true) displayOnly++;
     if (v.measurementFailed !== undefined) {
       reasons.push(
         `${v.anchor.kind} ${v.anchor.value}: ölçülemedi — ${v.measurementFailed.command}` +
@@ -321,6 +328,10 @@ export function scoreDrift(verdicts: AnchorVerdict[], statusPattern: boolean): D
   // ve gerekçe listesi olay günlüğüne yazılıyor (audit.ts signal_scored).
   if (budgetExhausted > 0)
     reasons.push(`${budgetExhausted} çapa git bütçesi dolduğu için ÖLÇÜLMEDİ; skora katkı yok`);
+
+  // Sessiz kalırsa "sembol çapası temiz çıktı" diye okunurdu; oysa hiç bakılmadı.
+  if (displayOnly > 0)
+    reasons.push(`${displayOnly} sembol çapası izlenmez (görüntü amaçlı); skora katkı yok`);
 
   if (resolvedCount >= BORN_INVALID_MIN_RESOLVED) {
     score += BORN_INVALID_WEIGHT;

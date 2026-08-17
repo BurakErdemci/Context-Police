@@ -74,17 +74,18 @@ test("çapa durum sayımı özette ve signal_scored olayında taşınıyor (M2 b
 
   assert.equal(sum.anchorStates.missing_now, 1, "gerçekten silinmiş dosya");
   assert.equal(sum.anchorStates.never_existed, 1, "hiç var olmamış yol");
-  assert.equal(sum.anchorStates.unverifiable, 1, "geçmişte izi olmayan sembol");
-  assert.equal(sum.anchorStates.symbol_lost, 0);
+  assert.equal(sum.anchorStates.unverifiable, 1, "izlenmeyen sembol çapası");
   assert.equal(sum.anchorStates.ok, 0);
 
   const detaylar = listEvents(store, { kind: "signal_scored" }).map((e) => JSON.parse(e.detail!));
   const uydurma = detaylar.find((d) => d.states.never_existed === 1)!;
   assert.deepEqual(uydurma.states, { never_existed: 1, unverifiable: 1 }, "sıfır olan durumlar yazılmaz");
   assert.equal(uydurma.score, 0.3, "never_existed suçlar ama tek başına eşiği aşmaz");
-  // Ve o skoru üreten tek çapa reasons'ta; unverifiable orada YOK — sayım
-  // olmasaydı bu bulgunun 2 çapasından birinin doğrulanamadığı görünmezdi.
-  assert.equal(uydurma.reasons.length, 1);
+  // Skoru üreten tek çapa reasons'ta. İkinci satır sembolün ölçülmediğini
+  // söylüyor (17 Ağu: görüntü amaçlı) — sessiz kalsaydı "sembol temiz" diye
+  // okunurdu. Skora katkı veren hâlâ tek çapa.
+  assert.equal(uydurma.reasons.length, 2);
+  assert.ok(uydurma.reasons.some((r: string) => r.includes("izlenmez")), JSON.stringify(uydurma.reasons));
   store.close();
 });
 

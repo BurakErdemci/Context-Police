@@ -16,7 +16,6 @@ const v = (state: AnchorVerdict["state"], extra: Partial<AnchorVerdict> = {}): A
 
 test("ağırlıklar D-M3-4: tekil durumlar", () => {
   assert.equal(scoreDrift([v("missing_now")], false).score, 0.5);
-  assert.equal(scoreDrift([v("symbol_lost")], false).score, 0.4);
   assert.equal(scoreDrift([v("never_existed")], false).score, 0.3);
   assert.equal(scoreDrift([v("churned", { commits: 3 })], false).score, 0.2);
   assert.equal(scoreDrift([v("churned", { commits: 12 })], false).score, 0.3);
@@ -34,7 +33,7 @@ test("DURUM-kalıbı: tek başına eşik ALTINDA, çapa hareketiyle eşiğin ÜS
 });
 
 test("skor 1.0'da kapaklanır ve reasons her katkıyı sayar", () => {
-  const r = scoreDrift([v("missing_now"), v("missing_now"), v("symbol_lost")], true);
+  const r = scoreDrift([v("missing_now"), v("missing_now"), v("never_existed")], true);
   assert.equal(r.score, 1);
   assert.ok(r.reasons.length >= 3);
 });
@@ -61,8 +60,8 @@ test("never_existed toplamı 0,5'te kırpılır: tek sınıf tek başına eşiğ
 
 test("kırpma YALNIZ never_existed'a uygulanır: sınıf karışımı tam toplanır", () => {
   // İki bağımsız sınıfın bileşimi eşiği delmeli — kırpılan yalnız kendi sınıfının payı.
-  const karisik = scoreDrift([v("never_existed"), v("never_existed"), v("symbol_lost")], false);
-  assert.equal(karisik.score, NEVER_EXISTED_CAP + 0.4);
+  const karisik = scoreDrift([v("never_existed"), v("never_existed"), v("missing_now")], false);
+  assert.equal(karisik.score, NEVER_EXISTED_CAP + 0.5);
   assert.ok(karisik.score >= SUSPICION_THRESHOLD);
 });
 
@@ -143,7 +142,7 @@ before(() => {
   execFileSync("git", ["clone", "-q", repo, clone], { encoding: "utf8" });
 });
 
-test("checkAnchors: silinen dosya missing_now, hayalet yol never_existed, kayıp sembol symbol_lost", async () => {
+test("checkAnchors: silinen dosya missing_now, hayalet yol never_existed, sembol izlenmez", async () => {
   const ctx = (await openGit(repo, { fetch: false }))!;
   const verdicts = await checkAnchors(ctx, [
     { kind: "file_path", value: "src/b.ts" },
@@ -153,11 +152,18 @@ test("checkAnchors: silinen dosya missing_now, hayalet yol never_existed, kayıp
     { kind: "external_path", value: "~/.x/y.json" },
   ], EPOCH);
   assert.deepEqual(verdicts.map((x) => x.state),
-    ["missing_now", "never_existed", "symbol_lost", "unverifiable", "unverifiable"]);
+    ["missing_now", "never_existed", "unverifiable", "unverifiable", "unverifiable"]);
   // Borcun kapandığı yer: iki "yok" farklı skor üretiyor, uydurma çapa ucuz.
   assert.equal(scoreDrift([verdicts[0]!], false).score, 0.5);
   assert.equal(scoreDrift([verdicts[1]!], false).score, 0.3);
   assert.equal(scoreDrift([verdicts[3]!], false).score, 0); // hiç izi yok → suçlama yok
+
+  // Sembol (17 Ağu kararı): depoda GERÇEKTEN kaybolmuş bir sembol bile skor
+  // üretmez — `eskiSembol` bu fixture'da silindi, yine de 0.
+  assert.equal(verdicts[2]!.displayOnly, true);
+  assert.equal(scoreDrift([verdicts[2]!], false).score, 0);
+  // Ve DURUM kalıbıyla bileşimde de "hareket" saymaz: eskiden 0.4 + M0-D1 = 0.7 idi.
+  assert.ok(scoreDrift([verdicts[2]!], true).score < SUSPICION_THRESHOLD);
 });
 
 test("checkAnchors: churn sayılır, var olan sha ok, olmayan sha unverifiable", async () => {
@@ -250,4 +256,40 @@ test("checkAnchors: origin ile çalışma ağacı çelişirse kötü hüküm kaz
   const d = scoreDrift([verdict!], false);
   assert.equal(d.score, 0.5);
   assert.ok(d.reasons[0]!.includes("origin"), d.reasons[0]!);
+});
+
+// --- Sembol çapaları görüntü amaçlı (karar 17 Ağu 2026, "seçenek C") ---------
+// Gerekçe kodda (anchor-drift.ts dosya başı): `symbol_lost` bir `git grep -F`
+// alt-dize ölçümüne dayanıyordu; ne olumlusu "sembol duruyor" demekti ne
+// olumsuzu "sembol gitti". Burada sınanan iki şey var: sembol HİÇBİR bileşimde
+// skor üretmiyor, ve dosya/sha davranışı değişmedi.
+
+test("sembol çapası hiçbir sayıda ve hiçbir bileşimde skor üretmez", () => {
+  const s = (extra: Partial<AnchorVerdict> = {}): AnchorVerdict =>
+    ({ anchor: { kind: "symbol", value: "adoptLegacyRoot" }, state: "unverifiable", displayOnly: true, ...extra });
+
+  assert.equal(scoreDrift([s()], false).score, 0);
+  assert.equal(scoreDrift([s(), s(), s(), s(), s(), s()], false).score, 0);
+  // DURUM kalıbı + sembol: eskiden 0,4 + M0-D1 → 0,7 (eşik üstü). Artık sembol
+  // "hareket" saymadığı için kalıp tek başına kalır ve eşiği delemez.
+  const durum = scoreDrift([s(), s()], true);
+  assert.ok(durum.score < SUSPICION_THRESHOLD, `sembol DURUM ile eşiği deldi: ${durum.score}`);
+  // Sessiz kalmaz: ölçülmediği gerekçelerde yazılı.
+  assert.ok(durum.reasons.some((r) => r.includes("izlenmez")), JSON.stringify(durum.reasons));
+});
+
+test("sembol demote'u dosya ve sha çapalarını değiştirmedi", async () => {
+  const ctx = (await openGit(repo, { fetch: false }))!;
+  const verdicts = await checkAnchors(ctx, [
+    { kind: "symbol", value: "eskiSembol" },      // gerçekten silinmiş sembol
+    { kind: "file_path", value: "src/b.ts" },     // silinmiş dosya
+    { kind: "file_path", value: "src/a.ts" },     // duruyor, 3 dokunuş
+    { kind: "commit_sha", value: firstSha },
+  ], EPOCH);
+  assert.deepEqual(verdicts.map((x) => x.state),
+    ["unverifiable", "missing_now", "churned", "ok"]);
+  // Notun toplam skoru YALNIZ dosya çapalarından gelir: 0,5 (missing_now) + 0,2 (churn).
+  const d = scoreDrift(verdicts, false);
+  assert.equal(d.score, 0.7);
+  assert.ok(!d.reasons.some((r) => r.startsWith("symbol ")), JSON.stringify(d.reasons));
 });

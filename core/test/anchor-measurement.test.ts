@@ -156,11 +156,8 @@ before(() => {
     // churn arızası: dosya DURUYOR ama rev-list ölçülemedi (ters yön: kaçırılan çürüme).
     '  churn:ls-tree) echo src/a.ts; exit 0 ;;',
     '  churn:rev-list) echo "fatal: bad revision" >&2; exit 128 ;;',
-    // sembol: git grep rc=128 (arıza) — rc=1 olsaydı temiz "eşleşme yok" olurdu.
-    '  grepfail:grep) echo "fatal: could not fetch from promisor remote" >&2; exit 128 ;;',
-    '  grepfail:log) echo 0123456789abcdef; exit 0 ;;',
     // maxBuffer: komut BAŞARILI ama çıktı 4 MiB tavanını aşıyor.
-    "  grephuge:grep) dd if=/dev/zero bs=1048576 count=5 2>/dev/null | tr '\\000' x; exit 0 ;;",
+    "  grephuge:ls-tree) dd if=/dev/zero bs=1048576 count=5 2>/dev/null | tr '\\000' x; exit 0 ;;",
     '  grephuge:log) echo 0123456789abcdef; exit 0 ;;',
     // commit_sha arızası.
     '  shafail:rev-parse) echo "fatal: bad object" >&2; exit 128 ;;',
@@ -201,24 +198,23 @@ test("sahte git: ls-tree arızası → unverifiable, missing_now DEĞİL", async
   assert.ok(scoreDrift(verdicts, true).score < SUSPICION_THRESHOLD);
 });
 
-test("sahte git: grep arızası (rc=128) → unverifiable, symbol_lost DEĞİL", async () => {
-  const verdicts = await withFake("grepfail", () =>
+// Sembol çapası artık GÖRÜNTÜ AMAÇLI: git'e hiç gitmiyor. Çit sahte git'in
+// `*)` dalıdır — çağrılsaydı rc=128 verip `measurementFailed` yazardı.
+test("sahte git: sembol çapası git'i HİÇ çağırmaz (görüntü amaçlı)", async () => {
+  const verdicts = await withFake("lstree", () =>
     checkAnchors(FAKE_CTX, [{ kind: "symbol", value: "canliSembol" }], EPOCH));
   assert.equal(verdicts[0]!.state, "unverifiable");
-  assert.ok(verdicts[0]!.measurementFailed);
-  assert.match(verdicts[0]!.measurementFailed!.command, /grep/);
+  assert.equal(verdicts[0]!.displayOnly, true);
+  assert.equal(verdicts[0]!.measurementFailed, undefined, "sembol için git çağrıldı");
   assert.equal(scoreDrift(verdicts, false).score, 0);
 });
 
-test("sahte git: maxBuffer taşması arıza sayılır, symbol_lost DEĞİL", async () => {
-  // audit-resource probe'unun iddiası: başarılı ama çok büyük çıktı, eski kodda
-  // ok=false'a inip iki sembolü birden symbol_lost yapıyordu (skor 0.8).
+test("sahte git: maxBuffer taşması arıza sayılır, hüküm DEĞİL", async () => {
+  // audit-resource probe'unun iddiası: komut başarılı ama çıktı 4 MiB tavanını
+  // aşıyor; eski kod ok=false'a inip bunu kayma hükmüne çeviriyordu.
   const verdicts = await withFake("grephuge", () =>
-    checkAnchors(FAKE_CTX, [
-      { kind: "symbol", value: "sembolBir" },
-      { kind: "symbol", value: "sembolIki" },
-    ], EPOCH));
-  assert.deepEqual(verdicts.map((v) => v.state), ["unverifiable", "unverifiable"]);
+    checkAnchors(FAKE_CTX, [{ kind: "file_path", value: "src/a.ts" }], EPOCH));
+  assert.equal(verdicts[0]!.state, "unverifiable");
   assert.equal(scoreDrift(verdicts, false).score, 0);
   assert.match(verdicts[0]!.measurementFailed!.reason, /maxbuffer/i);
 });
@@ -250,10 +246,13 @@ test("sahte git: TEMİZ hayır hâlâ hüküm üretir (fix sinyali köreltmedi)"
   assert.equal(file[0]!.measurementFailed, undefined);
   assert.equal(scoreDrift(file, false).score, 0.5);
 
+  // Aynı temiz "hayır" sembolde hüküm ÜRETMEZ: grep rc=1 + log'un sha döndürmesi
+  // eskiden symbol_lost'tu (0.4); artık sembol ölçülmüyor, çapa nötr kalıyor.
   const sym = await withFake("cleanno", () =>
     checkAnchors(FAKE_CTX, [{ kind: "symbol", value: "kayipSembol" }], EPOCH));
-  assert.equal(sym[0]!.state, "symbol_lost"); // grep rc=1 = eşleşme yok, log sha döndü
-  assert.equal(sym[0]!.measurementFailed, undefined);
+  assert.equal(sym[0]!.state, "unverifiable");
+  assert.equal(sym[0]!.displayOnly, true);
+  assert.equal(scoreDrift(sym, false).score, 0);
 });
 
 test("git binary'si yok: spawn hatası da arıza, hüküm değil", async () => {

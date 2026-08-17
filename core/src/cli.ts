@@ -594,7 +594,7 @@ function printAuditResults(
     console.log(`  çelişki adayı: ${s.candidates}  onaylanan: ${s.contradictions}  codex çağrısı: ${s.classifyCalls}`);
     if (s.classifyDropped > 0) console.log(`  ⚠ tavan üstü sınıflanmayan aday: ${s.classifyDropped}`);
     const st = s.anchorStates;
-    console.log(`  çapa: ok ${st.ok}  kayıp ${st.missing_now}  sembol-kayıp ${st.symbol_lost}  ` +
+    console.log(`  çapa: ok ${st.ok}  kayıp ${st.missing_now}  ` +
       `çalkantılı ${st.churned}  hiç-yok ${st.never_existed}  doğrulanamayan ${st.unverifiable}`);
     // "git söyleyemedi" ile "dosya duruyor" ayrı şeyler: ölçüm arızası skora
     // katkı vermiyor (A dalgası), dolayısıyla burada görünmezse HİÇ görünmez.
