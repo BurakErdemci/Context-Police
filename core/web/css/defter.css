@@ -1,134 +1,452 @@
-/* --- project report (proje raporu) ------------------------------------------ */
+/* ============================================================================
+   Proje ekranı — "VAKA DEFTERİ" (onaylı maket:
+   docs/superpowers/specs/2026-08-17-vaka-defteri-maketi.html).
+
+   Three leaves stacked on one spine: cover (top) → contents → case pages.
+   A leaf turns by rotating around its left edge; `.acik` is set by project.js.
+
+   Paper-world tokens (--desk/--paper/--kapak/--hand/...) are owned by
+   tokens.css. They are only ever READ here, with the mock's values as the
+   fallback so this screen still renders while that lane is in flight.
+   ========================================================================== */
+
+/* --- page-turn route transition (classes driven by js/flip.js) ------------- */
+
+.flip-stage {
+  position: relative;
+  perspective: 1600px;
+}
+
+.flip-stage > .flip-out {
+  position: absolute;
+  z-index: 5;
+  transform-origin: left center;
+  backface-visibility: hidden;
+  will-change: transform;
+  transition: transform 620ms cubic-bezier(0.35, 0.1, 0.2, 1);
+}
+
+.flip-stage > .flip-out.flip-turning { transform: rotateY(-172deg); }
+
+/* The incoming screen is already behind the turning page; it only needs to
+   stop competing for attention during the first half of the turn. */
+.flip-in { animation: flip-reveal 620ms var(--ease) both; }
+
+@keyframes flip-reveal {
+  from { opacity: 0.25; }
+  55% { opacity: 0.25; }
+  to { opacity: 1; }
+}
+
+/* --- the notebook ---------------------------------------------------------- */
 
 .report { display: flex; flex-direction: column; gap: var(--s-5); }
 
-.report-hero {
-  display: flex;
-  gap: 26px;
-  align-items: center;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 26px;
+.defter-stage { display: flex; justify-content: center; padding: var(--s-2) 0 var(--s-4); }
+
+.defter {
+  position: relative;
+  width: min(560px, 94vw);
+  /* Portrait on purpose — the Tauri window is a notebook, not a dashboard. */
+  aspect-ratio: 3 / 3.9;
+  min-height: 560px;
+  perspective: 1900px;
 }
 
-@media (max-width: 640px) { .report-hero { flex-direction: column; align-items: flex-start; } }
+.yaprak {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  transform-origin: left center;
+  transition: transform 950ms cubic-bezier(0.35, 0.1, 0.2, 1);
+}
 
-.report-hero-main { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; flex: 1; }
+.yaprak--vaka { z-index: 1; }
+.yaprak--icindekiler { z-index: 2; }
+.yaprak--kapak { z-index: 3; }
+
+.yaprak.acik {
+  transform: rotateY(-172deg);
+  /* A turned leaf still overlaps the page under it in 3D; without this it eats
+     the clicks meant for the leaf it just uncovered (measured in the mock). */
+  pointer-events: none;
+}
+
+.yuz {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  border-radius: 6px 16px 14px 6px;
+  overflow: hidden;
+}
+
+.yuz.arka {
+  transform: rotateY(180deg);
+  background: var(--paper2, #F3EDDD);
+  border-radius: 16px 6px 6px 14px;
+  box-shadow: inset -14px 0 24px rgba(43, 40, 34, 0.12);
+  pointer-events: none;
+}
+
+/* --- cover ----------------------------------------------------------------- */
+
+.kapak-yuz {
+  background:
+    radial-gradient(circle at 24% 18%, rgba(255, 255, 255, 0.1), transparent 45%),
+    repeating-linear-gradient(35deg, rgba(0, 0, 0, 0.05) 0 2px, transparent 2px 7px),
+    linear-gradient(160deg, var(--kapak, #B5432E), var(--kapak2, #93331F));
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #F6EBDD;
+  text-align: center;
+  padding: 30px;
+  cursor: pointer;
+}
+
+/* The spine strip. */
+.kapak-yuz::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 22px;
+  width: 7px;
+  background: #3E3A32;
+  opacity: 0.85;
+  border-radius: 4px;
+}
+
+.kapak-etiket {
+  background: var(--paper, #FAF6EC);
+  color: var(--ink, #2B2822);
+  padding: 16px 22px 14px;
+  max-width: 78%;
+  border-radius: var(--sketchy-radius, 10px 255px 12px 225px / 225px 12px 255px 12px);
+  transform: rotate(-2deg);
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.25);
+}
+
+.kapak-etiket .ust {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  color: var(--graphite, #6E685E);
+}
+
+.kapak-etiket h2 {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 800;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.kapak-etiket .alt {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--graphite, #6E685E);
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.kapak-rozet {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink, #2B2822);
+  background: var(--paper2, #F3EDDD);
+  border-radius: var(--sketchy-radius, 255px 10px 225px 10px / 10px 225px 10px 255px);
+  padding: 4px 14px;
+  transform: rotate(-3deg);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Amber is the attention color and it appears only where a decision is owed. */
+.kapak-yuz--acil .kapak-rozet { background: var(--hilite, #FFE45C); }
+
+.kapak-ipucu {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 15px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+/* --- page faces ------------------------------------------------------------ */
+
+.sayfa-yuz {
+  background:
+    repeating-linear-gradient(to bottom, transparent 0 26px, var(--rule, #C9D6E2) 26px 27px) 0 12px,
+    var(--paper, #FAF6EC);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+  color: var(--ink, #2B2822);
+}
+
+/* Margin rule — part of the sheet, so it stays put while the text scrolls. */
+.sayfa-yuz::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 38px;
+  width: 2px;
+  background: var(--margin, #E0897C);
+  opacity: 0.6;
+  z-index: 1;
+}
+
+.sayfa-ic {
+  position: absolute;
+  inset: 0;
+  padding: 24px 24px 30px 54px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.delik {
+  position: absolute;
+  left: 12px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--desk, #2A2620);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+
+.vaka-etiket {
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  border: 2px solid var(--ink, #2B2822);
+  border-radius: 255px 12px 225px 12px / 12px 225px 12px 255px;
+  padding: 3px 10px;
+  transform: rotate(-1.4deg);
+  background: var(--paper2, #F3EDDD);
+}
+
+.h-hand {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 21px;
+  line-height: 1.3;
+  font-weight: 700;
+  text-wrap: balance;
+}
+
+.not-kucuk {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 13px;
+  color: var(--graphite, #6E685E);
+}
+
+/* --- contents leaf --------------------------------------------------------- */
+
+.report-sentence { margin: 0; max-width: 34ch; }
+
+/* Highlighter, not a colored word: the marker is the mock's judgment device. */
+.report-sentence .warn {
+  color: var(--ink, #2B2822);
+  background: linear-gradient(transparent 42%, var(--hilite, #FFE45C) 42% 92%, transparent 92%);
+  padding: 0 3px;
+}
+
+.dosya-ust { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+
+.report-hero-main { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; flex: 1; }
 
 .report-name { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; }
-.report-name .pname { font-size: 16px; }
-
-.report-sentence {
-  margin: 0;
-  font-family: var(--serif);
-  font-size: 21px;
-  line-height: 1.4;
-  font-weight: 500;
-  text-wrap: balance;
-  max-width: 40ch;
-}
-
-.report-sentence .warn { color: var(--amber); }
-.report-sentence em { font-style: normal; color: var(--accent-hi); }
+.report-name .ppath { font-family: var(--mono); font-size: 11px; color: var(--graphite, #6E685E); }
 
 .ring-caption {
-  margin-top: var(--s-2);
+  margin-top: var(--s-1);
   text-align: center;
-  font-size: 11px;
-  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--graphite, #6E685E);
 }
 
-.report-since { font-size: 11.5px; color: var(--dim); }
+/* The percentage inside the ring is written, not typeset — it is the one number
+   on the page the detective wrote himself. */
+.sayfa-yuz .ring .ring-num {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  color: var(--ink, #2B2822);
+}
 
-/* Case section */
+.report-since { font-size: 10.5px; }
 
-.case-head {
+.icindekiler { display: flex; flex-direction: column; gap: 6px; margin-top: var(--s-2); }
+
+.satir-not {
   display: flex;
   align-items: center;
-  gap: var(--s-3);
-  margin: var(--s-2) 0 0;
+  gap: 10px;
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 15px;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: 10px 120px 10px 110px / 110px 10px 120px 10px;
+  border: 1.6px solid transparent;
+  color: var(--ink-soft, #57524A);
 }
 
-.case-head .eyebrow { color: var(--ink); letter-spacing: 0.12em; }
-.case-head::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.satir-not .satir-ad { min-width: 0; overflow-wrap: anywhere; }
+.satir-not .tik { color: var(--green-pencil, #4E8A5A); }
+.satir-not .carpi { color: var(--red-ink, #C43C2E); }
 
-.case-list { display: flex; flex-direction: column; gap: 12px; }
+.satir-not small {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--graphite, #6E685E);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Highlighted = this row is waiting on the reader. Everything else is dormant,
+   and dormant is explicitly NOT dead (design §3.1) — faded, never struck out. */
+.satir-not.sicak {
+  color: var(--ink, #2B2822);
+  background: linear-gradient(transparent 20%, var(--hilite, #FFE45C) 20% 95%, transparent 95%);
+  cursor: pointer;
+}
+
+.satir-not.sicak:hover,
+.satir-not.sicak:focus-visible {
+  border-color: var(--ink, #2B2822);
+}
+
+/* --- corner navigation ----------------------------------------------------- */
+
+.koseler {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-top: auto;
+  padding-top: var(--s-4);
+}
+
+.kose {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--graphite, #6E685E);
+  cursor: pointer;
+  padding: 6px 2px;
+}
+
+.kose.geri { margin-right: auto; }
+.kose:hover { color: var(--ink, #2B2822); }
+
+/* --- case cards on paper --------------------------------------------------- */
+
+.case-head { display: flex; align-items: center; gap: var(--s-3); margin: var(--s-2) 0 0; }
+.case-head .eyebrow { color: var(--graphite, #6E685E); letter-spacing: 0.12em; }
+.case-head::after { content: ""; flex: 1; height: 1px; background: rgba(43, 40, 34, 0.18); }
+
+.case-list { display: flex; flex-direction: column; gap: 14px; }
 
 .case-card {
   position: relative;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--case-color, var(--line));
-  border-radius: var(--radius);
-  padding: 16px 18px;
+  background: #FFFDF4;
+  border: 2px solid var(--ink, #2B2822);
+  border-radius: var(--sketchy-radius, 12px 255px 12px 225px / 255px 12px 225px 12px);
+  padding: 16px 16px 14px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  transition: border-color 160ms var(--ease);
+  box-shadow: 3px 4px 0 rgba(43, 40, 34, 0.18);
+  transform: rotate(0.4deg);
+  transition: transform 160ms var(--ease), box-shadow 160ms var(--ease);
 }
 
-.case-card:hover, .case-card:focus-visible {
-  border-color: var(--accent);
-  border-left-color: var(--case-color, var(--accent));
-}
+/* base.css runs the `rise` entrance with fill-mode `both`, which keeps its own
+   `transform` applied forever — the tilt and the hover lift below would then
+   never take effect. `backwards` gives up the transform once it has played. */
+.sayfa-ic .case-card { animation-fill-mode: backwards; }
 
-.case-card--gecerli { --case-color: var(--v-gecerli); }
-.case-card--curuk { --case-color: var(--v-curuk); }
-.case-card--dogustan-yanlis { --case-color: var(--v-dogustan-yanlis); }
-.case-card--olculemez { --case-color: var(--v-olculemez); }
-.case-card--tarihsel { --case-color: var(--v-tarihsel); }
+/* Every other card leans the other way — a stack of loose sheets, not a list. */
+.case-card:nth-child(even) { transform: rotate(-0.5deg); }
+
+.case-card:hover,
+.case-card:focus-visible {
+  transform: rotate(0deg) translateY(-2px);
+  box-shadow: 4px 6px 0 rgba(43, 40, 34, 0.24);
+}
 
 .case-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.case-title { font-size: 14px; font-weight: 650; margin-right: auto; }
+
+.case-title {
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-size: 16px;
+  font-weight: 700;
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
 
 .case-sentence {
   margin: 0;
-  font-family: var(--serif);
-  font-size: 15.5px;
-  line-height: 1.55;
-  color: var(--prose);
-  max-width: 68ch;
+  font-family: var(--body, var(--serif));
+  font-size: 14.5px;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--ink-soft, #57524A);
+  max-width: 60ch;
 }
 
-.case-sentence b { font-weight: 600; color: var(--ink); }
+.case-sentence b { font-style: normal; font-weight: 600; color: var(--red-ink, #C43C2E); }
 
 .case-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.case-meta .score { font-family: var(--mono); font-size: 12px; color: var(--prose); font-variant-numeric: tabular-nums; }
-.case-meta .sep { color: var(--faint); }
+.case-meta .score { font-family: var(--mono); font-size: 12px; color: var(--ink-soft, #57524A); font-variant-numeric: tabular-nums; }
+.case-meta .sep { color: var(--graphite, #6E685E); }
 
-/* Quiet rows */
-
-.quiet {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  padding: var(--s-4) 2px 0;
-  font-size: 12.5px;
-  color: var(--dim);
+/* base.css draws the whole shared dictionary (chips, meters, badges, buttons,
+   status chips) on paper already — nothing to correct here. `.empty-note` is
+   the one leftover still wearing the graphite skin's prose color. */
+.sayfa-yuz .empty-note {
+  color: var(--graphite, #6E685E);
+  font-family: var(--hand, "Bradley Hand", "Noteworthy", "Segoe Print", cursive);
+  font-style: normal;
 }
 
-.quiet-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* --- review progress ------------------------------------------------------- */
 
-.squares { display: inline-flex; gap: 3px; flex-wrap: wrap; }
-.squares i { width: 8px; height: 8px; border-radius: 2px; background: var(--green); opacity: 0.85; }
-
-/* Review progress in the report hero: green = decided, amber = waiting. */
 .progress { display: flex; flex-direction: column; gap: 6px; max-width: 520px; margin-top: 2px; }
 
 .progress-track {
   height: 6px;
   border-radius: 3px;
-  background: var(--amber);
+  background: var(--hilite, #FFE45C);
   overflow: hidden;
 }
+
 .progress-track i {
   display: block;
   height: 100%;
-  background: var(--green);
+  background: var(--green-pencil, #4E8A5A);
   width: 0;
   transition: width 240ms var(--ease);
 }
 
-.progress-label { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.progress-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--graphite, #6E685E);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- narrow / short viewports ---------------------------------------------- */
+
+@media (max-width: 520px) {
+  .sayfa-yuz { padding: 20px 16px 36px 44px; }
+  .defter { min-height: 520px; }
+}

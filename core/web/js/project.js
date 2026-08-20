@@ -1,9 +1,13 @@
-// Proje raporu (diagnosis report): hero ring + one serif verdict sentence +
-// band + sparkline, then "bakmanı isteyen N vaka" case cards, then quiet rows.
+// Proje raporu ("VAKA DEFTERİ"): the report is a three-leaf notebook —
+// cover → table of contents (health ring + verdict sentence + note rows) →
+// case pages. Leaves rotate around their left edge; only the leaf state is new,
+// the diagnosis wording and the data flow are unchanged.
 //
 // /api/verdicts rows carry projectId, so the project filter costs no fetch.
 // /api/findings/:id is still fetched for the cards that end up on screen —
 // their anchors live only on the detail.
+
+import "./flip.js"; // importing registers the page-turn route transition
 
 import {
   el, ring, band, bandKey, sparkline, meter, renderSentence, anchorChip,
@@ -13,6 +17,44 @@ import {
 
 // Sub-reasons that mean "still a candidate for the next classify rotation".
 const CANDIDATE_SUB_REASONS = new Set(["rotation-starved", "classify-undecided", "classifier-not-run"]);
+
+/** Like ui.js `clickable`, but for in-page controls: a button, not a link. */
+function pressable(node, go) {
+  node.tabIndex = 0;
+  node.setAttribute("role", "button");
+  node.addEventListener("click", go);
+  node.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      go();
+    }
+  });
+}
+
+/** One notebook leaf: a front face plus the blank reverse the turn reveals. */
+function leaf(className, faceClass) {
+  const node = el("div", `yaprak ${className}`);
+  const face = el("div", `yuz ${faceClass}`);
+  node.append(face, el("div", "yuz arka"));
+  return { node, face };
+}
+
+/**
+ * A written page: holes and margin rule belong to the sheet, the text to an
+ * inner scroller. Separated because a page whose content overflows must scroll
+ * its text without dragging the punch holes out of the sheet with it.
+ */
+function pageLeaf(className) {
+  const { node, face } = leaf(className, "sayfa-yuz");
+  for (const top of ["12%", "50%", "88%"]) {
+    const hole = el("span", "delik");
+    hole.style.top = top;
+    face.appendChild(hole);
+  }
+  const body = el("div", "sayfa-ic");
+  face.appendChild(body);
+  return { node, face, body };
+}
 
 function verdictSentence(card) {
   const p = el("p", "report-sentence");
@@ -62,8 +104,9 @@ function caseCard(rows, detail, i, navigate, onDecision) {
   if (rows.length > 1) {
     top.appendChild(el("span", "badge badge--repeat", `+${rows.length - 1} iddia daha`));
   }
-  // Deciding the case decides all of its grouped verdicts.
-  top.appendChild(reviewControls(rows.map((r) => r.id), onDecision));
+  // Deciding the case decides all of its grouped verdicts. `target` is the card
+  // itself: the stamp/basket feedback plays on the record being decided.
+  top.appendChild(reviewControls(rows.map((r) => r.id), onDecision, undefined, { target: node }));
   node.appendChild(top);
 
   const sentence = el("p", "case-sentence");
@@ -102,29 +145,65 @@ export function mount(root, ctx, projectId) {
   // Verdicts decided during THIS render. Reset per load because the server
   // stops listing them as pending, so the next load recomputes from scratch.
   let decidedIds = new Set();
+  // Which leaves are turned. Kept OUTSIDE load() on purpose: the 3s version
+  // poll re-renders the whole notebook, and a reader who had opened the cover
+  // must not have it slam shut under them.
+  let coverOpen = false;
+  let casesOpen = false;
+  // Reassigned every render; a no-op until the first one lands.
+  let applyLeaves = () => {};
+  // Set by the case leaf so a contents row can land on its own card.
+  let scrollToCase = () => {};
 
   function showMessage(text) {
     wrap.textContent = "";
     wrap.appendChild(el("div", "screen-message", text));
   }
 
-  function renderHero(card, pendingIds) {
-    const hero = el("div", "report-hero");
-    const status = projectStatus(card);
+  function renderCover(card) {
+    const { node, face } = leaf("yaprak--kapak", "kapak-yuz");
+    const label = el("div", "kapak-etiket");
+    label.appendChild(el("div", "ust", "ÇOK GİZLİ · DOSYA"));
+    label.appendChild(el("h2", "", card.name));
+    label.appendChild(el("div", "alt", shortPath(card.path)));
+    face.appendChild(label);
 
+    face.appendChild(el("div", "kapak-rozet",
+      card.pending > 0
+        ? (card.pending === 1 ? "1 onay bekliyor" : `${card.pending} onay bekliyor`)
+        : `${card.notes} not izleniyor`,
+    ));
+    if (card.pending > 0) face.classList.add("kapak-yuz--acil");
+    face.appendChild(el("div", "kapak-ipucu", "☞ açmak için tıkla"));
+
+    pressable(face, () => {
+      coverOpen = true;
+      applyLeaves();
+    });
+    face.setAttribute("aria-label", `${card.name} defterini aç`);
+    return node;
+  }
+
+  function renderHero(card, pendingIds, target) {
+    const status = projectStatus(card);
+    target.appendChild(el("span", "vaka-etiket", `DOSYA · ${card.notes} NOT`));
+
+    const sentence = verdictSentence(card);
+    sentence.classList.add("h-hand");
+    target.appendChild(sentence);
+
+    const top = el("div", "dosya-ust");
     const ringWrap = el("div");
     const ringColor = card.pending > 0 ? COLORS.amber : COLORS.green;
-    ringWrap.appendChild(ring(card.healthPct, ringColor, { size: 108, faded: status.kind === "idle" }));
+    ringWrap.appendChild(ring(card.healthPct, ringColor, { size: 96, faded: status.kind === "idle" }));
     ringWrap.appendChild(el("div", "ring-caption", `${card.clean}/${card.notes} not temiz`));
-    hero.appendChild(ringWrap);
+    top.appendChild(ringWrap);
 
     const main = el("div", "report-hero-main");
     const nameRow = el("div", "report-name");
-    nameRow.appendChild(el("span", "pname", card.name));
-    nameRow.appendChild(el("span", "ppath", shortPath(card.path)));
     nameRow.appendChild(el("span", `status status--${status.kind}`, status.label));
+    nameRow.appendChild(el("span", "ppath", shortPath(card.path)));
     main.appendChild(nameRow);
-    main.appendChild(verdictSentence(card));
     // Same segment set as the legend below it: a legend entry without a band
     // segment reads as a lie (round-1 critique).
     main.appendChild(band([
@@ -137,6 +216,8 @@ export function mount(root, ctx, projectId) {
       { n: card.suspects, color: COLORS.violetHi, label: `${card.suspects} şüpheli` },
       { n: card.pending, color: COLORS.amber, label: `${card.pending} onay bekliyor` },
     ]));
+    top.appendChild(main);
+    target.appendChild(top);
 
     const spark = el("div", "spark report-since");
     const line = status.kind === "wait"
@@ -151,7 +232,7 @@ export function mount(root, ctx, projectId) {
       ? "henüz koşum yok"
       : `son koşum ${relTime(card.lastRunAt)} · ${card.runSeries.length} koşum kayıtlı`;
     spark.appendChild(since);
-    main.appendChild(spark);
+    target.appendChild(spark);
 
     // Review progress: green = decided, amber remainder = still waiting.
     if (pendingIds.length > 0) {
@@ -171,69 +252,145 @@ export function mount(root, ctx, projectId) {
       };
       updateProgress();
       prog.append(label, track);
-      main.appendChild(prog);
+      target.appendChild(prog);
     } else {
       updateProgress = () => {};
     }
-
-    hero.appendChild(main);
-    return hero;
   }
 
-  function renderCases(pendingRows, details) {
-    const frag = document.createDocumentFragment();
-    // One card per finding: the highest-suspicion pending row speaks for it.
-    const byFinding = new Map();
-    for (const row of pendingRows) {
-      const list = byFinding.get(row.findingId) ?? [];
-      list.push(row);
-      byFinding.set(row.findingId, list);
-    }
-    const groups = [...byFinding.values()]
-      .map((rows) => rows.sort((a, b) => b.suspicion - a.suspicion))
-      .sort((a, b) => b[0].suspicion - a[0].suspicion);
-
-    if (groups.length === 0) {
-      frag.appendChild(el("p", "empty-note", "Bakmanı isteyen vaka yok — kuyruk boş."));
-      return frag;
-    }
-    const head = el("div", "case-head");
-    head.appendChild(el("p", "eyebrow", `Bakmanı isteyen ${groups.length} vaka`));
-    frag.appendChild(head);
-
-    const list = el("div", "case-list");
+  /** Contents rows: highlighted = wants a decision, faded = nothing to do. */
+  function renderContents(groups, card, candidateCount, target) {
+    const list = el("div", "icindekiler");
     groups.forEach((rows, i) => {
-      // An undo puts the case back on the counter; the progress line must not
-      // keep claiming a decision the user just withdrew.
-      const onDecision = (ids, decision) => {
-        for (const id of ids) {
-          if (decision === "pending") decidedIds.delete(id);
-          else decidedIds.add(id);
-        }
-        updateProgress();
-      };
-      list.appendChild(caseCard(rows, details.get(rows[0].findingId), i, ctx.navigate, onDecision));
+      const row = rows[0];
+      const line = el("div", "satir-not sicak");
+      line.appendChild(el("span", "carpi", "✗"));
+      const title = row.diagnosis?.title !== "" && row.diagnosis?.title !== undefined
+        ? row.diagnosis.title
+        : `Not #${row.findingId}`;
+      line.appendChild(el("span", "satir-ad", title));
+      line.appendChild(el("small", "", `sf. ${i + 1} →`));
+      pressable(line, () => {
+        casesOpen = true;
+        applyLeaves();
+        scrollToCase(i);
+      });
+      list.appendChild(line);
     });
-    frag.appendChild(list);
-    return frag;
-  }
 
-  function renderQuiet(card, candidateCount) {
-    const quiet = el("div", "quiet");
     if (card.clean > 0) {
-      const row = el("div", "quiet-row");
-      const squares = el("span", "squares");
-      for (let i = 0; i < Math.min(card.clean, 40); i += 1) squares.appendChild(el("i"));
-      row.appendChild(squares);
-      row.appendChild(el("span", "", `${card.clean} not temiz`));
-      quiet.appendChild(row);
+      const line = el("div", "satir-not");
+      line.appendChild(el("span", "tik", "✓"));
+      line.appendChild(el("span", "satir-ad", `${card.clean} not temiz — dokunma`));
+      line.appendChild(el("small", "", "sicilde"));
+      list.appendChild(line);
     }
     if (candidateCount > 0) {
-      quiet.appendChild(el("div", "quiet-row",
+      const line = el("div", "satir-not");
+      line.appendChild(el("span", "tik", "·"));
+      line.appendChild(el("span", "satir-ad",
         candidateCount === 1 ? "1 aday sıradaki koşumda" : `${candidateCount} aday sıradaki koşumda`,
       ));
+      line.appendChild(el("small", "", "ölçülmedi"));
+      list.appendChild(line);
     }
-    return quiet;
+    if (list.childElementCount === 0) {
+      list.appendChild(el("p", "empty-note", "Bu defterde henüz kayıt yok."));
+    }
+    target.appendChild(list);
+  }
+
+  function renderContentsLeaf(card, groups, pendingIds, candidateCount) {
+    const { node, body } = pageLeaf("yaprak--icindekiler");
+    renderHero(card, pendingIds, body);
+    renderContents(groups, card, candidateCount, body);
+
+    const corners = el("div", "koseler");
+    const close = el("span", "kose geri", "⟵ kapağı kapat");
+    pressable(close, () => {
+      coverOpen = false;
+      applyLeaves();
+    });
+    corners.appendChild(close);
+    if (groups.length > 0) {
+      const go = el("span", "kose", "şüpheli vakaya git ➜");
+      pressable(go, () => {
+        casesOpen = true;
+        applyLeaves();
+        scrollToCase(0);
+      });
+      corners.appendChild(go);
+    }
+    body.appendChild(corners);
+    return node;
+  }
+
+  function renderCasesLeaf(groups, details) {
+    const { node, body } = pageLeaf("yaprak--vaka");
+    body.appendChild(el("span", "vaka-etiket", "VAKALAR"));
+
+    if (groups.length === 0) {
+      body.appendChild(el("p", "empty-note", "Bakmanı isteyen vaka yok — kuyruk boş."));
+      scrollToCase = () => {};
+    } else {
+      const head = el("div", "case-head");
+      head.appendChild(el("p", "eyebrow", `Bakmanı isteyen ${groups.length} vaka`));
+      body.appendChild(head);
+
+      const list = el("div", "case-list");
+      const cards = groups.map((rows, i) => {
+        // An undo puts the case back on the counter; the progress line must not
+        // keep claiming a decision the user just withdrew.
+        const onDecision = (ids, decision) => {
+          for (const id of ids) {
+            if (decision === "pending") decidedIds.delete(id);
+            else decidedIds.add(id);
+          }
+          updateProgress();
+        };
+        const cardNode = caseCard(rows, details.get(rows[0].findingId), i, ctx.navigate, onDecision);
+        list.appendChild(cardNode);
+        return cardNode;
+      });
+      body.appendChild(list);
+      // Scrolls the page body, not the window: the leaf is position:absolute
+      // and the document behind it does not move with it, so scrollIntoView
+      // would drag the whole notebook off-screen instead.
+      scrollToCase = (i) => {
+        const target = cards[Math.min(i, cards.length - 1)];
+        if (target === undefined) return;
+        body.scrollTo({ top: Math.max(0, target.offsetTop - 24), behavior: "smooth" });
+      };
+    }
+
+    const corners = el("div", "koseler");
+    const backRow = el("span", "kose geri", "⟵ içindekilere dön");
+    pressable(backRow, () => {
+      casesOpen = false;
+      applyLeaves();
+    });
+    corners.appendChild(backRow);
+    body.appendChild(corners);
+    return node;
+  }
+
+  function renderDefter(card, groups, details, pendingIds, candidateCount) {
+    const stage = el("div", "defter-stage");
+    const defter = el("div", "defter");
+    // Bottom-to-top: the leaf turned last must sit under the ones above it.
+    const vaka = renderCasesLeaf(groups, details);
+    const contents = renderContentsLeaf(card, groups, pendingIds, candidateCount);
+    const cover = renderCover(card);
+    defter.append(vaka, contents, cover);
+    stage.appendChild(defter);
+
+    applyLeaves = () => {
+      cover.classList.toggle("acik", coverOpen);
+      contents.classList.toggle("acik", casesOpen);
+      defter.classList.toggle("defter--acik", coverOpen);
+    };
+    applyLeaves();
+    return stage;
   }
 
   async function load() {
@@ -281,11 +438,23 @@ export function mount(root, ctx, projectId) {
       }));
       if (seq !== loadSeq) return;
 
+      // One card per finding: the highest-suspicion pending row speaks for it.
+      const byFinding = new Map();
+      for (const row of myPending) {
+        const list = byFinding.get(row.findingId) ?? [];
+        list.push(row);
+        byFinding.set(row.findingId, list);
+      }
+      const groups = [...byFinding.values()]
+        .map((rows) => rows.sort((a, b) => b.suspicion - a.suspicion))
+        .sort((a, b) => b[0].suspicion - a[0].suspicion);
+
       wrap.textContent = "";
       decidedIds = new Set();
-      wrap.appendChild(renderHero(card, myPending.map((r) => r.id)));
-      wrap.appendChild(renderCases(myPending, details));
-      wrap.appendChild(renderQuiet(card, candidateCount));
+      // Nothing left to look at behind the contents page: don't restore a leaf
+      // state that would open onto an empty case page.
+      if (groups.length === 0) casesOpen = false;
+      wrap.appendChild(renderDefter(card, groups, details, myPending.map((r) => r.id), candidateCount));
     } catch (err) {
       if (seq !== loadSeq) return;
       showMessage(`Yükleme hatası: ${err instanceof Error ? err.message : String(err)}`);
