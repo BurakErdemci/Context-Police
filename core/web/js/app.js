@@ -99,6 +99,10 @@ async function pollVersion() {
       : v.schemaOutdated === true
         ? "outdated"
         : `${v.maxVerdictId}:${v.maxEventId}`;
+    // Second check, for the same reason as the one above: an animation can have
+    // started while the fetch was in flight, and refreshing now would tear down
+    // the screen it is running on. `lastVersion` is again left untouched.
+    if (animBusy()) return;
     if (lastVersion !== null && lastVersion !== key) {
       activeScreen?.refresh();
     }

@@ -387,7 +387,6 @@ export function mount(root, ctx, projectId) {
     applyLeaves = () => {
       cover.classList.toggle("acik", coverOpen);
       contents.classList.toggle("acik", casesOpen);
-      defter.classList.toggle("defter--acik", coverOpen);
     };
     applyLeaves();
     return stage;

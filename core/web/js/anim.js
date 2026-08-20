@@ -174,6 +174,13 @@ export function unfileRevert(target) {
 export function playDecision(decision, target) {
   if (decision === "approved") return stampApprove(target);
   if (decision === "rejected") return basketReject(target);
-  if (decision === "pending") return unfileRevert(target);
+  // Undo only un-crumples a card that was actually thrown. Reverting an
+  // approval would otherwise play the card open from scale 0 — a gesture for a
+  // crumple that never happened.
+  if (decision === "pending") {
+    const thrown = target instanceof Element
+      && (target.classList.contains("is-filed") || target.classList.contains("is-crumpled"));
+    return thrown ? unfileRevert(target) : Promise.resolve();
+  }
   return Promise.resolve();
 }

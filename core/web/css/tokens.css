@@ -121,11 +121,20 @@
   --amber-ink: #231A05;
   --drift: #E0713A;
 
-  --v-gecerli: #58C08A;
-  --v-curuk: #E0713A;
-  --v-dogustan-yanlis: #B9B7FA;
-  --v-olculemez: #9A9CAC;
-  --v-tarihsel: #8B8DA0;
+  /* Verdict colors, recalibrated for the paper ground the badges now live on
+     and hue-matched to COLORS in js/ui.js (rings and bands use those hexes
+     directly). Measured on --paper: the retired dark-skin values ran 1.7–3.0:1,
+     every value here clears 4.8:1. "dogustan-yanlis" is ink rather than a hue
+     on purpose — a note that was wrong when written is not a decay color. */
+  /* A darker sibling of --green-pencil (#4E8A5A), which is 3.8:1 on paper and
+     misses the floor at the badge's 11px. The shapes that carry no text —
+     rings, bands, the anchor dot — keep the lighter pencil. */
+  --v-gecerli: #3F6F48;
+  --v-curuk: var(--red-ink);
+  --v-dogustan-yanlis: #57524A;
+  --v-olculemez: var(--graphite);
+  /* Sepia: the archive tone, the one verdict that means "no longer current". */
+  --v-tarihsel: #7E6040;
 
   --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px;
   --s-5: 24px; --s-6: 32px; --s-7: 48px;

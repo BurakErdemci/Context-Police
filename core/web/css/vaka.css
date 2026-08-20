@@ -18,6 +18,24 @@
 
 .detail-back { grid-column: 1 / -1; margin-bottom: calc(-1 * var(--s-3)); }
 
+/* The shared `.panel` is still the dark-skin card the runs screen is built on,
+   so the paper ground is scoped to this screen instead of moved into the token.
+   Without it every rule below — all of which assume paper — writes dark ink on
+   a dark card. */
+.detail .panel {
+  background: var(--paper);
+  border: 2px solid color-mix(in srgb, var(--ink) 28%, transparent);
+  border-radius: var(--sketchy-radius);
+  color: var(--ink);
+}
+
+/* --dim is 2.5:1 on paper. This rule sits ABOVE the per-block eyebrow rules
+   (.detail-header, .advice, .correction): equal specificity, so those keep
+   their own voices and only the unclaimed labels fall back to pencil. */
+.detail .eyebrow { color: var(--graphite); }
+
+.detail .panel .empty-note { color: var(--graphite); }
+
 .detail--message { grid-template-columns: minmax(0, 1fr) !important; }
 
 .detail--message .back-link { justify-self: start; }
@@ -118,7 +136,7 @@
 
 .ledger-body { display: flex; flex-direction: column; gap: var(--s-2); }
 
-.ledger-field { margin: 0; font-size: 13px; color: var(--prose); line-height: 1.5; }
+.ledger-field { margin: 0; font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
 
 .ledger-field__k {
   display: inline-block;

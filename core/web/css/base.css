@@ -59,9 +59,13 @@ html, body {
   transition: color 160ms var(--ease);
 }
 
-.tabs a:hover { color: var(--ink); }
+/* The topbar ground stayed dark (--bg), so --ink — which flipped to paper-side
+   ink with the theme — disappears on it. Paper for hover, highlighter for the
+   current tab: both read against #17181D, and they stay distinct from each
+   other. */
+.tabs a:hover { color: var(--paper); }
 
-.tabs a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+.tabs a[aria-current="page"] { color: var(--hilite); font-weight: 600; }
 
 /* --- layout ---------------------------------------------------------------- */
 
@@ -257,9 +261,11 @@ main#root {
   font: 500 11px/1.4 var(--sans);
   letter-spacing: 0.03em;
   white-space: nowrap;
-  color: var(--badge-color, var(--prose));
-  background: color-mix(in srgb, var(--badge-color, var(--dim)) 13%, transparent);
-  border: 1px solid color-mix(in srgb, var(--badge-color, var(--dim)) 32%, transparent);
+  /* Fallback for a verdict with no --badge-color rule: pencil, not the dark
+     skin's --dim (2.5:1 on the paper card every badge sits on). */
+  color: var(--badge-color, var(--graphite));
+  background: color-mix(in srgb, var(--badge-color, var(--graphite)) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-color, var(--graphite)) 32%, transparent);
 }
 
 .badge--gecerli { --badge-color: var(--v-gecerli); }
@@ -269,7 +275,7 @@ main#root {
 .badge--tarihsel { --badge-color: var(--v-tarihsel); }
 
 .badge--repeat {
-  --badge-color: var(--dim);
+  --badge-color: var(--graphite);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }

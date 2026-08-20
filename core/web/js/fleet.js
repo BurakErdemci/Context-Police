@@ -36,7 +36,9 @@ function heroSentence(cards) {
   }
   const warn = el("span", "warn");
   if (pendingCards.length === 1) {
-    warn.appendChild(document.createTextNode(`${pendingCards[0].name}'te ${totalPending} onay bekliyor!!`));
+    // The suffix rides on "defterinde", never on the project name: Turkish vowel
+    // harmony would need per-name inflection ("Divan'te" vs "Divan'da").
+    warn.appendChild(document.createTextNode(`${pendingCards[0].name} defterinde ${totalPending} onay bekliyor!!`));
   } else {
     warn.appendChild(document.createTextNode(
       `${pendingCards.length} projede toplam ${totalPending} onay bekliyor!!`,
