@@ -150,7 +150,7 @@ type SchemaShape = {
     claims: {
       items: {
         required: string[];
-        properties: { verdict: { enum: string[] }; unmeasurable_reason?: { enum: string[] } };
+        properties: { verdict: { enum: string[] }; unmeasurable_reason?: { enum: (string | null)[] } };
       };
     };
   };
@@ -169,9 +169,11 @@ test("şema dogustan-yanlis'i yalnız sınır beslendiğinde kabul eder", () => 
 
 test("kapı kapalıyken şema alt sebebi kabul eder, açıkken sunmaz", () => {
   const gated = claimItem(adjudicatorSchema({ bornWrongAvailable: false }));
-  assert.deepEqual(gated.properties.unmeasurable_reason?.enum, [USER_RESOLVABLE, NOT_MEASURABLE]);
-  // Zorunlu DEĞİL: sıradan bir hükümde alan hiç yazılmaz.
-  assert.ok(!gated.required.includes(UNMEASURABLE_REASON_FIELD));
+  assert.deepEqual(gated.properties.unmeasurable_reason?.enum, [USER_RESOLVABLE, NOT_MEASURABLE, null]);
+  // Provider strict mode (measured 20 Aug 2026, invalid_json_schema 400):
+  // `required` must list EVERY key in properties; optionality is expressed
+  // with null in the enum, never by omission from `required`.
+  assert.ok(gated.required.includes(UNMEASURABLE_REASON_FIELD));
   // Kapı açıkken tarih ölçülmüş demektir; kullanıcıya devredilecek bir şey yok.
   assert.equal(claimItem(adjudicatorSchema({ bornWrongAvailable: true })).properties.unmeasurable_reason, undefined);
 });
@@ -295,7 +297,7 @@ test("uçtan uca: tarihsiz not için alt sürece giden şema dogustan-yanlis ta�
   assert.ok(!verdictEnum(JSON.parse(schema)).includes(BORN_WRONG));
   // Dürüst çıkış alt sürece GERÇEKTEN gidiyor: şemada alan, istemde kural.
   assert.deepEqual(claimItem(JSON.parse(schema)).properties.unmeasurable_reason?.enum,
-    [USER_RESOLVABLE, NOT_MEASURABLE]);
+    [USER_RESOLVABLE, NOT_MEASURABLE, null]);
   assert.match(prompt, /ONUN YERİNE `curuk` YAZMA/);
   assert.match(prompt, /KULLANILAMAZ/);
   assert.match(prompt, /Bir sırrın VARLIĞI ölçülür/);

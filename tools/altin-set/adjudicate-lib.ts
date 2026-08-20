@@ -552,8 +552,16 @@ export function adjudicatorSchema(opts: { bornWrongAvailable: boolean }): unknow
   // Kapı açıkken (sınır beslenmiş) `user_resolvable` diyecek bir şey YOK —
   // notun tarihi ölçülmüş durumda — ve alanı yine de sunmak modele
   // kullanmayacağı bir kaçış yolu göstermek olurdu.
+  const required = ["text", "line_start", "line_end", "verdict", "evidence"];
   if (!opts.bornWrongAvailable) {
-    properties[UNMEASURABLE_REASON_FIELD] = { enum: [USER_RESOLVABLE, NOT_MEASURABLE] };
+    // Provider strict mode (measured 20 Aug 2026, invalid_json_schema 400):
+    // `required` must list every key in properties, so optionality is carried
+    // by null in the enum, not by omission from `required`.
+    properties[UNMEASURABLE_REASON_FIELD] = {
+      type: ["string", "null"],
+      enum: [USER_RESOLVABLE, NOT_MEASURABLE, null],
+    };
+    required.push(UNMEASURABLE_REASON_FIELD);
   }
   return {
     type: "object",
@@ -565,7 +573,7 @@ export function adjudicatorSchema(opts: { bornWrongAvailable: boolean }): unknow
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["text", "line_start", "line_end", "verdict", "evidence"],
+          required,
           properties,
         },
       },
