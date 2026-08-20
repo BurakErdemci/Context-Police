@@ -1,110 +1,99 @@
-// Giriş (fleet) screen — mock-giris-v5.html is the binding layout: one serif
-// hero sentence + overall band, then a grid of project health cards.
+// Giriş (fleet) screen — the detective's desk. Binding layout:
+// docs/superpowers/specs/2026-08-17-vaka-defteri-maketi.html, section
+// "DEDEKTİF MASASI": handwritten hero line over a wooden desk, a shelf of
+// mini case notebooks (one per project), and post-its for the worst offenders.
 
 import {
-  el, ring, band, bandKey, sparkline, relTime, daysSince, possessive,
-  projectStatus, clickable, handleStoreStates, shortPath, COLORS,
+  el, relTime, possessive, verdictLabel,
+  projectStatus, clickable, handleStoreStates, shortPath,
 } from "./ui.js";
 
-// Hero sentence, composed from the cards. Amber only when pending > 0.
+// How many post-its fit on the desk before it stops reading as a desk.
+const POSTIT_LIMIT = 2;
+
+// Hero sentence, composed from the cards. Highlighter yellow only when pending > 0.
 function heroSentence(cards) {
-  const h2 = el("p", "h2");
+  const h2 = el("div", "masa-baslik");
   const pendingCards = cards.filter((c) => c.pending > 0);
   const totalPending = pendingCards.reduce((s, c) => s + c.pending, 0);
   const n = cards.length;
-  h2.appendChild(document.createTextNode(n === 1 ? "1 proje izleniyor. " : `${n} proje izleniyor. `));
+  h2.appendChild(document.createTextNode(n === 1 ? "Masada 1 dosya var. " : `Masada ${n} dosya var. `));
 
   if (pendingCards.length === 0) {
-    h2.appendChild(document.createTextNode(
-      n === 1 ? "Şu an her şey sağlıklı." : "Hepsi sağlıklı.",
-    ));
+    h2.appendChild(document.createTextNode(n === 1 ? "Sakin." : "Hepsi sakin."));
     return h2;
   }
 
-  // Small counts spelled out, as in the approved mock ("İkisi sağlıklı").
+  // Small counts spelled out, as in the approved mock ("İkisi sakin").
   const SPELLED = ["", "biri", "ikisi", "üçü", "dördü", "beşi", "altısı", "yedisi", "sekizi", "dokuzu"];
-  const healthy = n - pendingCards.length;
-  if (n > 1 && healthy > 0) {
-    const word = healthy < SPELLED.length ? SPELLED[healthy] : possessive(healthy);
+  const calm = n - pendingCards.length;
+  if (n > 1 && calm > 0) {
+    const word = calm < SPELLED.length ? SPELLED[calm] : possessive(calm);
     // toLocaleUpperCase: plain toUpperCase turns "ikisi" into "Ikisi" (dotless I).
     h2.appendChild(document.createTextNode(
-      `${word.charAt(0).toLocaleUpperCase("tr-TR")}${word.slice(1)} sağlıklı; `,
+      `${word.charAt(0).toLocaleUpperCase("tr-TR")}${word.slice(1)} sakin; `,
     ));
   }
+  const warn = el("span", "warn");
   if (pendingCards.length === 1) {
-    const em = el("em", "", pendingCards[0].name);
-    h2.append(em, document.createTextNode(" projesinde "));
+    warn.appendChild(document.createTextNode(`${pendingCards[0].name}'te ${totalPending} onay bekliyor!!`));
   } else {
-    h2.appendChild(document.createTextNode(`${pendingCards.length} projede toplam `));
+    warn.appendChild(document.createTextNode(
+      `${pendingCards.length} projede toplam ${totalPending} onay bekliyor!!`,
+    ));
   }
-  h2.appendChild(el("span", "warn", `${totalPending} onay bekliyor`));
-  h2.appendChild(document.createTextNode("."));
+  h2.appendChild(warn);
   return h2;
 }
 
-function projectCard(card, i, navigate) {
+const PUL = {
+  wait: { cls: "acil", label: (card) => `${card.pending} ONAY BEKLİYOR` },
+  ok: { cls: "tamam", label: () => "SAĞLIKLI ✓" },
+  idle: { cls: "uyku", label: () => "uyuyor… zzz" },
+};
+
+function miniDefter(card, i, navigate) {
   const status = projectStatus(card);
-  const node = el("article", "pcard");
+  const node = el("article", `mini-defter mini-defter--${status.kind}`);
   node.style.setProperty("--i", String(i)); // entrance stagger index
+  node.title = shortPath(card.path);
   clickable(node, () => navigate(`#/proje/${card.id}`));
 
-  const top = el("div", "ptop");
-  const names = el("div");
-  names.appendChild(el("div", "pname", card.name));
-  names.appendChild(el("div", "ppath", shortPath(card.path)));
-  top.appendChild(names);
-  top.appendChild(el("span", `status status--${status.kind}`, status.label));
-  node.appendChild(top);
+  node.appendChild(el("span", "serit"));
 
-  const body = el("div", "pbody");
-  const ringColor = card.pending > 0 ? COLORS.amber : COLORS.green;
-  body.appendChild(ring(card.healthPct, ringColor, { faded: status.kind === "idle" }));
+  const etiket = el("div", "etiket");
+  etiket.appendChild(el("b", "", card.name));
+  etiket.appendChild(el("small", "", `${card.notes} not · %${Math.round(card.healthPct)}`));
+  node.appendChild(etiket);
 
-  const stats = el("div", "pstats");
-  stats.appendChild(band([
-    { n: card.clean, color: COLORS.green },
-    { n: card.suspects, color: COLORS.violetHi },
-  ]));
-
-  const counts = el("div", "prow");
-  const count = (n, label) => {
-    const s = el("span");
-    s.append(el("b", "", String(n)), document.createTextNode(` ${label}`));
-    return s;
-  };
-  counts.appendChild(count(card.notes, "not"));
-  counts.appendChild(count(card.suspects, "şüpheli"));
-  if (card.anchorless > 0) counts.appendChild(count(card.anchorless, "çapasız"));
-  stats.appendChild(counts);
-
-  const spark = el("div", "prow spark");
-  const line = status.kind === "wait"
-    ? { stroke: COLORS.violetDim, dot: COLORS.violet }
-    : status.kind === "ok"
-      ? { stroke: COLORS.greenDim, dot: COLORS.green }
-      : { stroke: COLORS.idleLine };
-  spark.appendChild(sparkline(card.runSeries, line));
-  if (status.kind === "idle") {
-    const days = daysSince(card.lastRunAt);
-    spark.appendChild(el("span", "", days === null
-      ? "henüz kıpırtı yok"
-      : `${Math.round(days)} gündür kıpırtı yok — uykuda, ölü değil`));
-  } else {
-    spark.appendChild(el("span", "", `son koşum ${relTime(card.lastRunAt)}`));
-  }
-  stats.appendChild(spark);
-
-  body.appendChild(stats);
-  node.appendChild(body);
-
-  const foot = el("div", "pfoot");
-  foot.appendChild(el("span", "",
-    card.runSeries.length === 0 ? "henüz koşum yok" : `${card.runSeries.length} koşum kayıtlı`,
-  ));
-  foot.appendChild(el("span", "go", "rapora git →"));
-  node.appendChild(foot);
+  const pul = PUL[status.kind] ?? PUL.ok;
+  node.appendChild(el("span", `pul ${pul.cls}`, pul.label(card)));
 
   return node;
+}
+
+function postIt(row, navigate) {
+  const node = el("article", "postit");
+  clickable(node, () => navigate(`#/proje/${row.projectId}`));
+  node.appendChild(el("span", "atas", "📎"));
+  const title = row.diagnosis?.title !== "" && row.diagnosis?.title !== undefined
+    ? row.diagnosis.title
+    : row.preview;
+  node.appendChild(document.createTextNode(`«${title}»`));
+  node.appendChild(el("small", "", `${verdictLabel(row.verdict)} · ${Number(row.suspicion).toFixed(2)}`));
+  return node;
+}
+
+// "son devriye … · N not izleniyor" — derived from the cards, no extra request.
+function deskFooter(cards) {
+  const notes = cards.reduce((s, c) => s + c.notes, 0);
+  const last = cards
+    .map((c) => c.lastRunAt)
+    .filter((v) => typeof v === "string")
+    .sort()
+    .pop();
+  const patrol = last === undefined ? "henüz devriye yok" : `son devriye ${relTime(last)}`;
+  return el("div", "masa-alt", `${patrol} · ${notes} not izleniyor`);
 }
 
 export function mount(root, ctx) {
@@ -117,45 +106,56 @@ export function mount(root, ctx) {
     wrap.appendChild(el("div", "screen-message", text));
   }
 
-  function render(cards) {
+  function render(cards, pending) {
     wrap.textContent = "";
-
-    const hero = el("div", "fleet-hero");
     if (cards.length === 0) {
       showMessage("Henüz izlenen proje yok — `context-police audit` ilk kartı açar.");
       return;
     }
-    hero.appendChild(heroSentence(cards));
 
-    const clean = cards.reduce((s, c) => s + c.clean, 0);
-    const suspects = cards.reduce((s, c) => s + c.suspects, 0);
-    const pending = cards.reduce((s, c) => s + c.pending, 0);
-    hero.appendChild(band([
-      { n: clean, color: COLORS.green },
-      { n: suspects, color: COLORS.violetHi },
-      { n: pending, color: COLORS.amber },
-    ], true));
-    hero.appendChild(bandKey([
-      { n: clean, color: COLORS.green, label: `${clean} temiz not` },
-      { n: suspects, color: COLORS.violetHi, label: `${suspects} şüpheli` },
-      { n: pending, color: COLORS.amber, label: `${pending} onay bekliyor` },
-    ]));
-    wrap.appendChild(hero);
+    const masa = el("div", "masa");
+    masa.appendChild(heroSentence(cards));
+    masa.appendChild(deskFooter(cards));
 
-    const grid = el("div", "fleet-grid");
-    cards.forEach((card, i) => grid.appendChild(projectCard(card, i, ctx.navigate)));
-    wrap.appendChild(grid);
+    const raf = el("div", "raf");
+    cards.forEach((card, i) => raf.appendChild(miniDefter(card, i, ctx.navigate)));
+    masa.appendChild(raf);
+
+    const postitler = el("div", "postitler");
+    if (pending.length === 0) {
+      postitler.appendChild(el("div", "postit-bos", "masa temiz — yapışkan not yok"));
+    } else {
+      for (const row of pending.slice(0, POSTIT_LIMIT)) {
+        postitler.appendChild(postIt(row, ctx.navigate));
+      }
+    }
+    masa.appendChild(postitler);
+
+    wrap.appendChild(masa);
+  }
+
+  // Post-its are decoration over the desk, not the desk: a store state or a
+  // failure here must not cost the user the project shelf, so it degrades to
+  // the empty desk instead of propagating.
+  async function loadPending() {
+    try {
+      const rows = await ctx.apiGet("/api/verdicts?review=pending");
+      if (!Array.isArray(rows)) return [];
+      return rows.slice().sort((a, b) => Number(b.suspicion) - Number(a.suspicion));
+    } catch {
+      return [];
+    }
   }
 
   async function load() {
     try {
-      const cards = await ctx.apiGet("/api/projects");
+      const [cards, pending] = await Promise.all([ctx.apiGet("/api/projects"), loadPending()]);
       if (!Array.isArray(cards)) {
         if (handleStoreStates(cards, showMessage)) return;
         showMessage("Beklenmeyen cevap.");
         return;
       }
-      render(cards);
+      render(cards, pending);
     } catch (err) {
       showMessage(`Yükleme hatası: ${err instanceof Error ? err.message : String(err)}`);
     }

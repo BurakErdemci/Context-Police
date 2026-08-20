@@ -1,68 +1,227 @@
-/* --- fleet (giriş) ---------------------------------------------------------- */
+/* --- masa (giriş / dedektif masası) -----------------------------------------
+   Binding mock: docs/superpowers/specs/2026-08-17-vaka-defteri-maketi.html,
+   section "1) DEDEKTİF MASASI". Everything here sits ON the desk, so the
+   colors are paper-on-wood rather than the app's ink-on-card scale.
+   -------------------------------------------------------------------------- */
 
 .fleet { display: flex; flex-direction: column; }
 
-.fleet-hero { padding: var(--s-5) 0 var(--s-2); }
-
-.fleet-hero .h2 {
-  margin: 0;
-  font-family: var(--serif);
-  font-size: 22px;
-  line-height: 1.35;
-  font-weight: 500;
-  text-wrap: balance;
-  max-width: 38ch; /* two balanced lines for the typical sentence, as in the mock */
-}
-
-.fleet-hero .h2 em { font-style: normal; color: var(--accent-hi); }
-.fleet-hero .h2 .warn { color: var(--amber); }
-
-.fleet-hero .band--big { margin-top: var(--s-4); }
-
-.fleet-grid {
-  padding: 18px 0 26px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-}
-
-@media (max-width: 760px) { .fleet-grid { grid-template-columns: 1fr; } }
-
-.pcard {
+.masa {
   position: relative;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 18px;
-  cursor: pointer;
-  transition: border-color 160ms var(--ease);
+  overflow: hidden;
+  margin: 22px 0 26px;
+  padding: 30px 30px 36px;
+  border-radius: 10px;
+  /* Wood: the repeating stripe is the plank seam, the linear-gradient the grain. */
+  background:
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.07) 0 3px, transparent 3px 90px),
+    linear-gradient(165deg, var(--wood), var(--desk));
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
-.pcard:hover, .pcard:focus-visible { border-color: var(--accent); }
-
-.ptop { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-
-.pbody {
-  display: grid;
-  grid-template-columns: 84px 1fr;
-  gap: 16px;
-  align-items: center;
-  margin-top: 16px;
+/* Desk lamp: a warm pool of light falling from the upper left. */
+.masa::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 80% 65% at 38% 8%, rgba(255, 236, 190, 0.16), transparent 60%);
 }
 
-.pstats { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
-.prow { display: flex; align-items: center; gap: 12px; font-size: 11.5px; color: var(--dim); flex-wrap: wrap; }
-.prow b { color: #C6CBDD; font-weight: 600; font-variant-numeric: tabular-nums; }
+.masa-baslik {
+  position: relative;
+  z-index: 1;
+  max-width: 34ch;
+  color: var(--paper);
+  font: 700 24px/1.35 var(--hand);
+  text-wrap: balance;
+}
 
-.pfoot {
+.masa-baslik .warn { color: var(--hilite); }
+
+.masa-alt {
+  position: relative;
+  z-index: 1;
+  margin-top: 4px;
+  color: var(--paper2);
+  opacity: 0.72;
+  font: 400 13.5px var(--hand);
+}
+
+/* --- raf: the shelf of case notebooks -------------------------------------- */
+
+.raf {
+  position: relative;
+  z-index: 1;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--s-3);
-  margin-top: 14px;
-  font-size: 11.5px;
-  color: var(--dim2);
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 26px;
+  margin-top: 26px;
 }
 
-.pfoot .go { color: var(--dim); transition: color 160ms var(--ease); }
-.pcard:hover .go, .pcard:focus-visible .go { color: var(--accent-hi); }
+.mini-defter {
+  position: relative;
+  flex: none;
+  width: 168px;
+  aspect-ratio: 3 / 4;
+  border-radius: 5px 12px 10px 5px;
+  background: linear-gradient(160deg, var(--kapak), color-mix(in srgb, var(--kapak) 72%, #000));
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.45);
+  color: var(--ink);
+  cursor: pointer;
+  /* Each notebook is dropped on the shelf at its own slight angle; the cycle
+     is long enough that a full shelf never reads as a repeating pattern. */
+  transform: rotate(var(--tilt, -1deg));
+  transition: transform 180ms ease;
+  animation: defter-in 420ms ease-out backwards;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+
+.raf .mini-defter:nth-child(5n + 1) { --tilt: -2deg; }
+.raf .mini-defter:nth-child(5n + 2) { --tilt: 1.4deg; }
+.raf .mini-defter:nth-child(5n + 3) { --tilt: -0.6deg; }
+.raf .mini-defter:nth-child(5n + 4) { --tilt: 2.2deg; }
+.raf .mini-defter:nth-child(5n + 5) { --tilt: -1.4deg; }
+
+@keyframes defter-in {
+  from { opacity: 0; transform: translateY(14px) rotate(var(--tilt, -1deg)); }
+}
+
+.mini-defter:hover,
+.mini-defter:focus-visible {
+  transform: translateY(-8px) rotate(calc(var(--tilt, -1deg) + 1deg));
+  outline: none;
+}
+
+.mini-defter:focus-visible { box-shadow: 0 10px 22px rgba(0, 0, 0, 0.45), 0 0 0 3px var(--hilite); }
+
+/* Sleeping project: same notebook, pushed back into the shelf's shadow.
+   Faded, never hidden — "unused ≠ decayed" (design §3.1). */
+.mini-defter--idle { opacity: 0.72; filter: saturate(0.35); }
+
+.mini-defter .serit {
+  position: absolute;
+  top: 0;
+  right: 14px;
+  bottom: 0;
+  width: 5px;
+  border-radius: 3px;
+  background: var(--graphite);
+  opacity: 0.8;
+}
+
+.mini-defter .etiket {
+  position: absolute;
+  top: 22%;
+  right: 12%;
+  left: 12%;
+  padding: 10px 8px 8px;
+  text-align: center;
+  background: var(--paper);
+  border-radius: var(--sketchy-radius);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.25);
+}
+
+.mini-defter .etiket b {
+  display: block;
+  font: 700 15px/1.2 var(--hand);
+  overflow-wrap: anywhere;
+}
+
+.mini-defter .etiket small {
+  display: block;
+  margin-top: 3px;
+  color: var(--graphite);
+  font: 400 10.5px var(--mono, ui-monospace, "SF Mono", Menlo, monospace);
+}
+
+/* --- pul: the stamp that carries the project's one-word status ------------- */
+
+.pul {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%) rotate(-4deg);
+  padding: 3px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  font: 800 12px var(--hand);
+}
+
+.pul.acil {
+  background: var(--hilite);
+  color: var(--ink);
+  animation: pulsa 2.2s infinite;
+}
+
+@keyframes pulsa { 50% { transform: translateX(-50%) rotate(-4deg) scale(1.08); } }
+
+.pul.tamam { border: 2px solid var(--green-pencil); color: var(--green-pencil); }
+.pul.uyku { border: 2px dashed var(--graphite); color: var(--paper2); opacity: 0.8; }
+
+/* --- postitler: the two worst offenders, stuck to the desk ----------------- */
+
+.postitler {
+  position: absolute;
+  top: 24px;
+  right: 26px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 190px;
+}
+
+.postit {
+  position: relative;
+  padding: 10px 12px;
+  background: var(--postit);
+  color: var(--ink);
+  font: 700 13px/1.35 var(--hand);
+  border-radius: 2px;
+  transform: rotate(2.5deg);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: transform 180ms ease;
+}
+
+.postit:nth-child(2) { transform: rotate(-2deg); }
+.postit:hover, .postit:focus-visible { transform: rotate(0deg) scale(1.03); outline: none; }
+.postit:focus-visible { box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35), 0 0 0 3px var(--hilite); }
+
+.postit small {
+  display: block;
+  margin-top: 4px;
+  color: var(--graphite);
+  font: 400 11px var(--mono, ui-monospace, "SF Mono", Menlo, monospace);
+}
+
+.postit .atas { position: absolute; top: -9px; left: 12px; font-size: 15px; }
+
+.postit-bos {
+  color: var(--paper2);
+  opacity: 0.65;
+  font: 400 13px var(--hand);
+  text-align: right;
+}
+
+/* Under 860px the post-its cannot float over the shelf without covering it,
+   so they drop below the notebooks and lie side by side. */
+@media (max-width: 860px) {
+  .postitler {
+    position: static;
+    width: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    margin-top: 18px;
+  }
+  .postit { width: 190px; }
+  .postit-bos { text-align: left; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pul.acil { animation: none; }
+  .mini-defter { animation: none; transition: none; }
+  .postit { transition: none; }
+}
