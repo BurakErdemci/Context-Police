@@ -3,6 +3,7 @@ import { mount as mountFleet } from "./fleet.js";
 import { mount as mountProject } from "./project.js";
 import { mount as mountDetail } from "./detail.js";
 import { mount as mountRuns } from "./runs.js";
+import { animBusy, runTransition } from "./transition.js";
 
 // Route table: each entry's `mount(root, ctx, ...params)` is called with the
 // route's regex capture groups after (root, ctx).
@@ -17,6 +18,10 @@ const root = document.getElementById("root");
 const ctx = { apiGet, navigate };
 
 let activeScreen = null;
+// Every screen gets its own host element under #root. Each screen's mount()
+// clears the node it is handed, so without a per-screen host the incoming
+// screen would wipe the outgoing one — leaving no old node to animate out.
+let activeHost = null;
 let lastVersion = null;
 let pollInFlight = false;
 
@@ -53,15 +58,22 @@ function syncTabs() {
 function render() {
   syncTabs();
   const route = currentRoute();
-  if (route === null) {
-    root.textContent = "";
-    const p = document.createElement("p");
-    p.textContent = "Bilinmeyen yol.";
-    root.appendChild(p);
-    activeScreen = null;
-    return;
-  }
-  activeScreen = route.mount(root, ctx, ...route.params);
+  const oldHost = activeHost;
+  activeScreen = null;
+  activeHost = null;
+  runTransition(oldHost, () => {
+    const host = document.createElement("div");
+    host.className = "screen";
+    root.appendChild(host);
+    activeHost = host;
+    if (route === null) {
+      const p = document.createElement("p");
+      p.textContent = "Bilinmeyen yol.";
+      host.appendChild(p);
+      return;
+    }
+    activeScreen = route.mount(host, ctx, ...route.params);
+  });
 }
 
 window.addEventListener("hashchange", render);
@@ -70,6 +82,10 @@ async function pollVersion() {
   // A slow fetch must not let ticks stack: skip this tick while one is
   // still outstanding rather than piling up concurrent /api/version calls.
   if (pollInFlight) return;
+  // Skip, never defer: a refresh mid-animation would tear down the screen being
+  // animated. `lastVersion` is left untouched, so the change is still seen by
+  // the next tick 3s later.
+  if (animBusy()) return;
   pollInFlight = true;
   try {
     const v = await apiGet("/api/version");

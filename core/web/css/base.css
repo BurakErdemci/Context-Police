@@ -1,0 +1,360 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+[data-mono] {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow {
+  margin: 0;
+  font: 600 11px/1.2 var(--sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* --- top bar ---------------------------------------------------------------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-5);
+  padding: 14px 26px;
+  border-bottom: 1px solid color-mix(in srgb, var(--track) 40%, transparent);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.brand {
+  margin: 0;
+  font: 700 11px/1.2 var(--sans);
+  letter-spacing: 0.16em;
+  color: var(--accent);
+}
+
+.tabs { display: flex; gap: 20px; }
+
+.tabs a {
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  transition: color 160ms var(--ease);
+}
+
+.tabs a:hover { color: var(--ink); }
+
+.tabs a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+/* --- layout ---------------------------------------------------------------- */
+
+main#root {
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: var(--s-5) 26px var(--s-7);
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s-5);
+}
+
+.screen-message {
+  padding: var(--s-5);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--prose);
+  font-family: var(--serif);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.empty-note {
+  margin: 0;
+  padding: var(--s-4) 0;
+  color: var(--dim);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 15px;
+}
+
+.back-link {
+  display: inline-block;
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  margin-bottom: var(--s-4);
+  transition: color 160ms var(--ease);
+}
+
+.back-link:hover { color: var(--accent-hi); }
+
+/* --- shared visual dictionary ---------------------------------------------- */
+
+/* Segmented verdict-distribution band (never counter boxes). */
+.band { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--track); }
+.band i { display: block; }
+.band--big { height: 10px; border-radius: 5px; max-width: 520px; }
+
+.bandkey {
+  display: flex;
+  gap: 16px;
+  margin-top: var(--s-2);
+  font-size: 11.5px;
+  color: var(--dim);
+  flex-wrap: wrap;
+}
+
+.bandkey s { text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+
+.bandkey .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+/* Health ring. Ring color = most urgent state; sleeping = faded but full. */
+.ring { position: relative; flex: none; }
+.ring svg { transform: rotate(-90deg); display: block; }
+.ring .ring-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.ring--faded svg .ring-arc { opacity: 0.55; }
+
+/* Status chip. Amber pulse only on the pending-action chip. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.status--wait { background: var(--amber); color: var(--amber-ink); }
+.status--wait::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber-ink);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.status--ok { background: #1E2A24; color: #7ACB9C; border: 1px solid #2A4234; }
+.status--idle { background: #22242E; color: var(--dim2); border: 1px solid #2C2E3A; }
+
+/* Run-history sparkline; the mono line beside it. */
+.spark { display: flex; align-items: center; gap: 12px; font-size: 11.5px; color: var(--dim); }
+.spark svg { display: block; flex: none; }
+
+/* Suspicion meter: violet→drift gradient fill on a quiet track. */
+.meter {
+  width: 90px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+  flex: none;
+}
+.meter i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--drift));
+}
+
+/* Anchor chips: mono value + health dot. */
+.anchor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  max-width: 30ch;
+}
+.anchor-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.anchor-chip::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+.anchor-chip--drift::before { background: var(--drift); }
+.anchor-chip--untracked::before { background: var(--faint); }
+.anchor-chip--none { font-family: var(--sans); font-style: italic; }
+.anchor-chip--none::before { background: var(--faint); }
+
+/* Verdict badges: tinted ground, light text, hairline border. */
+.badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font: 500 11px/1.4 var(--sans);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  color: var(--badge-color, var(--prose));
+  background: color-mix(in srgb, var(--badge-color, var(--dim)) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-color, var(--dim)) 32%, transparent);
+}
+
+.badge--gecerli { --badge-color: var(--v-gecerli); }
+.badge--curuk { --badge-color: var(--v-curuk); }
+.badge--dogustan-yanlis { --badge-color: var(--v-dogustan-yanlis); }
+.badge--olculemez { --badge-color: var(--v-olculemez); }
+.badge--tarihsel { --badge-color: var(--v-tarihsel); }
+
+.badge--repeat {
+  --badge-color: var(--dim);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.pname { font-size: 15px; font-weight: 650; }
+.ppath {
+  font-size: 11px;
+  color: var(--dim2);
+  font-family: var(--mono);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.filter-field { display: flex; flex-direction: column; gap: 6px; }
+
+.filter-field select,
+.filter-field input {
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px var(--s-3);
+  font: 13px var(--sans);
+  min-width: 148px;
+  transition: border-color 160ms var(--ease);
+}
+
+.filter-field select:hover,
+.filter-field input:hover { border-color: #31344288; }
+
+.filter-field input::placeholder { color: var(--dim); }
+
+/* Collapsed raw dumps ("teknik döküm" / "ham not"): reachable, never first. */
+.tech-dump summary {
+  cursor: pointer;
+  font: 500 11.5px/1.4 var(--sans);
+  color: var(--dim);
+  user-select: none;
+  transition: color 160ms var(--ease);
+  width: fit-content;
+}
+.tech-dump summary:hover { color: var(--accent-hi); }
+.tech-dump[open] summary { margin-bottom: var(--s-3); color: var(--dim2); }
+
+/* --- review ------------------------------------------------------------------ */
+
+.review-box { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.btn {
+  font: 600 12px/1.4 var(--sans);
+  padding: 5px 13px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: filter 160ms var(--ease), border-color 160ms var(--ease);
+}
+
+/* Amber = the one un-decided action affordance. */
+.btn--approve { background: var(--amber); color: var(--amber-ink); }
+.btn--approve:hover { filter: brightness(1.08); }
+
+.btn--reject { background: transparent; border-color: var(--line); color: var(--dim); }
+.btn--reject:hover { border-color: #31344288; color: var(--ink); }
+
+/* Undo sits next to a settled badge: quieter than either decision affordance,
+   present enough that a misclick is visibly recoverable. */
+.btn--undo {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+  padding: 5px 8px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.btn--undo:hover { color: var(--ink); }
+
+.btn:disabled { opacity: 0.5; cursor: default; filter: none; }
+
+/* A refused decision speaks in one line next to the controls, never a dialog. */
+.review-error {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--drift);
+}
+
+.status--approved { background: #1E2A24; color: #7ACB9C; border: 1px solid #2A4234; }
+.status--rejected { background: #22242E; color: var(--dim2); border: 1px solid #2C2E3A; }
+
+/* --- focus / motion --------------------------------------------------------- */
+
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.filter-field select:focus-visible,
+.filter-field input:focus-visible {
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+/* First-render entrance: cards rise gently, staggered by --i. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pcard,
+.case-card,
+.run-card,
+.detail-col > .panel {
+  animation: rise 320ms var(--ease) both;
+  animation-delay: calc(min(var(--i, 0), 14) * 26ms);
+}

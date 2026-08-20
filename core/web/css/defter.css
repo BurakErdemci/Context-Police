@@ -1,0 +1,134 @@
+/* --- project report (proje raporu) ------------------------------------------ */
+
+.report { display: flex; flex-direction: column; gap: var(--s-5); }
+
+.report-hero {
+  display: flex;
+  gap: 26px;
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 26px;
+}
+
+@media (max-width: 640px) { .report-hero { flex-direction: column; align-items: flex-start; } }
+
+.report-hero-main { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; flex: 1; }
+
+.report-name { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; }
+.report-name .pname { font-size: 16px; }
+
+.report-sentence {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 21px;
+  line-height: 1.4;
+  font-weight: 500;
+  text-wrap: balance;
+  max-width: 40ch;
+}
+
+.report-sentence .warn { color: var(--amber); }
+.report-sentence em { font-style: normal; color: var(--accent-hi); }
+
+.ring-caption {
+  margin-top: var(--s-2);
+  text-align: center;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.report-since { font-size: 11.5px; color: var(--dim); }
+
+/* Case section */
+
+.case-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin: var(--s-2) 0 0;
+}
+
+.case-head .eyebrow { color: var(--ink); letter-spacing: 0.12em; }
+.case-head::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+.case-list { display: flex; flex-direction: column; gap: 12px; }
+
+.case-card {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--case-color, var(--line));
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 160ms var(--ease);
+}
+
+.case-card:hover, .case-card:focus-visible {
+  border-color: var(--accent);
+  border-left-color: var(--case-color, var(--accent));
+}
+
+.case-card--gecerli { --case-color: var(--v-gecerli); }
+.case-card--curuk { --case-color: var(--v-curuk); }
+.case-card--dogustan-yanlis { --case-color: var(--v-dogustan-yanlis); }
+.case-card--olculemez { --case-color: var(--v-olculemez); }
+.case-card--tarihsel { --case-color: var(--v-tarihsel); }
+
+.case-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.case-title { font-size: 14px; font-weight: 650; margin-right: auto; }
+
+.case-sentence {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--prose);
+  max-width: 68ch;
+}
+
+.case-sentence b { font-weight: 600; color: var(--ink); }
+
+.case-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.case-meta .score { font-family: var(--mono); font-size: 12px; color: var(--prose); font-variant-numeric: tabular-nums; }
+.case-meta .sep { color: var(--faint); }
+
+/* Quiet rows */
+
+.quiet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-4) 2px 0;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+
+.quiet-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.squares { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.squares i { width: 8px; height: 8px; border-radius: 2px; background: var(--green); opacity: 0.85; }
+
+/* Review progress in the report hero: green = decided, amber = waiting. */
+.progress { display: flex; flex-direction: column; gap: 6px; max-width: 520px; margin-top: 2px; }
+
+.progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--amber);
+  overflow: hidden;
+}
+.progress-track i {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  width: 0;
+  transition: width 240ms var(--ease);
+}
+
+.progress-label { font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
