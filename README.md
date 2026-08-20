@@ -161,4 +161,4 @@ deferred. The dashboard is M5.
 
 ## License
 
-None yet — private prototype.
+[MIT](LICENSE) © 2026 Burak Emre Erdemci
