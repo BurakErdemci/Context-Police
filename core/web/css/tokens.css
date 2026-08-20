@@ -78,13 +78,32 @@
   src: url("/fonts/jetbrains-mono-latin-ext.woff2") format("woff2");
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
+/* Caveat carries the Turkish glyphs across the two subsets, measured from the
+   woff2 cmap tables rather than the family page: ı lives in the latin file,
+   ğ ş İ Ğ Ş in latin-ext. Both @font-face rules are therefore required — the
+   UI text is Turkish and dropping latin-ext would silently tofu it. */
+@font-face {
+  font-family: "Caveat";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/caveat-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Caveat";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/caveat-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
 
 /* --- tokens ---------------------------------------------------------------- */
 
 :root {
   --bg: #17181D;
   --card: #1D1F26;
-  --ink: #E9E9EF;
   --prose: #D6D7E0;
   --dim: #9A9CAC;
   /* one step above the note's #6D6F80: that hex is 3.6:1 on this ground and
@@ -118,6 +137,37 @@
   --radius: 12px;
   --radius-sm: 6px;
   --ease: cubic-bezier(0.25, 0.6, 0.3, 1);
+
+  /* --- "vaka defteri" paper palette (approved mock:
+     docs/superpowers/specs/2026-08-17-vaka-defteri-maketi.html) ------------- */
+
+  /* These names are a frozen contract: three other screen lanes write var()
+     against them, so a rename here breaks their work silently. */
+
+  /* --ink is the one name shared with the retired dark skin. Its ROLE is
+     unchanged (primary foreground) but the ground flipped from #17181D to
+     paper, so the value had to flip with it — light-on-dark ink on a paper
+     card is unreadable. 14 var(--ink) sites in base/defter/runs/vaka.css
+     inherit the new value as those lanes migrate this round. */
+  --ink: #2B2822;
+
+  --desk: #2A2620;
+  --wood: #4A3826;
+  --paper: #FAF6EC;
+  --paper2: #F3EDDD;
+  --kapak: #B5432E;
+  --ink-soft: #4A463C;
+  --graphite: #6E685E;
+  --red-ink: #C43C2E;
+  --green-pencil: #4E8A5A;
+  --hilite: #FFE45C;
+  --postit: #FFF3A8;
+
+  --hand: "Caveat", "Bradley Hand", "Comic Sans MS", cursive;
+
+  /* Asymmetric per-corner radii: the horizontal and vertical halves disagree,
+     so no two corners resolve alike and the border reads as drawn by hand. */
+  --sketchy-radius: 255px 12px 225px 12px/12px 225px 12px 255px;
 }
 
 @media (prefers-reduced-motion: reduce) {

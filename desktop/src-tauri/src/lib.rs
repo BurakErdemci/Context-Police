@@ -192,8 +192,11 @@ pub fn run() {
             let url = tauri::WebviewUrl::External(app_url().parse()?);
             tauri::WebviewWindowBuilder::new(app, "main", url)
                 .title("Context Police")
-                .inner_size(1280.0, 860.0)
-                .min_inner_size(900.0, 640.0)
+                // Portrait, matching the notebook the UI draws. Height is capped
+                // at 1080 rather than the notebook's true ratio because a 13"
+                // display leaves only ~1000-1050pt once the menu bar is gone.
+                .inner_size(940.0, 1080.0)
+                .min_inner_size(820.0, 980.0)
                 .resizable(true)
                 .build()?;
             Ok(())
