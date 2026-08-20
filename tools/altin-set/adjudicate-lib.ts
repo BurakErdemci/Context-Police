@@ -151,6 +151,58 @@ export function decideCompleteness(
 }
 
 /**
+ * `codex exec --json` olay akışından mesaj adaylarını çıkarır; metin bir olay
+ * akışı DEĞİLSE null döner (çağıran düz-metin yoluna düşer).
+ *
+ * Kural kümesi koşucununkinin (adjudicate-cost.ts item.completed dalı)
+ * AYNASI: reasoning item'ları asla aday olmaz, "son item mesaj mı" bilgisi her
+ * item.completed'da tazelenir. Ölçülmüş sebep (20 Ağu 2026, ilk gerçek duman
+ * koşumu): koşucu 15 iddia sayarken flatten AYNI ham dosyayı ayrıştıramadı —
+ * iki ayrıştırıcı ıraksamıştı; akış yolu artık tek yerde.
+ */
+export function streamMessageCandidates(
+  text: string,
+): { candidates: string[]; lastItemIsMessage: boolean } | null {
+  let sawEvent = false;
+  const candidates: string[] = [];
+  let lastItemIsMessage = false;
+  for (const line of text.split("\n")) {
+    const s = line.trim();
+    if (s === "") continue;
+    let o: Record<string, unknown> & { item?: { type?: string; text?: unknown; content?: unknown } };
+    try { o = JSON.parse(s); } catch { continue; }
+    if (typeof o?.type !== "string") return null;
+    sawEvent = true;
+    if (o.type !== "item.completed") continue;
+    const rawTxt = o.item?.text ?? o.item?.content;
+    const txt = typeof rawTxt === "string" ? rawTxt : "";
+    const isMessage = txt.length > 0 && o.item?.type !== "reasoning";
+    lastItemIsMessage = isMessage;
+    if (isMessage) candidates.push(txt);
+  }
+  return sawEvent ? { candidates, lastItemIsMessage } : null;
+}
+
+/**
+ * Ham dosya içeriğinden iddia dizisi: olay akışıysa adaylar üzerinden
+ * (decideCompleteness ile aynı kurtarma sırası: son aday → sıralı birleşim),
+ * değilse düz metin yolu. Eksik akış (mesajla bitmeyen) null'dur — kısmi
+ * iddiaların skor hattına sızmaması `decideCompleteness`'taki guard'la aynı.
+ */
+export function parseClaimsFromRaw(text: string): unknown[] | null {
+  const stream = streamMessageCandidates(text);
+  if (stream === null) return parseClaimsArray(text);
+  if (!stream.lastItemIsMessage || stream.candidates.length === 0) return null;
+  const tries = [stream.candidates[stream.candidates.length - 1]!];
+  if (stream.candidates.length > 1) tries.push(stream.candidates.join("\n"));
+  for (const t of tries) {
+    const claims = parseClaimsArray(t);
+    if (claims !== null) return claims;
+  }
+  return null;
+}
+
+/**
  * Alt sürecin stderr kuyruğunu sınırlı tutar.
  *
  * Ürün `core/src/adapters/codex.ts` aynı sınırı (`STDERR_TAIL = 500`) hata
@@ -635,7 +687,7 @@ export function gateClaims(claims: unknown[], bornWrongAvailable: boolean): unkn
 
 /** Ayrıştırma + kapı tek adımda; çağıran ikisini ayrı ayrı hatırlamak zorunda kalmasın. */
 export function extractGatedClaims(text: string, bornWrongAvailable: boolean): unknown[] | null {
-  const claims = parseClaimsArray(text);
+  const claims = parseClaimsFromRaw(text);
   return claims === null ? null : gateClaims(claims, bornWrongAvailable);
 }
 

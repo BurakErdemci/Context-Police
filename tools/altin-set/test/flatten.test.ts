@@ -319,3 +319,53 @@ test("DELİK KAPANDI: flatten çıktısı score.ts'ten geçince KULLANICIYA sıf
     assert.match(rs.stdout, /YAKALAMA {6}1\/1/);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
+
+// --- codex event-stream raws ------------------------------------------------
+// The runner writes the FULL `codex exec --json` event stream to `.raw.jsonl`,
+// not the model's message text. Measured 20 Aug 2026 (first real smoke run):
+// the runner counted 15 claims while flatten failed to parse the very same
+// file — the two parsers had drifted apart, so these tests pin the stream path.
+
+const streamRaw = (claims: Row[], opts?: { trailingReasoning?: boolean }) => {
+  const events: Row[] = [
+    { type: "thread.started", thread_id: "t1" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { type: "reasoning", text: '```json\n{"claims":[]}\n```' } },
+    { type: "item.started", item: { type: "command_execution" } },
+    { type: "item.completed", item: { type: "command_execution", text: "" } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ claims }) } },
+  ];
+  if (opts?.trailingReasoning) {
+    events.push({ type: "item.completed", item: { type: "reasoning", text: "sonda akıl yürütme" } });
+  }
+  events.push({ type: "turn.completed", usage: {} });
+  return jsonl(events);
+};
+
+test("codex olay akışı hamı ayrıştırılıyor: son agent_message'daki iddialar düz dosyaya ulaşır", () => {
+  const f = fixture();
+  try {
+    f.note("n1", DATED_NOTE, streamRaw([
+      { text: "iddia", line_start: 1, line_end: 1, verdict: "curuk", evidence: "e" },
+    ]));
+    const r = runFlatten(f);
+    assert.equal(r.status, 0, r.stderr);
+    const rows = readFlat(f);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.verdict, "curuk");
+    assert.equal(rows[0]!.note, "n1");
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test("akış mesajla bitmiyorsa ham EKSİK sayılır — reasoning kurtarmaya girmez", () => {
+  const f = fixture();
+  try {
+    f.note("n1", DATED_NOTE, streamRaw(
+      [{ text: "i", line_start: 1, line_end: 1, verdict: "curuk", evidence: "e" }],
+      { trailingReasoning: true },
+    ));
+    const r = runFlatten(f);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /ayrıştırılamadı/);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
