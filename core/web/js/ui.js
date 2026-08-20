@@ -1,4 +1,5 @@
 import { postReview } from "./api.js";
+import { playDecision } from "./anim.js";
 
 // Shared visual dictionary (tasarim-notu.md): rings, bands, sparklines,
 // meters, chips, and the Turkish sentence helpers. Everything here builds
@@ -45,7 +46,7 @@ export function ring(pct, color, { size = 84, faded = false, center } = {}) {
   const c = 2 * Math.PI * r;
   const svg = svgEl("svg", { width: size, height: size, viewBox: `0 0 ${size} ${size}` });
   svg.appendChild(svgEl("circle", {
-    cx: size / 2, cy: size / 2, r, fill: "none", stroke: "#262832", "stroke-width": stroke,
+    cx: size / 2, cy: size / 2, r, fill: "none", stroke: COLORS.track, "stroke-width": stroke,
   }));
   const clamped = Math.max(0, Math.min(100, pct));
   const arc = svgEl("circle", {
@@ -303,8 +304,15 @@ function reviewErrorText(err) {
  * other. `initialDecision` seeds the state for a record that was already
  * decided before this render. `onChange(ids, decision)` fires only after the
  * write actually landed.
+ *
+ * `opts.target` names the case-card node the decision choreography plays on
+ * (stamp / basket throw / un-file). It is optional: without it the controls
+ * behave exactly as before, silently and instantly. The gesture runs only on
+ * the success path — a stamp that lands while the write was refused would be
+ * the tool lying about its own ledger, which is the failure mode this product
+ * exists to catch.
  */
-export function reviewControls(verdictIds, onChange, initialDecision) {
+export function reviewControls(verdictIds, onChange, initialDecision, opts) {
   const ids = Array.isArray(verdictIds) ? verdictIds : [verdictIds];
   const box = el("span", "review-box");
   // Clicks and Enter/Space inside the box must not reach a clickable card.
@@ -350,6 +358,9 @@ export function reviewControls(verdictIds, onChange, initialDecision) {
       // Sequential on purpose: the first refusal stops the rest, so a grouped
       // card cannot half-decide beyond the one request already in flight.
       for (const id of ids) await postReview(id, decision);
+      // Buttons stay disabled through the gesture: `busy` is only cleared once
+      // the card has finished moving and the fresh controls are drawn.
+      await playDecision(decision, opts?.target);
       busy = false;
       decided = decision === "pending" ? null : decision;
       render();
@@ -367,13 +378,30 @@ export function reviewControls(verdictIds, onChange, initialDecision) {
   return box;
 }
 
+/**
+ * Ink palette for the SVG/inline-style dictionary (ring, band, sparkline).
+ *
+ * These are hex, not var(): the ring and the sparkline set them as SVG
+ * presentation attributes (`stroke`, `fill`), where a custom property is not
+ * resolved. The names are kept from the graphite skin so the three lanes' call
+ * sites do not move; the values are the paper-ground equivalents.
+ *
+ * Calibrated for the "vaka defteri" paper (--paper #FAF6EC): every value here
+ * is an ink or pencil tone dark enough to read on it. The dark skin's luminous
+ * hues (#58C08A, #9D9BF5) disappear on paper — they were lit for a #17181D
+ * ground. `amber` is the one deliberate divergence from --hilite: highlighter
+ * yellow works as a chip fill behind ink text, but a 8px band segment of
+ * #FFE45C on cream is invisible, so the drawn form takes an ochre of the same
+ * family.
+ */
 export const COLORS = {
-  green: "#58C08A",
-  greenDim: "#2E5C42",
-  violet: "#9D9BF5",
-  violetHi: "#B9B7FA",
-  violetDim: "#4B4D9E",
-  amber: "#F5C044",
-  drift: "#E0713A",
-  idleLine: "#2E3040",
+  green: "#4E8A5A",      // --green-pencil
+  greenDim: "#8FB08F",   // spent pencil: sparkline line under a green dot
+  violet: "#57524A",     // --ink-soft — "suspect" reads as ink, not as a hue
+  violetHi: "#3F3A32",   // darker ink for the band segment beside green
+  violetDim: "#A9A296",
+  amber: "#C99400",      // ochre sibling of --hilite (see note above)
+  drift: "#C43C2E",      // --red-ink
+  idleLine: "#C6BFAF",   // faint pencil on paper: present, not shouting
+  track: "#E3DCC9",      // --paper2 shaded: the unfilled part of a ring/band
 };

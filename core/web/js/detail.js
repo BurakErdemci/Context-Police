@@ -141,7 +141,9 @@ export function mount(root, ctx, findingId) {
     const header = el("div", "panel detail-header");
     const { fm, body } = splitNote(d.content);
 
-    header.appendChild(el("p", "eyebrow", `not sicili · #${d.id}`));
+    // The case label the mock stamps at the top of every page ("VAKA #003 ·
+    // SAYFA 7"); uppercasing is the eyebrow rule's job, not this string's.
+    header.appendChild(el("p", "eyebrow", `vaka #${d.id} · sicil sayfası`));
 
     // Title from frontmatter name (diagnosis already humanizes it); the raw
     // frontmatter block itself never renders — it hides behind "ham not".
@@ -279,8 +281,10 @@ export function mount(root, ctx, findingId) {
       head.appendChild(repeat);
     }
     // The ledger is the place a past decision stays readable — and, since a
-    // decision is reversible, the place it can be taken back.
-    head.appendChild(reviewControls(record.id, undefined, record.review));
+    // decision is reversible, the place it can be taken back. The card itself
+    // is the animation target: the stamp lands on it, the basket throw crumples
+    // it, and an undo un-crumples it back into the record.
+    head.appendChild(reviewControls(record.id, undefined, record.review, { target: live }));
     live.appendChild(head);
     live.appendChild(renderVerdictBody(record));
 
@@ -347,7 +351,7 @@ export function mount(root, ctx, findingId) {
       }
       wrap.textContent = "";
       wrap.classList.remove("detail--message");
-      const back = el("a", "back-link detail-back", "← rapora dön");
+      const back = el("a", "back-link detail-back", "⟵ deftere dön");
       back.href = `#/proje/${d.projectId}`;
       wrap.appendChild(back);
       // Two-column ledger: note + anchors on the left; diagnosis, verdict
