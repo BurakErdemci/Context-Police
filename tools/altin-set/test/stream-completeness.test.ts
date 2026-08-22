@@ -67,6 +67,19 @@ test("streamMessageCandidates kuyruk iznini ayrı raporlar", () => {
   assert.deepEqual([cut?.lastItemIsMessage, cut?.trailerIntact], [true, false]);
 });
 
+test("sınır beslenmişken şemanın tanımadığı alan kapıdan geçmez", () => {
+  const claims = [{ ...CLAIM, unmeasurable_reason: "user_resolvable" }];
+  const gated = gateClaims(claims, true) as Record<string, unknown>[];
+  assert.equal("unmeasurable_reason" in gated[0]!, false);
+  assert.equal(gated[0]!.verdict, "olculemez"); // hükmün kendisi korunur
+});
+
+test("sınır beslenmemişken alan olduğu gibi kalır", () => {
+  const claims = [{ ...CLAIM, unmeasurable_reason: "not_measurable" }];
+  const gated = gateClaims(claims, false) as Record<string, unknown>[];
+  assert.equal(gated[0]!.unmeasurable_reason, "not_measurable");
+});
+
 test("uçtan uca: kesik akış kapıdan da null döner", () => {
   const raw = [msg(payload()), '{"type":"item.star'].join("\n");
   assert.equal(extractGatedClaims(raw, false), null);

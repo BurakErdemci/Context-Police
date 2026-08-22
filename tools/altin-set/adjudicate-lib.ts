@@ -726,7 +726,21 @@ export const GATE_MARK =
  * görünür olması gerekir).
  */
 export function gateClaims(claims: unknown[], bornWrongAvailable: boolean): unknown[] {
-  if (bornWrongAvailable) return claims;
+  if (bornWrongAvailable) {
+    // Sınır beslenmişken şema bu alanı HİÇ tanımlamıyor (`additionalProperties:
+    // false`), yani buraya ulaşan bir değer şemanın zorlanmadığı bir yoldan
+    // geldi — `adjudicate-opencode.ts` şemayı istem METNİ olarak gömüyor.
+    // Bırakılırsa `score.ts` bu dalın "yok" dediği bir sebebi sayıyor ve
+    // KULLANICIYA satırı şişiyor (ölçüldü 22 Ağu 2026, codex-audit).
+    // Kanıt kaybı yok: ham dosya olduğu gibi diskte duruyor.
+    return claims.map((c) => {
+      if (typeof c !== "object" || c === null) return c;
+      const rec = c as Record<string, unknown>;
+      if (!(UNMEASURABLE_REASON_FIELD in rec)) return c;
+      const { [UNMEASURABLE_REASON_FIELD]: _outOfContract, ...rest } = rec;
+      return rest;
+    });
+  }
   return claims.map((c) => {
     if (typeof c !== "object" || c === null) return c;
     const rec = c as Record<string, unknown>;
