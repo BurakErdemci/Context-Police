@@ -12,6 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseClaimsFromRaw, extractGatedClaims, gateClaims, streamMessageCandidates,
+  balancedBlocks,
 } from "../adjudicate-lib.ts";
 
 const ev = (o: unknown) => JSON.stringify(o);
@@ -107,6 +108,23 @@ test("JSON string'inin içinden bölünmüş küme de onarılır", () => {
   const raw = stream(msg(whole.slice(0, cut), "a"), msg(whole.slice(cut), "b"));
   assert.equal((parseClaimsFromRaw(raw)?.[0] as { text: string }).text, "boundary");
 });
+
+test("bölünmeden ÖNCEKİ ilerleme mesajı onarımı engellemez", () => {
+  const whole = payload(1); const cut = Math.floor(whole.length / 2);
+  const raw = stream(msg(payload(3), "p"), msg(whole.slice(0, cut), "a"), msg(whole.slice(cut), "b"));
+  assert.equal(parseClaimsFromRaw(raw)?.length, 1);
+});
+
+test("örnek blok cevap sanılmaz: son geçerli blok kazanır", () => {
+  const text = `Örnek biçim: {"claims":[]}\nCevap: {"claims":[{"text":"final"}]}\n{"claims":[`;
+  assert.equal((parseClaimsFromRaw(stream(msg(text)))?.[0] as { text: string }).text, "final");
+});
+
+test("balancedBlocks iç içe blokları değil, kardeşleri sırayla verir", () => {
+  assert.deepEqual(balancedBlocks('a {"x":{"y":1}} b {"z":2} c'), ['{"x":{"y":1}}', '{"z":2}']);
+});
+
+// --- ayrıştırıcı sözleşmesi ---
 
 test("streamMessageCandidates tamlık sinyalini ayrı raporlar", () => {
   const ok = streamMessageCandidates(stream(msg(payload())));

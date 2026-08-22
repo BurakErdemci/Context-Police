@@ -63,6 +63,27 @@ export function totalTokens(u: Usage): number {
  * kurtarma tutmuyordu. Dize içindeki parantezler sayılmaz — kaçış karakteri
  * takip ediliyor.
  */
+/**
+ * Metindeki TÜM dengeli `{…}` blokları, sırayla.
+ *
+ * `firstBalancedBlock` yalnız ilkini veriyordu ve bu, kurtarma katmanının
+ * amacını sessizce bozuyordu: model cevabından ÖNCE biçimi örnekleyen bir
+ * `{"claims":[]}` bloğu yazdığında örnek cevap sayılıyor, gerçek hüküm hiç
+ * bakılmadan atılıyordu (ölçüldü 22 Ağu 2026, 2. doğrulama turu — bir
+ * demotion'ı deviren kanıt). Çağıran artık SONUNCU ayrıştırılabilir bloğu
+ * seçiyor: model hükmünü sonda veriyor, örnek önde duruyor.
+ */
+export function balancedBlocks(s: string): string[] {
+  const out: string[] = [];
+  for (let from = 0; from < s.length; ) {
+    const block = firstBalancedBlock(s.slice(from));
+    if (block === null) break;
+    out.push(block);
+    from += s.slice(from).indexOf(block) + block.length;
+  }
+  return out;
+}
+
 export function firstBalancedBlock(s: string): string | null {
   const start = s.indexOf("{");
   if (start === -1) return null;
@@ -109,9 +130,7 @@ export function parseClaimsArray(text: string): unknown[] | null {
   const stripped = text.replace(/```(?:json)?/gi, "").trim();
   // Bloklar SONDAN öne: metnin tamamı ayrıştırılabiliyorsa o kazanır, değilse
   // en sondaki geçerli claims bloğu — gerekçesi `balancedBlocks`'ta.
-  const tries = [stripped];
-  const block = firstBalancedBlock(stripped);
-  if (block !== null && block !== stripped) tries.push(block);
+  const tries = [stripped, ...balancedBlocks(stripped).reverse()];
   for (const t of tries) {
     try {
       const parsed = JSON.parse(t);
@@ -258,8 +277,8 @@ function parseClaimsJoined(parts: string[]): unknown[] | null {
   // hiçbir karakter yoktu. `\n` bir JSON STRING'inin içine düşen bölünmede
   // geçerli baytları geçersiz yapıyor; geride duruyor çünkü koşucunun eski
   // davranışıydı ve yalnız öyle ayrıştırılabilen bir birleşimi kaybetmemeli.
-  {
-    const tail = parts;
+  for (let k = 2; k <= parts.length; k++) {
+    const tail = parts.slice(parts.length - k);
     for (const joined of [tail.join(""), tail.join("\n")]) {
       try {
         const parsed = JSON.parse(joined.replace(/```(?:json)?/gi, "").trim());
