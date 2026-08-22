@@ -253,9 +253,10 @@ export function agentMessageText(
  */
 export function streamMessageCandidates(
   text: string,
-): { candidates: string[]; lastItemIsMessage: boolean; runClosed: boolean } | null {
+): { candidates: string[]; documents: string[]; lastItemIsMessage: boolean; runClosed: boolean } | null {
   let sawEvent = false;
   const candidates: string[] = [];
+  const documents: string[] = [];
   let lastItemIsMessage = false;
   let runClosed = false;
   for (const line of text.split("\n")) {
@@ -291,8 +292,13 @@ export function streamMessageCandidates(
     // `sawEvent` KURULMUYOR: tek satırlık bir belge dosyayı akış yapmaz.
     if (Array.isArray((o as { claims?: unknown }).claims)
       && o.item === undefined && o.usage === undefined) {
-      candidates.push(s);
-      lastItemIsMessage = true;
+      // AYRI LİSTE, mesaj adaylarına KARIŞMAZ. Karıştığında bölünmüş bir
+      // belgenin iki yarısının ARASINA giriyor ve bitişik son eklerin hepsini
+      // zehirliyordu: sağlam bir koşum reddediliyordu (ölçüldü 22 Ağu 2026,
+      // Ox Alpha turu — codex turunun kaçırdığı regresyon). Ayrıca koşucu
+      // böyle bir satırı hiç aday saymıyor; mesaj varken onu tercih etmek
+      // pariteyi de düzeltiyor.
+      documents.push(s);
       continue;
     }
     if (KNOWN_EVENT_TYPES.has(type)) {
@@ -312,7 +318,9 @@ export function streamMessageCandidates(
     // ona miras kalmaz.
     if (sawEvent) runClosed = false;
   }
-  return sawEvent ? { candidates, lastItemIsMessage, runClosed } : null;
+  return sawEvent || documents.length > 0
+    ? { candidates, documents, lastItemIsMessage, runClosed }
+    : null;
 }
 
 /**
@@ -362,7 +370,13 @@ function parseClaimsJoined(parts: string[]): unknown[] | null {
 export function parseClaimsFromRaw(text: string): unknown[] | null {
   const stream = streamMessageCandidates(text);
   if (stream === null) return parseClaimsArray(text);
-  if (!stream.lastItemIsMessage || !stream.runClosed || stream.candidates.length === 0) return null;
+  // Çıplak hüküm belgesi YEDEK: yalnız hiç ajan mesajı yokken kullanılıyor.
+  // Mesaj varken hüküm mesajdadır; belge satırı olsa olsa bir yankıdır.
+  if (stream.candidates.length === 0) {
+    const doc = stream.documents[stream.documents.length - 1];
+    return doc === undefined ? null : parseClaimsArray(doc);
+  }
+  if (!stream.lastItemIsMessage || !stream.runClosed) return null;
   const last = stream.candidates[stream.candidates.length - 1]!;
   const direct = parseClaimsArray(last);
   if (direct !== null) return direct;

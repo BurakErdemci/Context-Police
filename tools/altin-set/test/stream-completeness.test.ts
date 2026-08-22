@@ -196,3 +196,21 @@ test("parçalardan kurulan BOŞ küme kurtarma sayılmaz", () => {
   const raw = stream(msg(payload(), "ans"), msg("Yalnız örnek:", "lbl"), msg('{"claims":[', "a"), msg("]}", "b"));
   assert.equal(parseClaimsFromRaw(raw), null);
 });
+
+test("iki yarının ARASINA giren çıplak hüküm satırı onarımı bozmaz", () => {
+  // Belge adayları mesaj adaylarına karışınca bitişik son eklerin hepsini
+  // zehirliyordu ve sağlam bir koşum reddediliyordu (22 Ağu 2026, Ox Alpha).
+  const whole = payload(2); const cut = Math.floor(whole.length / 2);
+  const raw = stream(
+    msg(whole.slice(0, cut), "a"),
+    ev({ type: "progress_note", claims: [] }),
+    msg(whole.slice(cut), "b"),
+  );
+  assert.equal(parseClaimsFromRaw(raw)?.length, 2);
+});
+
+test("mesaj varken çıplak hüküm satırı hükmü ele geçirmez", () => {
+  // Koşucu böyle bir satırı hiç aday saymıyor; parite için burası da saymamalı.
+  const raw = [msg(payload(2)), END, JSON.stringify({ claims: [CLAIM, CLAIM, CLAIM] })].join("\n");
+  assert.equal(parseClaimsFromRaw(raw)?.length, 2);
+});
