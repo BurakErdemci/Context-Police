@@ -75,13 +75,51 @@ export function totalTokens(u: Usage): number {
  */
 export function balancedBlocks(s: string): string[] {
   const out: string[] = [];
-  for (let from = 0; from < s.length; ) {
-    const block = firstBalancedBlock(s.slice(from));
-    if (block === null) break;
+  let from = 0;
+  while (from < s.length) {
+    const open = s.indexOf("{", from);
+    if (open === -1) break;
+    const block = firstBalancedBlock(s.slice(open));
+    if (block === null) {
+      // Dengelenemeyen `{`'ten SONRA taramaya devam: eskiden burada tümden
+      // duruluyordu, yani düzyazıdaki tek bir başıboş süslü parantez arkasındaki
+      // TAM cevabı gizliyor ve sağlam bir koşum reddediliyordu (ölçüldü
+      // 22 Ağu 2026, 3. doğrulama turu — üçüncü kez aynı hata yönü).
+      from = open + 1;
+      continue;
+    }
     out.push(block);
-    from += s.slice(from).indexOf(block) + block.length;
+    from = open + block.length;
   }
   return out;
+}
+
+/**
+ * Metinden kurtarılabilen İDDİA BELGELERİ. Birden çok BOŞ OLMAYAN ve
+ * BİRBİRİNDEN FARKLI belge çıkıyorsa `null` — hangisinin cevap olduğu bir
+ * tahmindir ve konuma göre tahmin bu dosyada iki kez yanlış tarafa düştü
+ * (önce ilk blok, sonra son blok; ölçüldü 22 Ağu 2026, iki ayrı tur).
+ *
+ * Belirsizlikte SESSİZ TAHMİN yerine GÜRÜLTÜLÜ RET: notun `olculemez` düşmesi
+ * görülür ve düzeltilir, yanlış iddia sızması görülmez. Dosyanın kendi
+ * hata-yönü tercihi bu (`decideCompleteness` guard'ının gerekçesiyle aynı).
+ * Boş küme belirsizlik saymıyor: `{"claims":[]}` biçim örneği olarak geçiyor
+ * ve gerçek cevabı gölgelememeli.
+ */
+function claimsFromBlocks(blocks: string[]): unknown[] | null {
+  const parsed: unknown[][] = [];
+  for (const b of blocks) {
+    try {
+      const o = JSON.parse(b) as { claims?: unknown };
+      if (Array.isArray(o?.claims)) parsed.push(o.claims);
+    } catch { /* blok değil */ }
+  }
+  if (parsed.length === 0) return null;
+  const nonEmpty = parsed.filter((c) => c.length > 0);
+  if (nonEmpty.length === 0) return parsed[parsed.length - 1]!;
+  const distinct = new Set(nonEmpty.map((c) => JSON.stringify(c)));
+  if (distinct.size > 1) return null;
+  return nonEmpty[nonEmpty.length - 1]!;
 }
 
 export function firstBalancedBlock(s: string): string | null {
@@ -130,16 +168,11 @@ export function parseClaimsArray(text: string): unknown[] | null {
   const stripped = text.replace(/```(?:json)?/gi, "").trim();
   // Bloklar SONDAN öne: metnin tamamı ayrıştırılabiliyorsa o kazanır, değilse
   // en sondaki geçerli claims bloğu — gerekçesi `balancedBlocks`'ta.
-  const tries = [stripped, ...balancedBlocks(stripped).reverse()];
-  for (const t of tries) {
-    try {
-      const parsed = JSON.parse(t);
-      if (Array.isArray((parsed as { claims?: unknown })?.claims)) {
-        return (parsed as { claims: unknown[] }).claims;
-      }
-    } catch { /* sıradaki deneme */ }
-  }
-  return null;
+  try {
+    const whole = JSON.parse(stripped) as { claims?: unknown };
+    if (Array.isArray(whole?.claims)) return whole.claims;
+  } catch { /* kurtarma katmanına düş */ }
+  return claimsFromBlocks(balancedBlocks(stripped));
 }
 
 /**
@@ -233,27 +266,51 @@ export function streamMessageCandidates(
     // ilerleme/uyarı satırları düz metin geliyor.
     if (!s.startsWith("{")) continue;
     let o: Record<string, unknown> & { item?: { type?: string; text?: unknown; content?: unknown } };
-    try { o = JSON.parse(s); } catch { continue; }
-    // Üst düzeyde `claims` dizisi taşıyan nesne bir olay değil, hükmün
-    // kendisidir — olay adıyla çakışan bir `type` taşısa bile. Aday olarak
-    // TUTULUYOR: yalnız atlansaydı, önünde tanınan bir olay bulunan geçerli
-    // bir hüküm belgesi ayrıştırılamaz sayılırdı (2. doğrulama turu).
-    if (Array.isArray((o as { claims?: unknown }).claims)) {
+    try {
+      o = JSON.parse(s);
+    } catch {
+      // Kapanıştan SONRA gelen yarım satır, dosyanın üstüne yeni ve kesik bir
+      // akışın yazıldığını gösterir; eski kapanış ona miras kalmamalı.
+      if (sawEvent) runClosed = false;
+      continue;
+    }
+    const type = typeof o?.type === "string" ? o.type : "";
+    // OLAY TİPİ ÖNCE bakılıyor: `claims` taşıyan bir `turn.completed` koşucuda
+    // kapanış sayılırken burada belge sayılıyordu, iki taraf ıraksıyordu
+    // (ölçüldü 22 Ağu 2026, 3. doğrulama turu).
+    // Olay adını taşıyan ama olay GÖVDESİ olmayan (`item` yok, `claims` var)
+    // nesne hükmün kendisidir — ve `sawEvent`'i KURMAZ: tek başına duran böyle
+    // bir belge dosyayı akış yapmamalı, düz-metin yoluna gitmeli. (Sırayı
+    // düzeltirken bu düşmüştü ve geçerli bir çıktı reddedilir olmuştu.)
+    // AYIRT EDİCİ OLAY ADI DEĞİL, OLAY GÖVDESİ: bir olay satırı `item` ya da
+    // `usage` taşır. `claims` taşıyıp ikisini de taşımayan nesne hükmün
+    // kendisidir, adı `item.completed` bile olsa. Ölçülmüş iki ucu birden
+    // karşılıyor (22 Ağu 2026): `usage`'lı bir `turn.completed`'ın `claims`
+    // alanı taşıması koşucuda kapanış sayılıyor, burada da öyle sayılmalı
+    // (parite); tek başına duran bir hüküm belgesi ise akış sayılmamalı.
+    // `sawEvent` KURULMUYOR: tek satırlık bir belge dosyayı akış yapmaz.
+    if (Array.isArray((o as { claims?: unknown }).claims)
+      && o.item === undefined && o.usage === undefined) {
       candidates.push(s);
       lastItemIsMessage = true;
       continue;
     }
-    const type = typeof o?.type === "string" ? o.type : "";
-    // Koşucu tanımadığı olayı sayıp DEVAM ediyor; ayrıştırıcı da öyle.
-    if (!KNOWN_EVENT_TYPES.has(type)) continue;
-    sawEvent = true;
-    if (type === "turn.completed") { runClosed = true; continue; }
-    const txt = agentMessageText(o.item);
-    lastItemIsMessage = txt !== null;
-    if (txt !== null) {
-      candidates.push(txt);
-      runClosed = false; // bu mesajdan sonra turun kapandığını yeniden görmeliyiz
+    if (KNOWN_EVENT_TYPES.has(type)) {
+      sawEvent = true;
+      if (type === "turn.completed") { runClosed = true; continue; }
+      const txt = agentMessageText(o.item);
+      lastItemIsMessage = txt !== null;
+      if (txt !== null) {
+        candidates.push(txt);
+        runClosed = false; // bu mesajdan sonra turun kapandığını yeniden görmeliyiz
+      }
+      continue;
     }
+    // Koşucu tanımadığı olayı sayıp devam ediyor; ayrıştırıcı da öyle. Ama
+    // kapanış GÖRÜLDÜKTEN sonra gelen herhangi bir olay (yeni bir `thread.started`
+    // dahil) dosyanın üstüne ikinci bir akışın yazıldığını gösterir; kapanış
+    // ona miras kalmaz.
+    if (sawEvent) runClosed = false;
   }
   return sawEvent ? { candidates, lastItemIsMessage, runClosed } : null;
 }
@@ -277,18 +334,23 @@ function parseClaimsJoined(parts: string[]): unknown[] | null {
   // hiçbir karakter yoktu. `\n` bir JSON STRING'inin içine düşen bölünmede
   // geçerli baytları geçersiz yapıyor; geride duruyor çünkü koşucunun eski
   // davranışıydı ve yalnız öyle ayrıştırılabilen bir birleşimi kaybetmemeli.
+  const found: string[] = [];
   for (let k = 2; k <= parts.length; k++) {
     const tail = parts.slice(parts.length - k);
     for (const joined of [tail.join(""), tail.join("\n")]) {
+      const t = joined.replace(/```(?:json)?/gi, "").trim();
       try {
-        const parsed = JSON.parse(joined.replace(/```(?:json)?/gi, "").trim());
-        if (Array.isArray((parsed as { claims?: unknown })?.claims)) {
-          return (parsed as { claims: unknown[] }).claims;
-        }
+        const parsed = JSON.parse(t) as { claims?: unknown };
+        if (Array.isArray(parsed?.claims)) found.push(t);
       } catch { /* sıradaki */ }
     }
   }
-  return null;
+  // Aynı belirsizlik kuralı: birden çok farklı boş-olmayan belge çıkarsa ret.
+  const claims = claimsFromBlocks(found);
+  // BOŞ bir birleşim kurtarma DEĞİLDİR: parçalardan yeniden kurulan
+  // `{"claims":[]}` "model hiç iddia bulmadı" demek değil, ayrıştırma
+  // artefaktıdır. Onu döndürmek sessiz bir sıfır üretirdi.
+  return claims !== null && claims.length > 0 ? claims : null;
 }
 
 /**

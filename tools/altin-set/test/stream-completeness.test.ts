@@ -149,3 +149,50 @@ test("sınır beslenmemişken alan olduğu gibi kalır", () => {
 test("uçtan uca: kesik akış kapıdan da null döner", () => {
   assert.equal(extractGatedClaims([msg(payload()), '{"type":"item.star'].join("\n"), false), null);
 });
+
+// --- 22 Ağu 2026, 3. doğrulama turu ---
+
+test("düzyazıdaki başıboş { arkasındaki cevabı gizlemez", () => {
+  // Sağlam koşumu reddeden yön — üçüncü kez aynı taraf.
+  const raw = stream(msg(`Bitmemiş notasyon {\nCevap: ${payload()}`));
+  assert.equal(parseClaimsFromRaw(raw)?.length, 1);
+});
+
+test("iki farklı dolu hüküm belgesi çıkarsa GÜRÜLTÜLÜ reddedilir", () => {
+  // Konuma göre tahmin bu dosyada iki kez yanlış tarafa düştü (önce ilk blok,
+  // sonra son blok). Belirsizlikte sessiz tahmin yerine görünür olculemez.
+  const a = JSON.stringify({ claims: [{ text: "a" }] });
+  const b = JSON.stringify({ claims: [{ text: "b" }] });
+  assert.equal(parseClaimsFromRaw(stream(msg(`Cevap ${a}\nÖrnek ${b}`))), null);
+});
+
+test("boş örnek bloğu gerçek cevabı gölgelemez", () => {
+  const ans = JSON.stringify({ claims: [{ text: "final" }] });
+  const raw = stream(msg(`Örnek: {"claims":[]}\nCevap: ${ans}\nyarım {`));
+  assert.equal((parseClaimsFromRaw(raw)?.[0] as { text: string }).text, "final");
+});
+
+test("kapanıştan sonra yeni bir akış başlıyorsa eski kapanış miras kalmaz", () => {
+  for (const tail of [ev({ type: "item.started", item: {} }), '{"type":"item.star', ev({ type: "thread.started" })]) {
+    assert.equal(parseClaimsFromRaw([msg(payload()), END, tail].join("\n")), null, tail.slice(0, 24));
+  }
+});
+
+test("olay gövdesi taşıyan turn.completed, claims alanı olsa da kapanıştır", () => {
+  // Koşucu tip üzerinden kapanış sayıyor; parite için burası da öyle saymalı.
+  const raw = [msg(payload()), ev({ type: "turn.completed", claims: [], usage: {} })].join("\n");
+  assert.equal(parseClaimsFromRaw(raw)?.length, 1);
+});
+
+test("olay gövdesi olmayan nesne, adı olay olsa da hükümdür", () => {
+  for (const t of ["item.completed", "turn.completed"]) {
+    assert.equal(parseClaimsFromRaw(JSON.stringify({ type: t, claims: [CLAIM] }))?.length, 1, t);
+  }
+});
+
+test("parçalardan kurulan BOŞ küme kurtarma sayılmaz", () => {
+  // `{"claims":[` + `]}` birleşince geçerli ama anlamsız: "model hiç iddia
+  // bulmadı" demek değil, ayrıştırma artefaktı.
+  const raw = stream(msg(payload(), "ans"), msg("Yalnız örnek:", "lbl"), msg('{"claims":[', "a"), msg("]}", "b"));
+  assert.equal(parseClaimsFromRaw(raw), null);
+});
