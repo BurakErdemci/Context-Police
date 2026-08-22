@@ -84,3 +84,25 @@ test("uçtan uca: kesik akış kapıdan da null döner", () => {
   const raw = [msg(payload()), '{"type":"item.star'].join("\n");
   assert.equal(extractGatedClaims(raw, false), null);
 });
+
+// --- 22 Ağu 2026 doğrulama turundan (düzeltmenin kendisini denetleyen lane) ---
+
+test("son mesajdan sonraki düz metin satırı akışı geçersiz kılmaz", () => {
+  // Koşucu `{` ile başlamayan satırı BİLEREK atlıyor: gerçek akışta
+  // ilerleme/uyarı satırları düz metin geliyor. Ara sürüm bunları kesilme
+  // sayıyordu, yani sağlam koşumları düşürecekti.
+  const raw = [msg(payload()), "warning: something diagnostic"].join("\n");
+  assert.equal(parseClaimsFromRaw(raw)?.length, 1);
+});
+
+test("olay adıyla çakışan type taşıyan düz claims belgesi akış sanılmaz", () => {
+  for (const t of ["item.completed", "turn.completed"]) {
+    const plain = JSON.stringify({ type: t, claims: [CLAIM] });
+    assert.equal(parseClaimsFromRaw(plain)?.length, 1, `type: ${t}`);
+  }
+});
+
+test("{ ile başlayıp ayrıştırılamayan kuyruk hâlâ kesilme izidir", () => {
+  // Düz metin muafiyeti yarım yazılmış OLAYI kapsamamalı.
+  assert.equal(parseClaimsFromRaw([msg(payload()), '{"type":"item.star'].join("\n")), null);
+});

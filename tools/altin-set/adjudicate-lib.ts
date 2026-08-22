@@ -149,7 +149,7 @@ export function decideCompleteness(
   // ayrıştırılamaz ama sıralı birleşimi ayrıştırılabilir. KATI ayrıştırma —
   // gerekçesi `parseClaimsJoined`'da.
   if (candidates.length > 1) {
-    const joined = parseClaimsJoined(candidates.join("\n"));
+    const joined = parseClaimsJoined(candidates);
     if (joined !== null) return { complete: true, claims: joined.length };
   }
   return { complete: false, claims: 0 };
@@ -200,15 +200,28 @@ export function streamMessageCandidates(
   for (const line of text.split("\n")) {
     const s = line.trim();
     if (s === "") continue;
+    // `{` ile başlamayan satır ne olaydır ne de kesilme izi — koşucunun
+    // `handleLine`'ıyla parite (adjudicate-cost.ts, ürün: codex.ts:245).
+    // GEREKÇE ORADA ÖLÇÜLÜ: gerçek akışta ilerleme/uyarı satırları düz metin
+    // geliyor. Bunları kesilme sayan bir ara sürüm SAĞLAM koşumları düşürürdü
+    // — ıraksamayı kapatırken yeni bir ıraksama açıyordu (yakalayan:
+    // 22 Ağu 2026 doğrulama turu, düzeltmenin kendisini denetleyen lane).
+    if (!s.startsWith("{")) continue;
     let o: Record<string, unknown> & { item?: { type?: string; text?: unknown; content?: unknown } };
     try {
       o = JSON.parse(s);
     } catch {
-      // Yarım/bozuk satır: akış başlamışsa yazan taraf kesilmiş demektir.
-      // Akış başlamadan önceki gürültü hükmü etkilemez.
+      // `{` ile başlayıp ayrıştırılamayan satır yarım yazılmış bir olaydır:
+      // akış başlamışsa yazan taraf kesilmiş demektir.
       if (sawEvent) trailerIntact = false;
       continue;
     }
+    // Üst düzeyde `claims` dizisi taşıyan nesne bir OLAY değil, hükmün
+    // kendisidir. Olay adıyla çakışan bir `type` alanı (`item.completed`)
+    // taşısa bile düz-metin yoluna gitmeli; yoksa geçerli bir çıktı
+    // ayrıştırılamaz sayılıyor. Şema bu alanı yasaklıyor ama opencode yolunda
+    // şema ZORLANMIYOR, yani kural burada da durmalı.
+    if (Array.isArray((o as { claims?: unknown }).claims)) continue;
     const type = typeof o?.type === "string" ? o.type : "";
     if (!KNOWN_EVENT_TYPES.has(type)) {
       // Koşucu bu satırı "bilinmeyen olay" sayıp DEVAM ediyor. Eski hâl burada
@@ -241,9 +254,9 @@ export function streamMessageCandidates(
  * kalan son cevabın yerine ÖNCEKİ mesajın iddialarını geçiriyordu (ölçüldü
  * 22 Ağu 2026, codex-audit). Bölünmüş küme birleşince zaten geçerli JSON olur.
  */
-function parseClaimsJoined(text: string): unknown[] | null {
+function parseClaimsJoined(parts: string[]): unknown[] | null {
   try {
-    const parsed = JSON.parse(text.replace(/```(?:json)?/gi, "").trim());
+    const parsed = JSON.parse(parts.join("\n").replace(/```(?:json)?/gi, "").trim());
     return Array.isArray((parsed as { claims?: unknown })?.claims)
       ? (parsed as { claims: unknown[] }).claims
       : null;
@@ -265,7 +278,7 @@ export function parseClaimsFromRaw(text: string): unknown[] | null {
   const last = stream.candidates[stream.candidates.length - 1]!;
   const direct = parseClaimsArray(last);
   if (direct !== null) return direct;
-  return stream.candidates.length > 1 ? parseClaimsJoined(stream.candidates.join("\n")) : null;
+  return stream.candidates.length > 1 ? parseClaimsJoined(stream.candidates) : null;
 }
 
 /**
