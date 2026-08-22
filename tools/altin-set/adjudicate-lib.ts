@@ -137,69 +137,135 @@ export function parseClaimsArray(text: string): unknown[] | null {
 export function decideCompleteness(
   candidates: string[],
   lastItemIsMessage: boolean,
+  trailerIntact = true,
 ): { complete: boolean; claims: number } {
-  if (!lastItemIsMessage || candidates.length === 0) return { complete: false, claims: 0 };
-  const tries = [candidates[candidates.length - 1]!];
+  if (!lastItemIsMessage || !trailerIntact || candidates.length === 0) {
+    return { complete: false, claims: 0 };
+  }
+  const last = candidates[candidates.length - 1]!;
+  const n = parseClaimsCount(last);
+  if (n !== null) return { complete: true, claims: n };
   // Birleşim fallback'i: küme birden çok item'a bölünmüşse tek parça
-  // ayrıştırılamaz ama sıralı birleşimi ayrıştırılabilir.
-  if (candidates.length > 1) tries.push(candidates.join("\n"));
-  for (const t of tries) {
-    const n = parseClaimsCount(t);
-    if (n !== null) return { complete: true, claims: n };
+  // ayrıştırılamaz ama sıralı birleşimi ayrıştırılabilir. KATI ayrıştırma —
+  // gerekçesi `parseClaimsJoined`'da.
+  if (candidates.length > 1) {
+    const joined = parseClaimsJoined(candidates.join("\n"));
+    if (joined !== null) return { complete: true, claims: joined.length };
   }
   return { complete: false, claims: 0 };
+}
+
+/**
+ * Koşucu (adjudicate-cost.ts) ile buranın AYNI kümeyi tanıması için tek kaynak.
+ * `usage` taşımayan `turn.completed` de tanınan bir olaydır; adını bilmediğimiz
+ * her şey "bilinmeyen olay" sayılıp atlanır — koşucunun davranışı.
+ */
+export const KNOWN_EVENT_TYPES = new Set(["item.completed", "turn.completed"]);
+
+/** Modelin kendi cevabı olan tamamlanmış item'ın metni; değilse null. */
+export function agentMessageText(
+  item?: { type?: unknown; text?: unknown; content?: unknown },
+): string | null {
+  const raw = item?.text ?? item?.content;
+  const txt = typeof raw === "string" ? raw : "";
+  // YÜKLEM "reasoning DEĞİL" değil, "agent_message"tir. Ölçüldü 22 Ağu 2026
+  // (codex-audit): 29 gerçek ham dosyada 688 `command_execution` item'ı var ve
+  // bugün yalnızca `text`/`content` alanları string OLMADIĞI için eleniyorlar.
+  // Codex o alanı bir gün doldurursa komut çıktısı modelin hükmü sayılırdı.
+  // Sıkılaştırmanın o 29 dosyada aday kümesini değiştirmediği ayrıca ölçüldü.
+  return txt.length > 0 && item?.type === "agent_message" ? txt : null;
 }
 
 /**
  * `codex exec --json` olay akışından mesaj adaylarını çıkarır; metin bir olay
  * akışı DEĞİLSE null döner (çağıran düz-metin yoluna düşer).
  *
- * Kural kümesi koşucununkinin (adjudicate-cost.ts item.completed dalı)
- * AYNASI: reasoning item'ları asla aday olmaz, "son item mesaj mı" bilgisi her
- * item.completed'da tazelenir. Ölçülmüş sebep (20 Ağu 2026, ilk gerçek duman
- * koşumu): koşucu 15 iddia sayarken flatten AYNI ham dosyayı ayrıştıramadı —
- * iki ayrıştırıcı ıraksamıştı; akış yolu artık tek yerde.
+ * Koşucuyla ORTAK OLAN, paylaşılan `KNOWN_EVENT_TYPES` ve `agentMessageText`
+ * — kopyalanan kural değil, çağrılan tek kaynak. (Yorumun eski hâli "akış yolu
+ * artık tek yerde" diyordu; değildi, iki bağımsız uygulama duruyordu. Ölçüldü
+ * 22 Ağu 2026, hygiene lensi.) Ayrıştırmanın DÖNGÜSÜ hâlâ iki yerde, çünkü
+ * koşucu canlı akışı satır satır, burası bitmiş dosyayı bir kerede okuyor.
+ *
+ * `trailerIntact`: son ajan mesajından SONRA akışın kesildiğini gösteren bir iz
+ * var mı. Kesik koşumun kısmi iddiaları skor hattına sızmasın diye; ölçüldü
+ * 22 Ağu 2026 (codex-audit), dört ayrı kuyruk sınıfı "tam" damgası alıyordu.
  */
 export function streamMessageCandidates(
   text: string,
-): { candidates: string[]; lastItemIsMessage: boolean } | null {
+): { candidates: string[]; lastItemIsMessage: boolean; trailerIntact: boolean } | null {
   let sawEvent = false;
   const candidates: string[] = [];
   let lastItemIsMessage = false;
+  let trailerIntact = true;
   for (const line of text.split("\n")) {
     const s = line.trim();
     if (s === "") continue;
     let o: Record<string, unknown> & { item?: { type?: string; text?: unknown; content?: unknown } };
-    try { o = JSON.parse(s); } catch { continue; }
-    if (typeof o?.type !== "string") return null;
+    try {
+      o = JSON.parse(s);
+    } catch {
+      // Yarım/bozuk satır: akış başlamışsa yazan taraf kesilmiş demektir.
+      // Akış başlamadan önceki gürültü hükmü etkilemez.
+      if (sawEvent) trailerIntact = false;
+      continue;
+    }
+    const type = typeof o?.type === "string" ? o.type : "";
+    if (!KNOWN_EVENT_TYPES.has(type)) {
+      // Koşucu bu satırı "bilinmeyen olay" sayıp DEVAM ediyor. Eski hâl burada
+      // tüm dosya için null dönüyordu, yani tek bir yabancı satır 15 iddiayı
+      // sıfırlıyordu (ölçüldü 22 Ağu 2026, parser-divergence: 15 girdi
+      // sınıfının 7'si ıraksıyordu). Yalnız `item.*` bir kuyruk izidir.
+      if (sawEvent && type.startsWith("item.")) trailerIntact = false;
+      continue;
+    }
     sawEvent = true;
-    if (o.type !== "item.completed") continue;
-    const rawTxt = o.item?.text ?? o.item?.content;
-    const txt = typeof rawTxt === "string" ? rawTxt : "";
-    const isMessage = txt.length > 0 && o.item?.type !== "reasoning";
-    lastItemIsMessage = isMessage;
-    if (isMessage) candidates.push(txt);
+    if (type !== "item.completed") continue;
+    const txt = agentMessageText(o.item);
+    lastItemIsMessage = txt !== null;
+    if (txt !== null) {
+      candidates.push(txt);
+      trailerIntact = true; // yeni mesaj, önceki kuyruk izi geçersiz
+    } else {
+      trailerIntact = false;
+    }
   }
-  return sawEvent ? { candidates, lastItemIsMessage } : null;
+  return sawEvent ? { candidates, lastItemIsMessage, trailerIntact } : null;
 }
 
 /**
- * Ham dosya içeriğinden iddia dizisi: olay akışıysa adaylar üzerinden
- * (decideCompleteness ile aynı kurtarma sırası: son aday → sıralı birleşim),
- * değilse düz metin yolu. Eksik akış (mesajla bitmeyen) null'dur — kısmi
- * iddiaların skor hattına sızmaması `decideCompleteness`'taki guard'la aynı.
+ * Aday metinlerin sıralı birleşimini YALNIZ katı ayrıştırmayla dener.
+ *
+ * Birleşim fallback'i tek bir kümenin iki item'a BÖLÜNMÜŞ hâlini onarmak için
+ * var. `parseClaimsArray`'in dengeli-blok kurtarması birleşime uygulanınca
+ * bambaşka bir iş yapıyordu: metindeki İLK tam nesneyi seçiyor, yani yarım
+ * kalan son cevabın yerine ÖNCEKİ mesajın iddialarını geçiriyordu (ölçüldü
+ * 22 Ağu 2026, codex-audit). Bölünmüş küme birleşince zaten geçerli JSON olur.
+ */
+function parseClaimsJoined(text: string): unknown[] | null {
+  try {
+    const parsed = JSON.parse(text.replace(/```(?:json)?/gi, "").trim());
+    return Array.isArray((parsed as { claims?: unknown })?.claims)
+      ? (parsed as { claims: unknown[] }).claims
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ham dosya içeriğinden iddia dizisi: olay akışıysa adaylar üzerinden,
+ * değilse düz metin yolu. Eksik akış (mesajla bitmeyen ya da mesajdan sonra
+ * kesilme izi taşıyan) null'dur — kısmi iddiaların skor hattına sızmaması
+ * `decideCompleteness`'taki guard'la aynı.
  */
 export function parseClaimsFromRaw(text: string): unknown[] | null {
   const stream = streamMessageCandidates(text);
   if (stream === null) return parseClaimsArray(text);
-  if (!stream.lastItemIsMessage || stream.candidates.length === 0) return null;
-  const tries = [stream.candidates[stream.candidates.length - 1]!];
-  if (stream.candidates.length > 1) tries.push(stream.candidates.join("\n"));
-  for (const t of tries) {
-    const claims = parseClaimsArray(t);
-    if (claims !== null) return claims;
-  }
-  return null;
+  if (!stream.lastItemIsMessage || !stream.trailerIntact || stream.candidates.length === 0) return null;
+  const last = stream.candidates[stream.candidates.length - 1]!;
+  const direct = parseClaimsArray(last);
+  if (direct !== null) return direct;
+  return stream.candidates.length > 1 ? parseClaimsJoined(stream.candidates.join("\n")) : null;
 }
 
 /**

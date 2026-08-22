@@ -60,6 +60,7 @@ import {
   type Usage, addUsage, totalTokens,
   decideCompleteness, appendTail, cleanupCommand, validateRoot, validateNoteName, validateOutPath,
   buildPrompt, adjudicatorSchema, authorshipBound, purgeStaleArtifacts,
+  KNOWN_EVENT_TYPES, agentMessageText,
 } from "./adjudicate-lib.ts";
 
 // --evidence: mekanik katmanın ZATEN ölçtüğü çapa kanıtını isteme koyar.
@@ -136,7 +137,8 @@ type Cap = { kind: "time" | "items" | "tokens"; limit: number; observed: number 
  * Ürünle (`core/src/adapters/codex.ts:217`) aynı küme — araç ürünün göreceği
  * akışı ölçmeli, kendi genişletilmiş kümesini değil.
  */
-const KNOWN_EVENT_TYPES = new Set(["item.completed", "turn.completed"]);
+// Küme artık `adjudicate-lib.ts`'ten geliyor: dosya ayrıştırıcısıyla aynı
+// kaynaktan okunmazsa ikisi sessizce ıraksıyor (20 Ağu 2026'da ıraksadı).
 
 // SIGKILL'den sonra çekirdeğin süreci toplaması milisaniyeler sürer; 5 sn
 // cömert bir üst sınır. Bu süre dolduysa kill GERÇEKTEN tutmamıştır.
@@ -332,6 +334,11 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     // birleşiminden çıkarılır (finish içinde).
     const verdictTexts: string[] = [];
     let lastItemIsMessage = false;
+    // Son mesajdan SONRA akışın kesildiğini gösteren iz: yarım satır ya da
+    // tamamlanmamış bir item. Ölçüldü 22 Ağu 2026 (codex-audit): bu iz
+    // okunmadığında kesik koşum "tam" damgası alıp kısmi iddialarını skor
+    // hattına sızdırıyordu — sözleşmenin engellemek için var olduğu şey.
+    let trailerIntact = true;
     let cap: Cap | null = null;
     // Süreç kapandıktan SONRA kill YASAK: PID'yi işletim sistemi geri
     // dönüştürmüş olabilir ve kill(-pid) alakasız bir grubu vurur. Gerçek yol:
@@ -397,7 +404,10 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
         o = JSON.parse(s);
       } catch {
         unparsedLines++;
-        return; // bozuk/yarım satır ölçümü düşürmez, yalnız sayılır
+        // Sayılır AMA hükmü de etkiler: akış başladıktan sonraki yarım satır
+        // yazan tarafın kesildiğinin doğrudan izi.
+        if (items > 0 || turns > 0) trailerIntact = false;
+        return;
       }
       const type = typeof o?.type === "string" ? o.type : "";
       // TANINMAYAN OLAY: ayrıştırıldı ama adı beklenen kümede değil. `usage`
@@ -405,6 +415,9 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       // sayaca yalnız adını hiç bilmediğimiz olay girer.
       if (!KNOWN_EVENT_TYPES.has(type)) {
         unknownEvents++;
+        // Tamamlanmamış bir item (`item.started` vb.) son mesajdan sonra
+        // geldiyse akış orada kesilmiştir.
+        if ((items > 0 || turns > 0) && type.startsWith("item.")) trailerIntact = false;
         return; // ölçümü değiştirmeyen satır tavanı da değiştiremez
       }
       if (type === "turn.completed") {
@@ -432,11 +445,13 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
         // adjudicate-empty-claims-rejected). Aday = reasoning OLMAYAN, metni
         // boş olmayan item; tamlık hükmünü yalnız yapısal ayrıştırma veriyor
         // (adjudicate-lib.ts:decideCompleteness).
-        const isMessage = txt.length > 0 && o.item?.type !== "reasoning";
+        const messageText = agentMessageText(o.item as { type?: unknown; text?: unknown; content?: unknown });
+        const isMessage = messageText !== null;
         // Akışın SON item'ı böyle bir mesaj mı: tamlık kanıtının ön koşulu
         // (decideCompleteness'taki guard). Her item.completed'da yeniden
         // yazılıyor, yani "en son ne geldi" bilgisi taze kalıyor.
         lastItemIsMessage = isMessage;
+        trailerIntact = isMessage; // yeni mesaj kuyruk izini sıfırlar, mesaj-dışı item iz bırakır
         if (isMessage) {
           verdictTexts.push(txt);
           // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
@@ -485,7 +500,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       // Tek örneklem olduğu için HATA YÖNÜ BİLİNÇLİ SEÇİLDİ: akış ileride
       // mesaj-dışı bir item'la biterse not GÜRÜLTÜLÜ şekilde `olculemez`
       // olur (görülür ve düzeltilir), sessizce sızmaz.
-      const verdict = decideCompleteness(verdictTexts, lastItemIsMessage);
+      const verdict = decideCompleteness(verdictTexts, lastItemIsMessage, trailerIntact);
       claimsComplete = verdict.complete;
       if (verdict.complete) claims = Math.max(claims, verdict.claims);
       let leakedPid: number | null = null;
