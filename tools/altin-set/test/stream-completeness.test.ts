@@ -102,6 +102,14 @@ test("olay adıyla çakışan type taşıyan düz claims belgesi akış sanılma
   }
 });
 
+test("JSON string'inin içinden bölünmüş küme de onarılır", () => {
+  // Birleşim ayıracı `\n` olsaydı geçerli baytlar geçersiz JSON olurdu.
+  const whole = JSON.stringify({ claims: [{ ...CLAIM, text: "boundary" }] });
+  const cut = whole.indexOf("boundary") + 4; // "boun" | "dary"
+  const raw = [msg(whole.slice(0, cut), "a"), msg(whole.slice(cut), "b")].join("\n");
+  assert.equal((parseClaimsFromRaw(raw)?.[0] as { text: string }).text, "boundary");
+});
+
 test("{ ile başlayıp ayrıştırılamayan kuyruk hâlâ kesilme izidir", () => {
   // Düz metin muafiyeti yarım yazılmış OLAYI kapsamamalı.
   assert.equal(parseClaimsFromRaw([msg(payload()), '{"type":"item.star'].join("\n")), null);

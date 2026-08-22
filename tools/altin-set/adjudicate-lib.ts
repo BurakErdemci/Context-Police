@@ -255,14 +255,21 @@ export function streamMessageCandidates(
  * 22 Ağu 2026, codex-audit). Bölünmüş küme birleşince zaten geçerli JSON olur.
  */
 function parseClaimsJoined(parts: string[]): unknown[] | null {
-  try {
-    const parsed = JSON.parse(parts.join("\n").replace(/```(?:json)?/gi, "").trim());
-    return Array.isArray((parsed as { claims?: unknown })?.claims)
-      ? (parsed as { claims: unknown[] }).claims
-      : null;
-  } catch {
-    return null;
+  // AYIRAÇSIZ önce: küme iki item'a bölündüyse orijinal belgede o sınırda
+  // hiçbir karakter YOKTU. `\n` sokmak jetonlar arasında zararsız ama bir JSON
+  // STRING'inin içine düşen bölünmede geçerli baytları geçersiz yapıyor
+  // (ölçüldü 22 Ağu 2026, doğrulama turu). `\n`'li deneme geride kalıyor:
+  // koşucunun eski davranışıydı ve tek başına ayrıştırılabilen bir birleşimi
+  // kaybetmemek için duruyor.
+  for (const joined of [parts.join(""), parts.join("\n")]) {
+    try {
+      const parsed = JSON.parse(joined.replace(/```(?:json)?/gi, "").trim());
+      if (Array.isArray((parsed as { claims?: unknown })?.claims)) {
+        return (parsed as { claims: unknown[] }).claims;
+      }
+    } catch { /* sıradaki ayıraç */ }
   }
+  return null;
 }
 
 /**
