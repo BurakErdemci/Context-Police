@@ -107,13 +107,17 @@ export function parseClaimsCount(text: string): number | null {
 /** `parseClaimsCount`'un ham hâli: aynı kurtarma sırası, sayı yerine dizinin kendisi. */
 export function parseClaimsArray(text: string): unknown[] | null {
   const stripped = text.replace(/```(?:json)?/gi, "").trim();
+  // Bloklar SONDAN öne: metnin tamamı ayrıştırılabiliyorsa o kazanır, değilse
+  // en sondaki geçerli claims bloğu — gerekçesi `balancedBlocks`'ta.
   const tries = [stripped];
   const block = firstBalancedBlock(stripped);
   if (block !== null && block !== stripped) tries.push(block);
   for (const t of tries) {
     try {
       const parsed = JSON.parse(t);
-      if (Array.isArray(parsed?.claims)) return parsed.claims;
+      if (Array.isArray((parsed as { claims?: unknown })?.claims)) {
+        return (parsed as { claims: unknown[] }).claims;
+      }
     } catch { /* sıradaki deneme */ }
   }
   return null;
@@ -137,9 +141,9 @@ export function parseClaimsArray(text: string): unknown[] | null {
 export function decideCompleteness(
   candidates: string[],
   lastItemIsMessage: boolean,
-  trailerIntact = true,
+  runClosed = true,
 ): { complete: boolean; claims: number } {
-  if (!lastItemIsMessage || !trailerIntact || candidates.length === 0) {
+  if (!lastItemIsMessage || !runClosed || candidates.length === 0) {
     return { complete: false, claims: 0 };
   }
   const last = candidates[candidates.length - 1]!;
@@ -180,69 +184,59 @@ export function agentMessageText(
  * `codex exec --json` olay akışından mesaj adaylarını çıkarır; metin bir olay
  * akışı DEĞİLSE null döner (çağıran düz-metin yoluna düşer).
  *
- * Koşucuyla ORTAK OLAN, paylaşılan `KNOWN_EVENT_TYPES` ve `agentMessageText`
- * — kopyalanan kural değil, çağrılan tek kaynak. (Yorumun eski hâli "akış yolu
- * artık tek yerde" diyordu; değildi, iki bağımsız uygulama duruyordu. Ölçüldü
- * 22 Ağu 2026, hygiene lensi.) Ayrıştırmanın DÖNGÜSÜ hâlâ iki yerde, çünkü
- * koşucu canlı akışı satır satır, burası bitmiş dosyayı bir kerede okuyor.
+ * Koşucuyla ORTAK OLAN, paylaşılan `KNOWN_EVENT_TYPES` ve `agentMessageText`.
+ * Ayrıştırmanın DÖNGÜSÜ iki yerde, çünkü koşucu canlı akışı satır satır,
+ * burası bitmiş dosyayı bir kerede okuyor.
  *
- * `trailerIntact`: son ajan mesajından SONRA akışın kesildiğini gösteren bir iz
- * var mı. Kesik koşumun kısmi iddiaları skor hattına sızmasın diye; ölçüldü
- * 22 Ağu 2026 (codex-audit), dört ayrı kuyruk sınıfı "tam" damgası alıyordu.
+ * TAMLIK ÖLÇÜTÜ DOĞRUDAN SİNYALDİR, sezgi değil: son ajan mesajından sonra
+ * bir `turn.completed` gelmiş mi. Ölçüldü 22 Ağu 2026: kayıtlı 29 ham dosyanın
+ * **29'u** `turn.completed` ile bitiyor; kesilmiş bir önek bitmiyor.
+ *
+ * Bu tek ölçüt, önceki üç sürümün ayrı ayrı kovaladığı kuyruk sınıflarını
+ * (yarım JSON satırı, `item.started` kuyruğu, tamamlanmamış komut item'ı)
+ * birden yutuyor — hepsi "koşum bitmedi"nin farklı yüzleriydi. O sürümlerin
+ * her biri denetimde yeni bir açık verdi, ve ikisi SAĞLAM koşumları düşüren
+ * yönde yanlıştı; dolaylı iz aramak yaklaşımın kendisiydi (iki doğrulama turu,
+ * dört blocker). Sinyal akışın içinde duruyordu.
  */
 export function streamMessageCandidates(
   text: string,
-): { candidates: string[]; lastItemIsMessage: boolean; trailerIntact: boolean } | null {
+): { candidates: string[]; lastItemIsMessage: boolean; runClosed: boolean } | null {
   let sawEvent = false;
   const candidates: string[] = [];
   let lastItemIsMessage = false;
-  let trailerIntact = true;
+  let runClosed = false;
   for (const line of text.split("\n")) {
     const s = line.trim();
     if (s === "") continue;
-    // `{` ile başlamayan satır ne olaydır ne de kesilme izi — koşucunun
-    // `handleLine`'ıyla parite (adjudicate-cost.ts, ürün: codex.ts:245).
-    // GEREKÇE ORADA ÖLÇÜLÜ: gerçek akışta ilerleme/uyarı satırları düz metin
-    // geliyor. Bunları kesilme sayan bir ara sürüm SAĞLAM koşumları düşürürdü
-    // — ıraksamayı kapatırken yeni bir ıraksama açıyordu (yakalayan:
-    // 22 Ağu 2026 doğrulama turu, düzeltmenin kendisini denetleyen lane).
+    // `{` ile başlamayan satır ne olaydır ne de kanıt — koşucunun
+    // `handleLine`'ıyla parite (ürün: codex.ts:245). Gerçek akışta
+    // ilerleme/uyarı satırları düz metin geliyor.
     if (!s.startsWith("{")) continue;
     let o: Record<string, unknown> & { item?: { type?: string; text?: unknown; content?: unknown } };
-    try {
-      o = JSON.parse(s);
-    } catch {
-      // `{` ile başlayıp ayrıştırılamayan satır yarım yazılmış bir olaydır:
-      // akış başlamışsa yazan taraf kesilmiş demektir.
-      if (sawEvent) trailerIntact = false;
+    try { o = JSON.parse(s); } catch { continue; }
+    // Üst düzeyde `claims` dizisi taşıyan nesne bir olay değil, hükmün
+    // kendisidir — olay adıyla çakışan bir `type` taşısa bile. Aday olarak
+    // TUTULUYOR: yalnız atlansaydı, önünde tanınan bir olay bulunan geçerli
+    // bir hüküm belgesi ayrıştırılamaz sayılırdı (2. doğrulama turu).
+    if (Array.isArray((o as { claims?: unknown }).claims)) {
+      candidates.push(s);
+      lastItemIsMessage = true;
       continue;
     }
-    // Üst düzeyde `claims` dizisi taşıyan nesne bir OLAY değil, hükmün
-    // kendisidir. Olay adıyla çakışan bir `type` alanı (`item.completed`)
-    // taşısa bile düz-metin yoluna gitmeli; yoksa geçerli bir çıktı
-    // ayrıştırılamaz sayılıyor. Şema bu alanı yasaklıyor ama opencode yolunda
-    // şema ZORLANMIYOR, yani kural burada da durmalı.
-    if (Array.isArray((o as { claims?: unknown }).claims)) continue;
     const type = typeof o?.type === "string" ? o.type : "";
-    if (!KNOWN_EVENT_TYPES.has(type)) {
-      // Koşucu bu satırı "bilinmeyen olay" sayıp DEVAM ediyor. Eski hâl burada
-      // tüm dosya için null dönüyordu, yani tek bir yabancı satır 15 iddiayı
-      // sıfırlıyordu (ölçüldü 22 Ağu 2026, parser-divergence: 15 girdi
-      // sınıfının 7'si ıraksıyordu). Yalnız `item.*` bir kuyruk izidir.
-      if (sawEvent && type.startsWith("item.")) trailerIntact = false;
-      continue;
-    }
+    // Koşucu tanımadığı olayı sayıp DEVAM ediyor; ayrıştırıcı da öyle.
+    if (!KNOWN_EVENT_TYPES.has(type)) continue;
     sawEvent = true;
-    if (type !== "item.completed") continue;
+    if (type === "turn.completed") { runClosed = true; continue; }
     const txt = agentMessageText(o.item);
     lastItemIsMessage = txt !== null;
     if (txt !== null) {
       candidates.push(txt);
-      trailerIntact = true; // yeni mesaj, önceki kuyruk izi geçersiz
-    } else {
-      trailerIntact = false;
+      runClosed = false; // bu mesajdan sonra turun kapandığını yeniden görmeliyiz
     }
   }
-  return sawEvent ? { candidates, lastItemIsMessage, trailerIntact } : null;
+  return sawEvent ? { candidates, lastItemIsMessage, runClosed } : null;
 }
 
 /**
@@ -255,19 +249,25 @@ export function streamMessageCandidates(
  * 22 Ağu 2026, codex-audit). Bölünmüş küme birleşince zaten geçerli JSON olur.
  */
 function parseClaimsJoined(parts: string[]): unknown[] | null {
-  // AYIRAÇSIZ önce: küme iki item'a bölündüyse orijinal belgede o sınırda
-  // hiçbir karakter YOKTU. `\n` sokmak jetonlar arasında zararsız ama bir JSON
-  // STRING'inin içine düşen bölünmede geçerli baytları geçersiz yapıyor
-  // (ölçüldü 22 Ağu 2026, doğrulama turu). `\n`'li deneme geride kalıyor:
-  // koşucunun eski davranışıydı ve tek başına ayrıştırılabilen bir birleşimi
-  // kaybetmemek için duruyor.
-  for (const joined of [parts.join(""), parts.join("\n")]) {
-    try {
-      const parsed = JSON.parse(joined.replace(/```(?:json)?/gi, "").trim());
-      if (Array.isArray((parsed as { claims?: unknown })?.claims)) {
-        return (parsed as { claims: unknown[] }).claims;
-      }
-    } catch { /* sıradaki ayıraç */ }
+  // SON EKLER, kısadan uzuna: bölünmüş belge adayların SONUNDA duruyor, ama
+  // ondan önce sıradan bir ilerleme mesajı olabilir ve o mesaj birleşime
+  // girerse hiçbir ayıraçla geçerli JSON çıkmıyor — sağlam koşum reddediliyordu
+  // (ölçüldü 22 Ağu 2026, 2. doğrulama turu).
+  //
+  // Ayıraç önce BOŞ: küme iki item'a bölündüyse orijinal belgede o sınırda
+  // hiçbir karakter yoktu. `\n` bir JSON STRING'inin içine düşen bölünmede
+  // geçerli baytları geçersiz yapıyor; geride duruyor çünkü koşucunun eski
+  // davranışıydı ve yalnız öyle ayrıştırılabilen bir birleşimi kaybetmemeli.
+  {
+    const tail = parts;
+    for (const joined of [tail.join(""), tail.join("\n")]) {
+      try {
+        const parsed = JSON.parse(joined.replace(/```(?:json)?/gi, "").trim());
+        if (Array.isArray((parsed as { claims?: unknown })?.claims)) {
+          return (parsed as { claims: unknown[] }).claims;
+        }
+      } catch { /* sıradaki */ }
+    }
   }
   return null;
 }
@@ -281,7 +281,7 @@ function parseClaimsJoined(parts: string[]): unknown[] | null {
 export function parseClaimsFromRaw(text: string): unknown[] | null {
   const stream = streamMessageCandidates(text);
   if (stream === null) return parseClaimsArray(text);
-  if (!stream.lastItemIsMessage || !stream.trailerIntact || stream.candidates.length === 0) return null;
+  if (!stream.lastItemIsMessage || !stream.runClosed || stream.candidates.length === 0) return null;
   const last = stream.candidates[stream.candidates.length - 1]!;
   const direct = parseClaimsArray(last);
   if (direct !== null) return direct;

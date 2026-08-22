@@ -334,11 +334,11 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
     // birleşiminden çıkarılır (finish içinde).
     const verdictTexts: string[] = [];
     let lastItemIsMessage = false;
-    // Son mesajdan SONRA akışın kesildiğini gösteren iz: yarım satır ya da
-    // tamamlanmamış bir item. Ölçüldü 22 Ağu 2026 (codex-audit): bu iz
-    // okunmadığında kesik koşum "tam" damgası alıp kısmi iddialarını skor
-    // hattına sızdırıyordu — sözleşmenin engellemek için var olduğu şey.
-    let trailerIntact = true;
+    // Son ajan mesajından SONRA turun kapandığını gördük mü. Doğrudan sinyal;
+    // kayıtlı 29 ham dosyanın 29'u `turn.completed` ile bitiyor, kesik önek
+    // bitmiyor (ölçüldü 22 Ağu 2026). Dolaylı kuyruk izleri kovalayan üç ara
+    // sürüm denetimde dört blocker verdi, ikisi SAĞLAM koşumu düşüren yönde.
+    let runClosed = false;
     let cap: Cap | null = null;
     // Süreç kapandıktan SONRA kill YASAK: PID'yi işletim sistemi geri
     // dönüştürmüş olabilir ve kill(-pid) alakasız bir grubu vurur. Gerçek yol:
@@ -404,10 +404,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
         o = JSON.parse(s);
       } catch {
         unparsedLines++;
-        // Sayılır AMA hükmü de etkiler: akış başladıktan sonraki yarım satır
-        // yazan tarafın kesildiğinin doğrudan izi.
-        if (items > 0 || turns > 0) trailerIntact = false;
-        return;
+        return; // bozuk/yarım satır ölçümü düşürmez, yalnız sayılır
       }
       const type = typeof o?.type === "string" ? o.type : "";
       // TANINMAYAN OLAY: ayrıştırıldı ama adı beklenen kümede değil. `usage`
@@ -415,13 +412,11 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       // sayaca yalnız adını hiç bilmediğimiz olay girer.
       if (!KNOWN_EVENT_TYPES.has(type)) {
         unknownEvents++;
-        // Tamamlanmamış bir item (`item.started` vb.) son mesajdan sonra
-        // geldiyse akış orada kesilmiştir.
-        if ((items > 0 || turns > 0) && type.startsWith("item.")) trailerIntact = false;
         return; // ölçümü değiştirmeyen satır tavanı da değiştiremez
       }
       if (type === "turn.completed") {
         turns++;
+        runClosed = true;
         if (o.usage) usage = addUsage(usage, o.usage);
       }
       if (type === "item.completed") {
@@ -451,8 +446,8 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
         // (decideCompleteness'taki guard). Her item.completed'da yeniden
         // yazılıyor, yani "en son ne geldi" bilgisi taze kalıyor.
         lastItemIsMessage = isMessage;
-        trailerIntact = isMessage; // yeni mesaj kuyruk izini sıfırlar, mesaj-dışı item iz bırakır
         if (isMessage) {
+          runClosed = false; // bu mesajdan sonra turun kapandığını yeniden görmeliyiz
           verdictTexts.push(txt);
           // Tamlık kanıtı DEĞİL: yarım metinde de sayı üretir. Yalnız
           // "kaç iddia görünüyor" bilgisi için. Hüküm `finish`te veriliyor.
@@ -500,7 +495,7 @@ function runCodex(prompt: string, schemaPath: string): Promise<{
       // Tek örneklem olduğu için HATA YÖNÜ BİLİNÇLİ SEÇİLDİ: akış ileride
       // mesaj-dışı bir item'la biterse not GÜRÜLTÜLÜ şekilde `olculemez`
       // olur (görülür ve düzeltilir), sessizce sızmaz.
-      const verdict = decideCompleteness(verdictTexts, lastItemIsMessage, trailerIntact);
+      const verdict = decideCompleteness(verdictTexts, lastItemIsMessage, runClosed);
       claimsComplete = verdict.complete;
       if (verdict.complete) claims = Math.max(claims, verdict.claims);
       let leakedPid: number | null = null;
