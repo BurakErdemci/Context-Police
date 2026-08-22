@@ -56,15 +56,34 @@ export function totalTokens(u: Usage): number {
 }
 
 /**
- * İlk `{`'dan başlayıp DENGELİ parantez sayarak ilk kapanan bloğu döndürür.
+ * Index of the `}` closing the block opened at `open` (s[open] must be `{`),
+ * or -1 if the string ends first. Braces inside JSON string literals do not
+ * count, and `\"` inside a string does not close it.
  *
- * Neden `lastIndexOf("}")` değil: geçerli JSON'un ARKASINDA süslü parantez
- * içeren düz metin varsa ("… {bkz. şema} …") son `}` yanlış yeri kapatıyor ve
- * kurtarma tutmuyordu. Dize içindeki parantezler sayılmaz — kaçış karakteri
- * takip ediliyor.
+ * Not `lastIndexOf("}")`: plain text with braces after valid JSON ("… see
+ * schema …") made the last `}` close the wrong spot and recovery missed.
  */
+function closeIndex(s: string, open: number): number {
+  let depth = 1;
+  let inStr = false;
+  let esc = false;
+  for (let i = open + 1; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i;
+  }
+  return -1;
+}
+
 /**
- * Metindeki TÜM dengeli `{…}` blokları, sırayla.
+ * Every balanced `{…}` block in the text, in order.
  *
  * `firstBalancedBlock` yalnız ilkini veriyordu ve bu, kurtarma katmanının
  * amacını sessizce bozuyordu: model cevabından ÖNCE biçimi örnekleyen bir
@@ -72,6 +91,9 @@ export function totalTokens(u: Usage): number {
  * bakılmadan atılıyordu (ölçüldü 22 Ağu 2026, 2. doğrulama turu — bir
  * demotion'ı deviren kanıt). Çağıran artık SONUNCU ayrıştırılabilir bloğu
  * seçiyor: model hükmünü sonda veriyor, örnek önde duruyor.
+ *
+ * Walks the string once: candidates and blocks are tracked by index only;
+ * `slice` runs once per emitted block, never to re-scan input.
  */
 export function balancedBlocks(s: string): string[] {
   const out: string[] = [];
@@ -79,17 +101,17 @@ export function balancedBlocks(s: string): string[] {
   while (from < s.length) {
     const open = s.indexOf("{", from);
     if (open === -1) break;
-    const block = firstBalancedBlock(s.slice(open));
-    if (block === null) {
-      // Dengelenemeyen `{`'ten SONRA taramaya devam: eskiden burada tümden
-      // duruluyordu, yani düzyazıdaki tek bir başıboş süslü parantez arkasındaki
-      // TAM cevabı gizliyor ve sağlam bir koşum reddediliyordu (ölçüldü
-      // 22 Ağu 2026, 3. doğrulama turu — üçüncü kez aynı hata yönü).
+    const end = closeIndex(s, open);
+    if (end === -1) {
+      // Keep scanning AFTER an unbalanced `{`: this used to stop outright,
+      // so a single stray brace in prose hid the COMPLETE answer behind it
+      // and got a sound run rejected (measured 22 Aug 2026, 3rd verification
+      // round — third time in the same error direction).
       from = open + 1;
       continue;
     }
-    out.push(block);
-    from = open + block.length;
+    out.push(s.slice(open, end + 1));
+    from = end + 1;
   }
   return out;
 }
@@ -122,25 +144,18 @@ function claimsFromBlocks(blocks: string[]): unknown[] | null {
   return nonEmpty[nonEmpty.length - 1]!;
 }
 
+/**
+ * The first balanced `{…}` block, counting braces from the first `{`.
+ *
+ * Why not `lastIndexOf("}")`: when plain text containing braces follows valid
+ * JSON ("… {see schema} …") the last `}` closed the wrong place and recovery
+ * stopped working. Braces inside strings do not count; escapes are tracked.
+ */
 export function firstBalancedBlock(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) return s.slice(start, i + 1);
-  }
-  return null;
+  const open = s.indexOf("{");
+  if (open === -1) return null;
+  const end = closeIndex(s, open);
+  return end === -1 ? null : s.slice(open, end + 1);
 }
 
 /**
